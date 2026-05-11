@@ -9,3 +9,4 @@ coverage.txt
 .vscode/
 node_modules/
 web/dist/
+.screenshots/

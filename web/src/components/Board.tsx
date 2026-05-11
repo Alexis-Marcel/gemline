@@ -13,9 +13,12 @@ interface BoardProps {
   onPlay?: (q: number, r: number) => void;
   highlight?: { q: number; r: number } | null;
   disabled?: boolean;
+  /** Stones to animate as "just captured". Rendered on top of the live board
+   *  with a fade-out so the user sees what was removed. */
+  ghosts?: Array<{ q: number; r: number; color: Color; key: string }>;
 }
 
-export function Board({ side, cells, onPlay, highlight, disabled }: BoardProps) {
+export function Board({ side, cells, onPlay, highlight, disabled, ghosts }: BoardProps) {
   const positions = useMemo(() => boardPositions(side), [side]);
 
   // Compute the bounding box from the actual rendered intersection positions
@@ -112,6 +115,33 @@ export function Board({ side, cells, onPlay, highlight, disabled }: BoardProps) 
           </Fragment>
         );
       })}
+
+      {ghosts &&
+        ghosts.map((g) => {
+          const { x, y } = axialToScreen(g.q, g.r, UNIT);
+          const color = gemColor(g.color) ?? "#a1a1aa";
+          return (
+            <Fragment key={g.key}>
+              <circle
+                cx={x}
+                cy={y}
+                r={STONE_RADIUS}
+                fill={color}
+                stroke="#0a0a0a"
+                strokeWidth={1}
+                className="capture-ghost"
+              />
+              <circle
+                cx={x}
+                cy={y}
+                r={STONE_RADIUS}
+                stroke={color}
+                strokeWidth={2}
+                className="capture-ring"
+              />
+            </Fragment>
+          );
+        })}
     </svg>
   );
 }

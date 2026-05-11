@@ -15,3 +15,47 @@ body {
     Roboto,
     sans-serif;
 }
+
+/* Capture animation: the stone fades out while expanding briefly so the
+   removal is legible at a glance. Pure opacity/transform so it's cheap. */
+@keyframes capture-fade {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  35% {
+    opacity: 0.85;
+    transform: scale(1.35);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+.capture-ghost {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: capture-fade 550ms ease-out forwards;
+  pointer-events: none;
+}
+
+/* Companion shockwave: a hollow ring expanding outward to amplify the cue. */
+@keyframes capture-ring {
+  0% {
+    opacity: 0.6;
+    transform: scale(0.8);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.2);
+  }
+}
+
+.capture-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: capture-ring 550ms ease-out forwards;
+  fill: none;
+  pointer-events: none;
+}

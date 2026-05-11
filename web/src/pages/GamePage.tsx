@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
-import type { Game, WinKind } from "../api/types";
+import type { Game, Replay, WinKind } from "../api/types";
 import type { ConnStatus as WsConnStatus } from "../api/gameSocket";
 import { useGameSocket } from "../api/ws";
 import { Board } from "../components/Board";
 import { Objectives } from "../components/Objectives";
+import { ReplayControls } from "../components/ReplayControls";
 import { Scoreboard } from "../components/Scoreboard";
 import { UserNav } from "../components/UserNav";
 import { clearCredentials, loadCredentials, saveCredentials } from "../lib/auth";
 import { gemName } from "../lib/colors";
+import { cellsAtStep, lastMoveAt } from "../lib/replay";
 
 export function GamePage() {
   const { id = "" } = useParams();
@@ -22,6 +24,10 @@ export function GamePage() {
   const [name, setName] = useState("");
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [replay, setReplay] = useState<Replay | null>(null);
+  const [replayStep, setReplayStep] = useState(0);
+  const [replayLoading, setReplayLoading] = useState(false);
 
   // Prefer the most recent snapshot from either the WS stream or a local
   // mutation (e.g. our own move) so the UI never appears stale.
@@ -83,6 +89,25 @@ export function GamePage() {
     }
   }
 
+  async function openReplay() {
+    setReplayLoading(true);
+    setError(null);
+    try {
+      const r = await api.getReplay(id);
+      setReplay(r);
+      setReplayStep(r.steps.length);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Erreur replay");
+    } finally {
+      setReplayLoading(false);
+    }
+  }
+
+  function closeReplay() {
+    setReplay(null);
+    setReplayStep(0);
+  }
+
   function handleLeave() {
     clearCredentials(id);
     setLocalGame(null);
@@ -99,6 +124,14 @@ export function GamePage() {
       </Center>
     );
   }
+
+  // While replay is active, render the board from the replay's reconstructed
+  // cells; clicks are disabled (we don't move from the past).
+  const inReplay = replay !== null;
+  const boardCells = inReplay
+    ? cellsAtStep(replay.boardSide, replay.steps, replayStep)
+    : game.cells;
+  const boardHighlight = inReplay ? lastMoveAt(replay.steps, replayStep) : null;
 
   return (
     <div className="mx-auto flex h-full max-w-6xl flex-col gap-4 p-4 lg:flex-row">
@@ -140,6 +173,25 @@ export function GamePage() {
           </Banner>
         )}
 
+        {inReplay ? (
+          <ReplayControls
+            step={replayStep}
+            total={replay.steps.length}
+            onChange={setReplayStep}
+            onExit={closeReplay}
+          />
+        ) : (
+          game.moveCount > 0 && (
+            <button
+              onClick={openReplay}
+              disabled={replayLoading}
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500 disabled:opacity-50"
+            >
+              {replayLoading ? "Chargement…" : "Revoir la partie"}
+            </button>
+          )
+        )}
+
         <ShareCard id={id} />
 
         {creds && (
@@ -161,10 +213,11 @@ export function GamePage() {
       <main className="flex-1 min-h-0">
         <div className="h-full rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
           <Board
-            side={game.boardSide}
-            cells={game.cells}
-            onPlay={onPlay}
-            disabled={!isMyTurn || game.status !== "playing"}
+            side={inReplay ? replay.boardSide : game.boardSide}
+            cells={boardCells}
+            onPlay={inReplay ? undefined : onPlay}
+            disabled={inReplay || !isMyTurn || game.status !== "playing"}
+            highlight={boardHighlight}
           />
         </div>
       </main>

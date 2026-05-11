@@ -60,6 +60,24 @@ type captureDTO struct {
 	Pair     [2][2]int  `json:"pair"`
 }
 
+// replayStepDTO is one entry in the move-by-move replay of a finished game.
+// captures lists pairs that were removed by this very placement, so a client
+// can render exactly what happened on this turn.
+type replayStepDTO struct {
+	Ordinal  int          `json:"ordinal"`
+	Player   game.Color   `json:"player"`
+	Q        int          `json:"q"`
+	R        int          `json:"r"`
+	Captures []captureDTO `json:"captures"`
+}
+
+type replayDTO struct {
+	GameID    string          `json:"gameId"`
+	BoardSide int             `json:"boardSide"`
+	Players   int             `json:"players"`
+	Steps     []replayStepDTO `json:"steps"`
+}
+
 type moveResponse struct {
 	Game     gameDTO      `json:"game"`
 	Captures []captureDTO `json:"captures"`

@@ -4,6 +4,7 @@ import type {
   JoinResponse,
   MoveResponse,
   Profile,
+  Replay,
   UserGame,
   UserStats,
 } from "./types";
@@ -71,6 +72,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(seat === undefined ? { name } : { name, seat }),
     });
+  },
+
+  getReplay(id: string) {
+    return request<Replay>(`/api/games/${id}/replay`);
   },
 
   postMove(id: string, playerToken: string, q: number, r: number) {

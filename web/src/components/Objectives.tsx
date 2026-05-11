@@ -43,8 +43,22 @@ export function Objectives({ thresholds }: { thresholds: Thresholds }) {
           </li>
         )}
       </ul>
+      {thresholds.initialTimeMs > 0 && (
+        <p className="mt-2 text-[0.7rem] text-zinc-500">
+          Horloge : {formatBudget(thresholds.initialTimeMs)} par joueur
+          {thresholds.incrementMs > 0 &&
+            ` (+${Math.round(thresholds.incrementMs / 1000)}s/coup)`}
+          . Drapeau tombé = défaite.
+        </p>
+      )}
     </section>
   );
+}
+
+function formatBudget(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes >= 1) return `${minutes} min`;
+  return `${Math.round(ms / 1000)} s`;
 }
 
 function Token({ children }: { children: React.ReactNode }) {

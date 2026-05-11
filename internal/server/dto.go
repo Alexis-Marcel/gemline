@@ -1,6 +1,10 @@
 package server
 
-import "github.com/alexis/gemline/internal/game"
+import (
+	"time"
+
+	"github.com/alexis/gemline/internal/game"
+)
 
 type createGameRequest struct {
 	Players int `json:"players"`
@@ -25,9 +29,10 @@ type seatDTO struct {
 }
 
 type playerDTO struct {
-	Color         game.Color `json:"color"`
-	GemsRemaining int        `json:"gemsRemaining"`
-	CapturedPairs int        `json:"capturedPairs"`
+	Color           game.Color `json:"color"`
+	GemsRemaining   int        `json:"gemsRemaining"`
+	CapturedPairs   int        `json:"capturedPairs"`
+	TimeRemainingMs int64      `json:"timeRemainingMs"`
 	// Alignment counts are deliberately not exposed: counting your own and
 	// your opponents' lines is part of the game. Win detection still uses
 	// them server-side, and the WinKind field reveals how a finished game
@@ -35,23 +40,30 @@ type playerDTO struct {
 }
 
 type gameDTO struct {
-	ID         string        `json:"id"`
-	Status     Status        `json:"status"`
-	BoardSide  int           `json:"boardSide"`
-	Cells      []game.Color  `json:"cells"`
-	Players    []playerDTO   `json:"players"`
-	Seats      []seatDTO     `json:"seats"`
-	Turn       int           `json:"turn"`
-	Winner     game.Color    `json:"winner"`
-	WinKind    game.WinKind  `json:"winKind"`
-	MoveCount  int           `json:"moveCount"`
-	Thresholds thresholdsDTO `json:"thresholds"`
+	ID            string        `json:"id"`
+	Status        Status        `json:"status"`
+	BoardSide     int           `json:"boardSide"`
+	Cells         []game.Color  `json:"cells"`
+	Players       []playerDTO   `json:"players"`
+	Seats         []seatDTO     `json:"seats"`
+	Turn          int           `json:"turn"`
+	Winner        game.Color    `json:"winner"`
+	WinKind       game.WinKind  `json:"winKind"`
+	MoveCount     int           `json:"moveCount"`
+	Thresholds    thresholdsDTO `json:"thresholds"`
+	// TurnStartedAt is the server's wall clock when the active player's
+	// turn began (RFC 3339). Clients use it to display a live countdown
+	// against the active player's TimeRemainingMs. Empty for not-yet-started
+	// games (status = "waiting").
+	TurnStartedAt string `json:"turnStartedAt,omitempty"`
 }
 
 type thresholdsDTO struct {
-	CapturePairsWin int `json:"capturePairsWin"`
-	Align4ToWin     int `json:"align4ToWin"`
-	Align5ToWin     int `json:"align5ToWin"`
+	CapturePairsWin int   `json:"capturePairsWin"`
+	Align4ToWin     int   `json:"align4ToWin"`
+	Align5ToWin     int   `json:"align5ToWin"`
+	InitialTimeMs   int64 `json:"initialTimeMs"`
+	IncrementMs     int64 `json:"incrementMs"`
 }
 
 type captureDTO struct {
@@ -94,9 +106,10 @@ func toGameDTO(rec *GameRecord) gameDTO {
 	players := make([]playerDTO, len(s.Players))
 	for i, p := range s.Players {
 		players[i] = playerDTO{
-			Color:         p.Color,
-			GemsRemaining: p.GemsRemaining,
-			CapturedPairs: p.CapturedPairs,
+			Color:           p.Color,
+			GemsRemaining:   p.GemsRemaining,
+			CapturedPairs:   p.CapturedPairs,
+			TimeRemainingMs: p.TimeRemainingMs,
 		}
 	}
 	seats := make([]seatDTO, len(rec.Seats))
@@ -109,11 +122,16 @@ func toGameDTO(rec *GameRecord) gameDTO {
 			IsBot:    st.IsBot,
 		}
 	}
+	turnStartedAt := ""
+	if !s.TurnStartedAt.IsZero() {
+		turnStartedAt = s.TurnStartedAt.UTC().Format(time.RFC3339Nano)
+	}
 	return gameDTO{
-		ID:        rec.ID,
-		Status:    rec.Status,
-		BoardSide: s.Board.Side,
-		Cells:     s.Board.Cells,
+		ID:            rec.ID,
+		Status:        rec.Status,
+		BoardSide:     s.Board.Side,
+		Cells:         s.Board.Cells,
+		TurnStartedAt: turnStartedAt,
 		Players:   players,
 		Seats:     seats,
 		Turn:      s.Turn,
@@ -124,6 +142,8 @@ func toGameDTO(rec *GameRecord) gameDTO {
 			CapturePairsWin: s.Config.CapturePairsWin,
 			Align4ToWin:     s.Config.Align4ToWin,
 			Align5ToWin:     s.Config.Align5ToWin,
+			InitialTimeMs:   s.Config.InitialTimeMs,
+			IncrementMs:     s.Config.IncrementMs,
 		},
 	}
 }

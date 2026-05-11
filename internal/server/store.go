@@ -83,18 +83,88 @@ func (r *GameRecord) AllSeated() bool {
 
 // Store is the in-memory cache of games. Persistence is delegated to repo;
 // the cache survives only as long as the process, but the DB is the source
-// of truth for state that has to outlive a restart.
+// of truth for state that has to outlive a restart. The Store also owns the
+// chess clock — it schedules per-game timeout timers and applies the
+// resulting forfeits when they fire.
 type Store struct {
-	mu    sync.Mutex
-	games map[string]*GameRecord
-	repo  Repository
+	mu     sync.Mutex
+	games  map[string]*GameRecord
+	repo   Repository
+	clocks *clockManager
+	onFlag func(gameID string)
 }
 
 func NewStore(repo Repository) *Store {
 	if repo == nil {
 		repo = noopRepo{}
 	}
-	return &Store{games: make(map[string]*GameRecord), repo: repo}
+	return &Store{
+		games:  make(map[string]*GameRecord),
+		repo:   repo,
+		clocks: newClockManager(),
+	}
+}
+
+// SetFlagListener registers a callback invoked whenever a clock-driven
+// forfeit ends a game. The Server wires it to a hub broadcast so connected
+// clients see the new state immediately. Safe to call once before serving.
+func (s *Store) SetFlagListener(fn func(gameID string)) { s.onFlag = fn }
+
+// Close stops every running clock timer. Call on shutdown.
+func (s *Store) Close() { s.clocks.CancelAll() }
+
+// armClock schedules (or cancels) the timeout for the active player of
+// `rec`. Must be called with rec.Lock held.
+func (s *Store) armClock(rec *GameRecord) {
+	if !rec.State.ClockEnabled() || rec.Status != StatusPlaying || rec.State.IsOver() {
+		s.clocks.Cancel(rec.ID)
+		return
+	}
+	remainingMs := rec.State.RemainingForActive(time.Now())
+	id := rec.ID
+	s.clocks.Schedule(id, time.Duration(remainingMs)*time.Millisecond, func() {
+		s.handleFlag(id)
+	})
+}
+
+// handleFlag is fired by the clock manager when the active player's time
+// runs out. It locks the game, applies a forfeit, persists, and notifies
+// the broadcast listener if registered.
+func (s *Store) handleFlag(gameID string) {
+	ctx := context.Background()
+	s.mu.Lock()
+	rec, ok := s.games[gameID]
+	s.mu.Unlock()
+	if !ok {
+		return // game was evicted; nothing to do
+	}
+
+	rec.Lock()
+	if rec.State.IsOver() || rec.Status != StatusPlaying {
+		rec.Unlock()
+		return
+	}
+	// Recheck the remaining time in case a move landed between the timer
+	// firing and us acquiring the lock — if the player just made a move,
+	// we shouldn't forfeit them.
+	if rec.State.RemainingForActive(time.Now()) > 0 {
+		rec.Unlock()
+		return
+	}
+	loser := rec.State.CurrentPlayer().Color
+	rec.State.Forfeit(loser)
+	rec.Status = StatusFinished
+	winner := rec.State.Winner
+	winKind := rec.State.WinKind
+	rec.Unlock()
+
+	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
+		// Persistence failed but the in-memory state is the truth.
+		// We do not retry; an admin can inspect the row if needed.
+	}
+	if s.onFlag != nil {
+		s.onFlag(gameID)
+	}
 }
 
 // Create initializes a game, persists it, and caches it in memory.
@@ -142,12 +212,21 @@ func (s *Store) Get(ctx context.Context, id string) (*GameRecord, bool, error) {
 	// Race-safe cache fill: if another goroutine just loaded the same game,
 	// keep that copy so callers don't fork the in-memory state.
 	s.mu.Lock()
+	freshlyCached := false
 	if existing, found := s.games[id]; found {
 		loaded = existing
 	} else {
 		s.games[id] = loaded
+		freshlyCached = true
 	}
 	s.mu.Unlock()
+
+	// First time we see this game in memory: arm its clock if it's in play.
+	if freshlyCached {
+		loaded.Lock()
+		s.armClock(loaded)
+		loaded.Unlock()
+	}
 	return loaded, true, nil
 }
 
@@ -191,12 +270,19 @@ func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx i
 	rec.Seats[idx].TokenHash = hashToken(token)
 	rec.Seats[idx].UserID = userID
 	rec.Seats[idx].Occupied = true
+	startedPlaying := false
 	if rec.AllSeated() {
 		rec.Status = StatusPlaying
+		startedPlaying = true
+		rec.State.StartClock(time.Now())
 	}
 
 	if err := s.repo.UpdateSeat(ctx, gameID, &rec.Seats[idx], rec.Status); err != nil {
 		return nil, "", err
+	}
+
+	if startedPlaying {
+		s.armClock(rec)
 	}
 	return &rec.Seats[idx], token, nil
 }
@@ -225,11 +311,11 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 
 	ordinal := len(rec.State.History)
 	move := game.Move{Player: seat.Color, Pos: game.Position{Q: q, R: r}}
-	res, err := rec.State.ApplyMove(move)
+	res, err := rec.State.ApplyMove(move, time.Now())
 	if err != nil {
 		return res, rec, err
 	}
-	if rec.State.Winner != game.Empty {
+	if rec.State.IsOver() {
 		rec.Status = StatusFinished
 	}
 
@@ -239,6 +325,10 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 		// than the inconsistency. Surface it but keep the in-memory truth.
 		return res, rec, perr
 	}
+
+	// Re-arm or cancel the chess clock for the next player. Called while
+	// rec is still locked — armClock doesn't take the rec lock itself.
+	s.armClock(rec)
 	return res, rec, nil
 }
 

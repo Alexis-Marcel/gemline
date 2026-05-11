@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -26,12 +27,25 @@ type Config struct {
 
 // New returns a Server backed by the given store and config.
 func New(log *slog.Logger, store *Store, cfg Config) *Server {
-	return &Server{
+	srv := &Server{
 		store:     store,
 		hub:       NewHub(),
 		log:       log,
 		jwtSecret: cfg.JWTSecret,
 	}
+	// When a player's clock runs out, push the new state to every WS
+	// subscriber so they see the forfeit immediately.
+	store.SetFlagListener(func(gameID string) {
+		rec, ok, err := store.Get(context.Background(), gameID)
+		if err != nil || !ok {
+			return
+		}
+		rec.Lock()
+		dto := toGameDTO(rec)
+		rec.Unlock()
+		srv.hub.Broadcast(gameID, eventState(dto))
+	})
+	return srv
 }
 
 func (s *Server) Routes() http.Handler {

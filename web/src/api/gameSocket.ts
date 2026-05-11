@@ -10,6 +10,7 @@ export interface ConnState {
 
 type Listener = (state: ConnState) => void;
 type ChatListener = (msg: Message) => void;
+type PresenceListener = (seatIndex: number, online: boolean) => void;
 
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 15_000;
@@ -24,8 +25,14 @@ class GameSocket {
   private ws: WebSocket | null = null;
   private listeners = new Set<Listener>();
   private chatListeners = new Set<ChatListener>();
+  private presenceListeners = new Set<PresenceListener>();
   private reconnectTimer: number | null = null;
   private closed = false;
+  /** Locally-tracked presence map (seatIndex → online). Lets new subscribers
+   *  catch up with the latest known state without waiting for a fresh event. */
+  private presence = new Map<number, boolean>();
+  /** Token sent on every connect for the hello handshake. Set via setHelloToken. */
+  private helloToken: string | null = null;
   private state: ConnState = {
     status: "connecting",
     game: null,
@@ -35,6 +42,20 @@ class GameSocket {
   constructor(gameId: string) {
     this.gameId = gameId;
     this.connect();
+  }
+
+  /** Configure the seat token to send on `hello` after each (re)connect.
+   *  Pass null to revert to spectator mode. */
+  setHelloToken(token: string | null): void {
+    this.helloToken = token;
+    if (token && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.sendHello();
+    }
+  }
+
+  private sendHello(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.helloToken) return;
+    this.ws.send(JSON.stringify({ type: "hello", token: this.helloToken }));
   }
 
   subscribe(fn: Listener): () => void {
@@ -48,8 +69,19 @@ class GameSocket {
     return () => this.chatListeners.delete(fn);
   }
 
+  subscribePresence(fn: PresenceListener): () => void {
+    this.presenceListeners.add(fn);
+    // Replay the last-known presence so new subscribers don't start blank.
+    for (const [seat, online] of this.presence) fn(seat, online);
+    return () => this.presenceListeners.delete(fn);
+  }
+
   hasSubscribers(): boolean {
-    return this.listeners.size > 0 || this.chatListeners.size > 0;
+    return (
+      this.listeners.size > 0 ||
+      this.chatListeners.size > 0 ||
+      this.presenceListeners.size > 0
+    );
   }
 
   close(): void {
@@ -84,6 +116,9 @@ class GameSocket {
       // The server sends a fresh state snapshot on connect, so we don't need
       // to manually resync — just reset the attempt counter.
       this.setState({ status: "open", attempt: 0 });
+      // Authenticate this connection's seat (if we have a token). Tells the
+      // server we're back so the disconnect-grace timer is cancelled.
+      this.sendHello();
     };
 
     ws.onmessage = (e) => {
@@ -99,6 +134,10 @@ class GameSocket {
         this.setState({ game: ev.payload.game });
       } else if (ev.type === "chat") {
         for (const l of this.chatListeners) l(ev.payload);
+      } else if (ev.type === "presence") {
+        const { seatIndex, online } = ev.payload;
+        this.presence.set(seatIndex, online);
+        for (const l of this.presenceListeners) l(seatIndex, online);
       }
     };
 
@@ -153,6 +192,55 @@ export function acquireSocket(gameId: string, listener: Listener): () => void {
 
   const unsubscribe = socket.subscribe(listener);
 
+  return () => {
+    unsubscribe();
+    const s = sockets.get(gameId);
+    if (s && !s.hasSubscribers()) {
+      const t = window.setTimeout(() => {
+        const s2 = sockets.get(gameId);
+        if (s2 && !s2.hasSubscribers()) {
+          s2.close();
+          sockets.delete(gameId);
+        }
+        cleanupTimers.delete(gameId);
+      }, CLEANUP_GRACE_MS);
+      cleanupTimers.set(gameId, t);
+    }
+  };
+}
+
+// getSocket returns the shared GameSocket for `gameId`, creating it if
+// missing. Caller is responsible for arranging at least one subscription so
+// the connection is properly refcounted; otherwise the cleanup grace will
+// tear it down on the next tick.
+export function getSocket(gameId: string): GameSocket {
+  const pending = cleanupTimers.get(gameId);
+  if (pending !== undefined) {
+    window.clearTimeout(pending);
+    cleanupTimers.delete(gameId);
+  }
+  let socket = sockets.get(gameId);
+  if (!socket) {
+    socket = new GameSocket(gameId);
+    sockets.set(gameId, socket);
+  }
+  return socket;
+}
+
+// acquirePresenceStream subscribes to per-seat presence events on the shared
+// socket. Returns the unsubscribe.
+export function acquirePresenceStream(gameId: string, listener: PresenceListener): () => void {
+  const pending = cleanupTimers.get(gameId);
+  if (pending !== undefined) {
+    window.clearTimeout(pending);
+    cleanupTimers.delete(gameId);
+  }
+  let socket = sockets.get(gameId);
+  if (!socket) {
+    socket = new GameSocket(gameId);
+    sockets.set(gameId, socket);
+  }
+  const unsubscribe = socket.subscribePresence(listener);
   return () => {
     unsubscribe();
     const s = sockets.get(gameId);

@@ -14,8 +14,8 @@ export function Objectives({ thresholds }: { thresholds: Thresholds }) {
       </h2>
       <ul className="space-y-1.5 text-xs text-zinc-400">
         <li className="flex items-baseline gap-2">
-          <Token>6</Token>
-          <span>alignement de 6 — victoire immédiate</span>
+          <Token>×1</Token>
+          <span>alignement de 6</span>
         </li>
         {thresholds.align5ToWin > 0 && (
           <li className="flex items-baseline gap-2">

@@ -38,9 +38,9 @@ func (r *PostgresRepo) SaveNewGame(ctx context.Context, rec *GameRecord) error {
 
 	for _, s := range rec.Seats {
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO seats (game_id, seat_index, color, name, token_hash, occupied, is_bot)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-		`, rec.ID, s.Index, int(s.Color), s.Name, nilIfEmpty(s.TokenHash), s.Occupied, s.IsBot)
+			INSERT INTO seats (game_id, seat_index, color, name, token_hash, user_id, occupied, is_bot)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`, rec.ID, s.Index, int(s.Color), s.Name, nilIfEmpty(s.TokenHash), nilIfEmptyStr(s.UserID), s.Occupied, s.IsBot)
 		if err != nil {
 			return fmt.Errorf("insert seat %d: %w", s.Index, err)
 		}
@@ -73,7 +73,7 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 
 	// Seats — needed to know the player roster before we can construct GameState.
 	seatRows, err := r.pool.QueryContext(ctx, `
-		SELECT seat_index, color, name, token_hash, occupied, is_bot
+		SELECT seat_index, color, name, token_hash, user_id, occupied, is_bot
 		FROM seats WHERE game_id = $1 ORDER BY seat_index
 	`, id)
 	if err != nil {
@@ -89,10 +89,11 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 			colorInt  int
 			name      string
 			tokenHash []byte
+			userID    sql.NullString
 			occupied  bool
 			isBot     bool
 		)
-		if err := seatRows.Scan(&idx, &colorInt, &name, &tokenHash, &occupied, &isBot); err != nil {
+		if err := seatRows.Scan(&idx, &colorInt, &name, &tokenHash, &userID, &occupied, &isBot); err != nil {
 			return nil, fmt.Errorf("scan seat: %w", err)
 		}
 		seats = append(seats, Seat{
@@ -100,6 +101,7 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 			Color:     game.Color(colorInt),
 			Name:      name,
 			TokenHash: tokenHash,
+			UserID:    userID.String,
 			Occupied:  occupied,
 			IsBot:     isBot,
 		})
@@ -163,9 +165,9 @@ func (r *PostgresRepo) UpdateSeat(ctx context.Context, gameID string, seat *Seat
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		UPDATE seats SET name = $1, token_hash = $2, occupied = $3, is_bot = $4
-		WHERE game_id = $5 AND seat_index = $6
-	`, seat.Name, seat.TokenHash, seat.Occupied, seat.IsBot, gameID, seat.Index)
+		UPDATE seats SET name = $1, token_hash = $2, user_id = $3, occupied = $4, is_bot = $5
+		WHERE game_id = $6 AND seat_index = $7
+	`, seat.Name, seat.TokenHash, nilIfEmptyStr(seat.UserID), seat.Occupied, seat.IsBot, gameID, seat.Index)
 	if err != nil {
 		return fmt.Errorf("update seat: %w", err)
 	}
@@ -210,4 +212,100 @@ func nilIfEmpty(b []byte) []byte {
 		return nil
 	}
 	return b
+}
+
+func nilIfEmptyStr(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func (r *PostgresRepo) Profile(ctx context.Context, userID string) (*Profile, error) {
+	row := r.pool.QueryRowContext(ctx, `SELECT display_name FROM profiles WHERE user_id = $1`, userID)
+	var name string
+	if err := row.Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &Profile{UserID: userID, DisplayName: name}, nil
+}
+
+func (r *PostgresRepo) UpsertProfile(ctx context.Context, userID, displayName string) error {
+	_, err := r.pool.ExecContext(ctx, `
+		INSERT INTO profiles (user_id, display_name) VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = NOW()
+	`, userID, displayName)
+	return err
+}
+
+func (r *PostgresRepo) GamesForUser(ctx context.Context, userID string, limit int) ([]UserGame, error) {
+	rows, err := r.pool.QueryContext(ctx, `
+		SELECT g.id, g.status, s.seat_index, s.color, g.winner_color,
+		       (SELECT COUNT(*) FROM moves m WHERE m.game_id = g.id),
+		       g.created_at, g.updated_at
+		FROM seats s
+		JOIN games g ON g.id = s.game_id
+		WHERE s.user_id = $1
+		ORDER BY g.updated_at DESC
+		LIMIT $2
+	`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]UserGame, 0)
+	for rows.Next() {
+		var (
+			ug         UserGame
+			color      int
+			winner     int
+			createdAt  time.Time
+			updatedAt  time.Time
+		)
+		if err := rows.Scan(&ug.GameID, &ug.Status, &ug.SeatIndex, &color, &winner, &ug.MoveCount, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		ug.Color = game.Color(color)
+		ug.WinnerColor = game.Color(winner)
+		ug.Outcome = deriveOutcome(ug.Status, ug.Color, ug.WinnerColor)
+		ug.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		ug.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+		out = append(out, ug)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepo) StatsForUser(ctx context.Context, userID string) (UserStats, error) {
+	row := r.pool.QueryRowContext(ctx, `
+		SELECT
+		  COUNT(*) AS total,
+		  COUNT(*) FILTER (WHERE g.status = 'finished' AND g.winner_color = s.color) AS won,
+		  COUNT(*) FILTER (WHERE g.status = 'finished' AND g.winner_color <> s.color AND g.winner_color <> 0) AS lost,
+		  COUNT(*) FILTER (WHERE g.status <> 'finished') AS ongoing
+		FROM seats s
+		JOIN games g ON g.id = s.game_id
+		WHERE s.user_id = $1
+	`, userID)
+	var st UserStats
+	if err := row.Scan(&st.Total, &st.Won, &st.Lost, &st.Ongoing); err != nil {
+		return UserStats{}, err
+	}
+	return st, nil
+}
+
+func deriveOutcome(status Status, mine, winner game.Color) string {
+	if status != StatusFinished {
+		return "ongoing"
+	}
+	if winner == game.Empty {
+		return "draw"
+	}
+	if winner == mine {
+		return "won"
+	}
+	return "lost"
 }

@@ -18,7 +18,7 @@ import (
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return httptest.NewServer(New(log, NewStore(nil)).Routes())
+	return httptest.NewServer(New(log, NewStore(nil), Config{}).Routes())
 }
 
 func TestHealthz(t *testing.T) {
@@ -199,7 +199,7 @@ func postMove(t *testing.T, ts *httptest.Server, id, token string, q, r, wantSta
 	body := strings.NewReader(`{"q":` + itoa(q) + `,"r":` + itoa(r) + `}`)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+id+"/moves", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Player-Token", token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

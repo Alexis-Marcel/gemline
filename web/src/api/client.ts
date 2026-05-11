@@ -1,4 +1,12 @@
-import type { Game, JoinResponse, MoveResponse } from "./types";
+import { supabase } from "./supabase";
+import type {
+  Game,
+  JoinResponse,
+  MoveResponse,
+  Profile,
+  UserGame,
+  UserStats,
+} from "./types";
 
 class ApiError extends Error {
   status: number;
@@ -8,18 +16,29 @@ class ApiError extends Error {
   }
 }
 
-async function request<T>(
-  path: string,
-  init: RequestInit & { token?: string } = {},
-): Promise<T> {
-  const { token, ...rest } = init;
+interface RequestOptions extends RequestInit {
+  playerToken?: string; // seat-level token, sent in X-Player-Token
+  skipAuth?: boolean;   // don't attach the Supabase JWT (e.g. health checks)
+}
+
+async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
+  const { playerToken, skipAuth, ...rest } = init;
   const headers = new Headers(rest.headers);
   if (!headers.has("Content-Type") && rest.body) {
     headers.set("Content-Type", "application/json");
   }
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
+  if (playerToken) {
+    headers.set("X-Player-Token", playerToken);
   }
+  if (!skipAuth) {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (session?.access_token) {
+      headers.set("Authorization", `Bearer ${session.access_token}`);
+    }
+  }
+
   const res = await fetch(path, { ...rest, headers });
   if (!res.ok) {
     let message = `HTTP ${res.status}`;
@@ -27,10 +46,11 @@ async function request<T>(
       const body = (await res.json()) as { error?: string };
       if (body.error) message = body.error;
     } catch {
-      /* response was not JSON */
+      /* not JSON */
     }
     throw new ApiError(res.status, message);
   }
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -53,12 +73,32 @@ export const api = {
     });
   },
 
-  postMove(id: string, token: string, q: number, r: number) {
+  postMove(id: string, playerToken: string, q: number, r: number) {
     return request<MoveResponse>(`/api/games/${id}/moves`, {
       method: "POST",
-      token,
+      playerToken,
       body: JSON.stringify({ q, r }),
     });
+  },
+
+  // Authenticated endpoints — these 401 if no JWT is attached.
+  getMe() {
+    return request<Profile>("/api/auth/me");
+  },
+
+  updateProfile(displayName: string) {
+    return request<Profile>("/api/profile", {
+      method: "PUT",
+      body: JSON.stringify({ displayName }),
+    });
+  },
+
+  getMyGames() {
+    return request<UserGame[]>("/api/users/me/games");
+  },
+
+  getMyStats() {
+    return request<UserStats>("/api/users/me/stats");
   },
 };
 

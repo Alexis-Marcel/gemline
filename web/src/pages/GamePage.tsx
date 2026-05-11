@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
-import type { Game, Replay, WinKind } from "../api/types";
+import type { Color, Game, Replay, WinKind } from "../api/types";
 import {
+  acquireMoveStream,
   acquirePresenceStream,
   getSocket,
   type ConnStatus as WsConnStatus,
@@ -39,6 +40,13 @@ export function GamePage() {
   // (we haven't received a presence event yet, default to optimistic online).
   const [presence, setPresence] = useState<Record<number, boolean>>({});
 
+  // Stones captured by the most recent move, kept around briefly so the
+  // Board can animate them out. Each entry has a unique key so React doesn't
+  // re-use a dying ghost when a subsequent capture lands on the same cell.
+  const [ghosts, setGhosts] = useState<
+    Array<{ q: number; r: number; color: Color; key: string }>
+  >([]);
+
   // Prefer the most recent snapshot from either the WS stream or a local
   // mutation (e.g. our own move) so the UI never appears stale.
   const game = useMemo(() => {
@@ -63,6 +71,26 @@ export function GamePage() {
   useEffect(() => {
     return acquirePresenceStream(id, (seatIndex, online) => {
       setPresence((prev) => ({ ...prev, [seatIndex]: online }));
+    });
+  }, [id]);
+
+  // Subscribe to move events so we can render captured stones with a fade-out.
+  useEffect(() => {
+    return acquireMoveStream(id, (move) => {
+      if (move.captures.length === 0) return;
+      const added = move.captures.flatMap((c) =>
+        c.pair.map(([q, r]) => ({
+          q,
+          r,
+          color: c.victim,
+          key: `${q},${r},${Date.now()},${Math.random()}`,
+        })),
+      );
+      setGhosts((prev) => [...prev, ...added]);
+      const keys = new Set(added.map((g) => g.key));
+      window.setTimeout(() => {
+        setGhosts((prev) => prev.filter((g) => !keys.has(g.key)));
+      }, 600);
     });
   }, [id]);
 
@@ -251,6 +279,7 @@ export function GamePage() {
             onPlay={inReplay ? undefined : onPlay}
             disabled={inReplay || !isMyTurn || game.status !== "playing"}
             highlight={boardHighlight}
+            ghosts={inReplay ? undefined : ghosts}
           />
         </div>
       </main>

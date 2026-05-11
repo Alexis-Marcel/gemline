@@ -1,5 +1,6 @@
 import type { Game } from "../api/types";
 import { gemColor, gemName } from "../lib/colors";
+import { PlayerClock } from "./PlayerClock";
 
 interface ScoreboardProps {
   game: Game;
@@ -8,6 +9,8 @@ interface ScoreboardProps {
 
 export function Scoreboard({ game, mySeatIndex }: ScoreboardProps) {
   const t = game.thresholds;
+  const clockEnabled = t.initialTimeMs > 0;
+  const gameOver = game.status === "finished";
   return (
     <ul className="flex flex-col gap-2">
       {game.players.map((p, i) => {
@@ -37,12 +40,20 @@ export function Scoreboard({ game, mySeatIndex }: ScoreboardProps) {
                       <span className="ml-2 text-xs text-zinc-400">(toi)</span>
                     )}
                   </span>
-                  {isTurn && (
-                    <span className="text-xs font-medium text-yellow-400">
-                      à jouer
-                    </span>
+                  {clockEnabled && (
+                    <PlayerClock
+                      remainingMs={p.timeRemainingMs}
+                      turnStartedAt={game.turnStartedAt}
+                      isActive={isTurn}
+                      frozen={gameOver}
+                    />
                   )}
                 </div>
+                {isTurn && (
+                  <div className="mt-0.5 text-xs font-medium text-yellow-400">
+                    à jouer
+                  </div>
+                )}
                 <div className="mt-1 grid grid-cols-2 gap-1 text-xs text-zinc-400">
                   <Stat
                     label="Paires"

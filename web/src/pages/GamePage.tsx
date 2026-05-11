@@ -358,6 +358,8 @@ function winKindLabel(k: WinKind): string {
       return "alignements de 4";
     case 4:
       return "captures";
+    case 5:
+      return "drapeau (temps écoulé)";
     default:
       return "?";
   }

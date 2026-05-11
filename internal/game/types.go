@@ -54,10 +54,16 @@ type Position struct {
 // Player holds a player's running score. Alignment counters are computed
 // on demand (see GameState.CountAlignments) rather than stored, so the
 // scorecard cannot drift out of sync with the board.
+//
+// TimeRemainingMs is the chess-style clock — the amount of thinking time
+// the player has left in total. The active player's clock ticks down
+// between their TurnStartedAt and their next ApplyMove. A player whose
+// clock reaches zero forfeits the game (WinTimeout).
 type Player struct {
-	Color         Color
-	GemsRemaining int
-	CapturedPairs int
+	Color           Color
+	GemsRemaining   int
+	CapturedPairs   int
+	TimeRemainingMs int64
 }
 
 type Move struct {
@@ -87,6 +93,7 @@ const (
 	WinAlignment5
 	WinAlignment4
 	WinCapture
+	WinTimeout // the opponent ran out of time
 )
 
 func (k WinKind) String() string {
@@ -101,6 +108,8 @@ func (k WinKind) String() string {
 		return "alignment4"
 	case WinCapture:
 		return "capture"
+	case WinTimeout:
+		return "timeout"
 	default:
 		return "?"
 	}
@@ -112,4 +121,5 @@ var (
 	ErrWrongTurn    = errors.New("not this player's turn")
 	ErrGameOver     = errors.New("game is already over")
 	ErrNoGemsLeft   = errors.New("player has no gems remaining")
+	ErrFlagged      = errors.New("player has run out of time")
 )

@@ -5,12 +5,13 @@ export type Color = -1 | 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export const OFF_BOARD: Color = -1;
 export const EMPTY: Color = 0;
 
-export type WinKind = 0 | 1 | 2 | 3 | 4;
+export type WinKind = 0 | 1 | 2 | 3 | 4 | 5;
 export const WIN_NONE: WinKind = 0;
 export const WIN_ALIGN6: WinKind = 1;
 export const WIN_ALIGN5: WinKind = 2;
 export const WIN_ALIGN4: WinKind = 3;
 export const WIN_CAPTURE: WinKind = 4;
+export const WIN_TIMEOUT: WinKind = 5;
 
 export type Status = "waiting" | "playing" | "finished";
 
@@ -26,12 +27,15 @@ export interface PlayerScore {
   color: Color;
   gemsRemaining: number;
   capturedPairs: number;
+  timeRemainingMs: number;
 }
 
 export interface Thresholds {
   capturePairsWin: number;
   align4ToWin: number;
   align5ToWin: number;
+  initialTimeMs: number;
+  incrementMs: number;
 }
 
 export interface Game {
@@ -46,6 +50,8 @@ export interface Game {
   winKind: WinKind;
   moveCount: number;
   thresholds: Thresholds;
+  /** ISO-8601 timestamp when the active player's turn started. Empty when the game hasn't started yet. */
+  turnStartedAt?: string;
 }
 
 export interface Capture {

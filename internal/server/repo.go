@@ -17,6 +17,10 @@ type Repository interface {
 	UpdateSeat(ctx context.Context, gameID string, seat *Seat, status Status) error
 	AppendMove(ctx context.Context, gameID string, ordinal int, m game.Move, winner game.Color, winKind game.WinKind, status Status) error
 
+	// UpdateOutcome persists a state change that did NOT come from a move —
+	// e.g. a clock-driven forfeit. The move log stays untouched.
+	UpdateOutcome(ctx context.Context, gameID string, status Status, winner game.Color, winKind game.WinKind) error
+
 	// Profile returns the profile row for userID, or (nil, nil) if there
 	// isn't one yet.
 	Profile(ctx context.Context, userID string) (*Profile, error)
@@ -90,6 +94,9 @@ func (noopRepo) LoadGame(context.Context, string) (*GameRecord, error) {
 }
 func (noopRepo) UpdateSeat(context.Context, string, *Seat, Status) error { return nil }
 func (noopRepo) AppendMove(context.Context, string, int, game.Move, game.Color, game.WinKind, Status) error {
+	return nil
+}
+func (noopRepo) UpdateOutcome(context.Context, string, Status, game.Color, game.WinKind) error {
 	return nil
 }
 func (noopRepo) Profile(context.Context, string) (*Profile, error)        { return nil, nil }

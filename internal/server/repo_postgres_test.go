@@ -45,11 +45,11 @@ func TestPostgresRepo_CreateJoinPlay_RoundTrip(t *testing.T) {
 	}
 	gameID := rec.ID
 
-	_, tokA, err := first.Join(ctx, gameID, "Alice", -1)
+	_, tokA, err := first.Join(ctx, gameID, "Alice", "", -1)
 	if err != nil {
 		t.Fatalf("Join Alice: %v", err)
 	}
-	_, _, err = first.Join(ctx, gameID, "Bob", -1)
+	_, _, err = first.Join(ctx, gameID, "Bob", "", -1)
 	if err != nil {
 		t.Fatalf("Join Bob: %v", err)
 	}
@@ -107,8 +107,8 @@ func TestPostgresRepo_CaptureSurvivesReload(t *testing.T) {
 	}
 	gameID := rec.ID
 
-	_, tokA, _ := first.Join(ctx, gameID, "Alice", -1)
-	_, tokB, _ := first.Join(ctx, gameID, "Bob", -1)
+	_, tokA, _ := first.Join(ctx, gameID, "Alice", "", -1)
+	_, tokB, _ := first.Join(ctx, gameID, "Bob", "", -1)
 
 	// Build a horizontal capture: Alice ends with (1,0) capturing (-1,0) and (0,0).
 	plays := []struct {

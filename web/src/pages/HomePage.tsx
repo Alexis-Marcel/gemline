@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
+import { UserNav } from "../components/UserNav";
 
 export function HomePage() {
   const navigate = useNavigate();
@@ -32,11 +33,14 @@ export function HomePage() {
 
   return (
     <div className="mx-auto flex h-full max-w-md flex-col justify-center gap-8 p-6">
-      <header>
-        <h1 className="text-3xl font-semibold text-zinc-100">Gemline</h1>
-        <p className="mt-1 text-sm text-zinc-400">
-          Plateau hexagonal, alignement ou capture pour gagner.
-        </p>
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-semibold text-zinc-100">Gemline</h1>
+          <p className="mt-1 text-sm text-zinc-400">
+            Plateau hexagonal, alignement ou capture pour gagner.
+          </p>
+        </div>
+        <UserNav />
       </header>
 
       <form

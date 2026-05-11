@@ -31,12 +31,14 @@ var (
 
 // Seat is a play slot in a game. Once claimed, only the SHA-256 of the
 // player token lives in TokenHash — the plaintext token is returned exactly
-// once, when the seat is claimed, and is never persisted.
+// once, when the seat is claimed, and is never persisted. UserID is set
+// when an authenticated user claimed the seat; for guests it stays empty.
 type Seat struct {
 	Index     int        // 0..N-1, also turn order
 	Color     game.Color // C1..C6
 	Name      string
 	TokenHash []byte
+	UserID    string // Supabase user UUID, or empty for a guest seat
 	Occupied  bool
 	IsBot     bool
 }
@@ -150,9 +152,10 @@ func (s *Store) Get(ctx context.Context, id string) (*GameRecord, bool, error) {
 }
 
 // Join claims a seat in `gameID` for `name`. If seatIdx is negative, the
-// first free seat is chosen. Returns the claimed seat and the plaintext
-// player token (only available here — only its hash is persisted).
-func (s *Store) Join(ctx context.Context, gameID, name string, seatIdx int) (*Seat, string, error) {
+// first free seat is chosen. `userID` is the Supabase user UUID for an
+// authenticated join, or "" for a guest. Returns the claimed seat and the
+// plaintext player token (only available here — only its hash is persisted).
+func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx int) (*Seat, string, error) {
 	rec, ok, err := s.Get(ctx, gameID)
 	if err != nil {
 		return nil, "", err
@@ -186,6 +189,7 @@ func (s *Store) Join(ctx context.Context, gameID, name string, seatIdx int) (*Se
 	token := newToken()
 	rec.Seats[idx].Name = name
 	rec.Seats[idx].TokenHash = hashToken(token)
+	rec.Seats[idx].UserID = userID
 	rec.Seats[idx].Occupied = true
 	if rec.AllSeated() {
 		rec.Status = StatusPlaying
@@ -264,4 +268,24 @@ func newToken() string {
 func hashToken(tok string) []byte {
 	sum := sha256.Sum256([]byte(tok))
 	return sum[:]
+}
+
+// Profile, UpsertProfile, GamesForUser, StatsForUser are thin wrappers over
+// the Repository — they don't go through the in-memory cache because the
+// data they return is per-user, not per-game.
+
+func (s *Store) Profile(ctx context.Context, userID string) (*Profile, error) {
+	return s.repo.Profile(ctx, userID)
+}
+
+func (s *Store) UpsertProfile(ctx context.Context, userID, displayName string) error {
+	return s.repo.UpsertProfile(ctx, userID, displayName)
+}
+
+func (s *Store) GamesForUser(ctx context.Context, userID string, limit int) ([]UserGame, error) {
+	return s.repo.GamesForUser(ctx, userID, limit)
+}
+
+func (s *Store) StatsForUser(ctx context.Context, userID string) (UserStats, error) {
+	return s.repo.StatsForUser(ctx, userID)
 }

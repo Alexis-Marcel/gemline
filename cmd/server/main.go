@@ -36,9 +36,16 @@ func main() {
 		log.Info("persistence disabled — running with in-memory store only")
 	}
 
+	cfg := server.Config{
+		JWTSecret: os.Getenv("SUPABASE_JWT_SECRET"),
+	}
+	if cfg.JWTSecret == "" {
+		log.Warn("SUPABASE_JWT_SECRET not set — user auth endpoints will respond 401")
+	}
+
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      server.New(log, server.NewStore(repo)).Routes(),
+		Handler:      server.New(log, server.NewStore(repo), cfg).Routes(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,

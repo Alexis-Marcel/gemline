@@ -6,29 +6,57 @@ import (
 	"github.com/alexis/gemline/internal/game"
 )
 
-// Repository persists game state. Implementations may be backed by a database
-// (PostgresRepo) or be a no-op for tests.
+// Repository persists game and user state. Implementations may be backed by
+// a database (PostgresRepo) or be a no-op for tests.
 //
 // The model is event-sourced for moves: only the metadata + move log is
 // stored, and GameState is rebuilt by replaying moves through ApplyMove.
 type Repository interface {
-	// SaveNewGame persists a fresh game (with all seats unclaimed and no
-	// moves yet). Idempotent if the id already exists is not guaranteed —
-	// callers should not retry SaveNewGame with the same id.
 	SaveNewGame(ctx context.Context, rec *GameRecord) error
-
-	// LoadGame fetches the full game state by replaying its move log. Returns
-	// (nil, nil) if no game with that id exists. The returned record is
-	// detached from any in-memory cache; callers must take care of caching.
 	LoadGame(ctx context.Context, id string) (*GameRecord, error)
-
-	// UpdateSeat persists a seat claim (name, token hash, occupied) and the
-	// resulting game status transition.
 	UpdateSeat(ctx context.Context, gameID string, seat *Seat, status Status) error
-
-	// AppendMove persists the n-th move (zero-indexed ordinal). It also
-	// updates the game's win state and status if the move ended the game.
 	AppendMove(ctx context.Context, gameID string, ordinal int, m game.Move, winner game.Color, winKind game.WinKind, status Status) error
+
+	// Profile returns the profile row for userID, or (nil, nil) if there
+	// isn't one yet.
+	Profile(ctx context.Context, userID string) (*Profile, error)
+
+	// UpsertProfile creates or updates the profile row for userID.
+	UpsertProfile(ctx context.Context, userID, displayName string) error
+
+	// GamesForUser returns the most recent games where userID held a seat,
+	// most recent first, capped at `limit`.
+	GamesForUser(ctx context.Context, userID string, limit int) ([]UserGame, error)
+
+	// StatsForUser returns aggregate counts across all of the user's games.
+	StatsForUser(ctx context.Context, userID string) (UserStats, error)
+}
+
+// Profile is the user-controlled profile row.
+type Profile struct {
+	UserID      string
+	DisplayName string
+}
+
+// UserGame summarises one game a user took part in, for the history view.
+type UserGame struct {
+	GameID     string     `json:"gameId"`
+	Status     Status     `json:"status"`
+	SeatIndex  int        `json:"seatIndex"`
+	Color      game.Color `json:"color"`
+	WinnerColor game.Color `json:"winnerColor"`
+	Outcome    string     `json:"outcome"` // "won", "lost", "ongoing"
+	MoveCount  int        `json:"moveCount"`
+	CreatedAt  string     `json:"createdAt"`
+	UpdatedAt  string     `json:"updatedAt"`
+}
+
+// UserStats are aggregate counts derived from the user's finished games.
+type UserStats struct {
+	Total   int `json:"total"`
+	Won     int `json:"won"`
+	Lost    int `json:"lost"`
+	Ongoing int `json:"ongoing"`
 }
 
 // noopRepo lets the in-memory Store run without a database. It returns
@@ -43,4 +71,12 @@ func (noopRepo) LoadGame(context.Context, string) (*GameRecord, error) {
 func (noopRepo) UpdateSeat(context.Context, string, *Seat, Status) error { return nil }
 func (noopRepo) AppendMove(context.Context, string, int, game.Move, game.Color, game.WinKind, Status) error {
 	return nil
+}
+func (noopRepo) Profile(context.Context, string) (*Profile, error)        { return nil, nil }
+func (noopRepo) UpsertProfile(context.Context, string, string) error      { return nil }
+func (noopRepo) GamesForUser(context.Context, string, int) ([]UserGame, error) {
+	return nil, nil
+}
+func (noopRepo) StatsForUser(context.Context, string) (UserStats, error) {
+	return UserStats{}, nil
 }

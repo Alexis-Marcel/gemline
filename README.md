@@ -12,31 +12,40 @@ Each player has a colored stock of 50 gems. On your turn you place one gem on an
 
 ## Status
 
-The full vertical slice works end-to-end: a React frontend in `web/` lets two browsers join the same game and play in real time, the Go backend persists every move to Postgres so games survive a restart, and the engine itself is covered by tests (99.3% on `internal/game`).
+The full vertical slice works end-to-end: a React frontend in `web/` lets two browsers join the same game and play in real time, the Go backend persists every move to Postgres so games survive a restart, signed-in users get profiles + history + stats, and the engine itself is covered by tests (99.3% on `internal/game`).
 
-**Works:** game creation, token-gated joining, turn enforcement, captures, alignments, win detection, WebSocket broadcast with auto-reconnect, persistence to Postgres with full state replay on load, two-player UI.
+**Works:** game creation, token-gated joining (anonymous *or* authenticated), turn enforcement, captures, alignments, win detection, WebSocket broadcast with auto-reconnect, persistence to Postgres with full state replay on load, Supabase email/password auth, per-user history and aggregate stats.
 
 **Not yet:** AI opponents, rate limiting, multi-instance deployment (the WebSocket hub is per-process — a second backend instance wouldn't share broadcasts without pub/sub).
 
 ## Getting started
 
-The stack is Go for the backend, Vite + React for the frontend, Postgres for persistence. Postgres runs via Docker Compose for local dev.
+The stack is Go for the backend, Vite + React for the frontend, Postgres for persistence, and Supabase for user authentication. Postgres can be your Supabase project's database (recommended) or a local Docker Postgres for offline dev.
+
+### One-time setup
+
+1. Create a free project at [supabase.com](https://supabase.com).
+2. Grab three values from your project settings:
+   - **DATABASE_URL** — Settings → Database → Connection string (URI format).
+   - **VITE_SUPABASE_URL** and **VITE_SUPABASE_ANON_KEY** — Settings → API.
+   - **SUPABASE_JWT_SECRET** — Settings → API → JWT Settings.
+3. Frontend env vars: copy `web/.env.example` to `web/.env.local` and paste the `VITE_SUPABASE_*` values.
+
+### Run
 
 ```sh
-# 1. Start Postgres (once)
-docker compose up -d
-
-# 2. Backend
-DATABASE_URL='postgres://gemline:gemline@localhost:5432/gemline?sslmode=disable' \
+# Backend
+DATABASE_URL='<your Supabase DATABASE_URL>' \
+SUPABASE_JWT_SECRET='<your JWT secret>' \
   go run ./cmd/server
 
-# 3. Frontend (in another shell)
+# Frontend (separate shell)
 cd web && npm install && npm run dev
 ```
 
 The frontend serves on `:5173` and proxies `/api` and `/ws` to the backend on `:8080`. Visit `http://localhost:5173` to play.
 
-`DATABASE_URL` is optional: if unset, the backend falls back to a purely in-memory store (good for tests, but games are lost when the server stops).
+`DATABASE_URL` is optional — if unset, games stay in memory and are lost on restart. `SUPABASE_JWT_SECRET` is also optional — if unset, the user-auth endpoints respond 401, but anonymous play still works. For an offline-friendly dev loop without Supabase, `docker compose up -d` brings up a local Postgres on `localhost:5432` with credentials `gemline / gemline`.
 
 ### Quick smoke test against the API
 
@@ -56,18 +65,27 @@ curl -s -X POST localhost:8080/api/games/$GAME/moves \
 
 ## API
 
-| Method | Path                          | Body / auth                            | Purpose                       |
-| ------ | ----------------------------- | -------------------------------------- | ----------------------------- |
-| POST   | `/api/games`                  | `{"players": N}` (N ∈ 2..6)            | Create a game, returns its ID |
-| POST   | `/api/games/{id}/join`        | `{"name": "..."}` (optional `"seat"`)  | Claim a seat, returns a token |
-| POST   | `/api/games/{id}/moves`       | `{"q": Q, "r": R}` + `Bearer <token>`  | Play a stone                  |
-| GET    | `/api/games/{id}`             |                                        | Snapshot of the game state    |
-| GET    | `/ws/games/{id}`              | WebSocket                              | Live event stream             |
-| GET    | `/healthz`, `/readyz`         |                                        | Health checks                 |
+Two parallel auth tokens travel on requests:
+
+- **`Authorization: Bearer <JWT>`** — Supabase-issued user JWT. Identifies *who* the client is. Optional on game endpoints (anonymous play is allowed) and required on `/api/auth/*`, `/api/profile`, `/api/users/me/*`.
+- **`X-Player-Token: <seat-token>`** — per-seat secret returned once by `/join`. Identifies *which seat* in *which game* the client controls. Required on `/api/games/{id}/moves`.
+
+| Method | Path                                | Auth                 | Purpose                                 |
+| ------ | ----------------------------------- | -------------------- | --------------------------------------- |
+| POST   | `/api/games`                        | optional JWT         | Create a game                           |
+| POST   | `/api/games/{id}/join`              | optional JWT         | Claim a seat (linked to user if signed in) |
+| POST   | `/api/games/{id}/moves`             | seat token + JWT     | Play a stone                            |
+| GET    | `/api/games/{id}`                   |                      | Snapshot of the game state              |
+| GET    | `/ws/games/{id}`                    |                      | Live event stream                       |
+| GET    | `/api/auth/me`                      | JWT required         | Authenticated user's profile            |
+| PUT    | `/api/profile`                      | JWT required         | Update display name                     |
+| GET    | `/api/users/me/games`               | JWT required         | Caller's game history                   |
+| GET    | `/api/users/me/stats`               | JWT required         | Caller's aggregate stats                |
+| GET    | `/healthz`, `/readyz`               |                      | Health checks                           |
 
 A game starts in `waiting` and transitions to `playing` once every seat is claimed. The WebSocket emits one `state` event on connect, then a `move` event after every placement. The server pings every 25s; the client reconnects with exponential backoff and ±30% jitter.
 
-The bearer token returned by `join` is sent once and then only its SHA-256 is persisted — comparing on the hash means an attacker reading the DB cannot impersonate a player, and a player keeps their seat across server restarts.
+The seat token returned by `join` is sent once and then only its SHA-256 is persisted — comparing on the hash means an attacker reading the DB cannot impersonate a player, and a player keeps their seat across server restarts.
 
 ### Coordinates
 
@@ -80,13 +98,14 @@ The `cells` field of the game DTO is a flat array of length `(2·side − 1)² =
 ```
 cmd/server/             backend entrypoint
 internal/game/          pure engine — no I/O, no concurrency
-internal/server/        HTTP + WebSocket layer, in-memory cache, Postgres repo
+internal/server/        HTTP + WebSocket layer, in-memory cache, Postgres repo, JWT middleware
 internal/db/            connection helper + embedded goose migrations
 web/                    Vite + React + Tailwind frontend
-  src/api/              wire types, REST client, WebSocket singleton
-  src/components/       Board (SVG hex grid) and Scoreboard
-  src/pages/            HomePage (create/join), GamePage (play)
-docker-compose.yml      Postgres for local dev
+  src/api/              wire types, REST client, WebSocket singleton, Supabase client
+  src/auth/             AuthProvider + useAuth hook
+  src/components/       Board, Scoreboard, UserNav
+  src/pages/            HomePage, GamePage, LoginPage/SignupPage, ProfilePage
+docker-compose.yml      offline-friendly Postgres for local dev
 ```
 
 Persistence is event-sourced: the database stores `games`, `seats`, and `moves`. On load, a game's state is rebuilt by replaying its moves through `ApplyMove`, so captures and win states are reproduced by the same rule engine used at play time. There is no separate snapshot; the move log is the source of truth.

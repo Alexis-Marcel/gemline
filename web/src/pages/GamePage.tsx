@@ -6,6 +6,7 @@ import type { ConnStatus as WsConnStatus } from "../api/gameSocket";
 import { useGameSocket } from "../api/ws";
 import { Board } from "../components/Board";
 import { Scoreboard } from "../components/Scoreboard";
+import { UserNav } from "../components/UserNav";
 import { clearCredentials, loadCredentials, saveCredentials } from "../lib/auth";
 import { gemName } from "../lib/colors";
 
@@ -105,7 +106,10 @@ export function GamePage() {
           <Link to="/" className="text-lg font-semibold text-zinc-100">
             Gemline
           </Link>
-          <ConnStatus status={wsStatus} attempt={wsAttempt} />
+          <div className="flex items-center gap-3">
+            <ConnStatus status={wsStatus} attempt={wsAttempt} />
+            <UserNav />
+          </div>
         </header>
 
         <Scoreboard game={game} mySeatIndex={creds?.seatIndex ?? null} />

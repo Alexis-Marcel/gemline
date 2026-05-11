@@ -5,33 +5,52 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/alexis/gemline/internal/game"
 )
 
 type Server struct {
-	store *Store
-	hub   *Hub
-	log   *slog.Logger
+	store     *Store
+	hub       *Hub
+	log       *slog.Logger
+	jwtSecret string
 }
 
-// New returns a Server backed by the given store. Callers wire the store with
-// the desired Repository (Postgres in production, noopRepo for tests).
-func New(log *slog.Logger, store *Store) *Server {
-	return &Server{store: store, hub: NewHub(), log: log}
+// Config holds optional dependencies that change how the server behaves.
+type Config struct {
+	// JWTSecret is the HMAC secret used to verify Supabase-issued JWTs.
+	// When empty, all incoming requests are treated as anonymous; endpoints
+	// that require a user respond 401.
+	JWTSecret string
+}
+
+// New returns a Server backed by the given store and config.
+func New(log *slog.Logger, store *Store, cfg Config) *Server {
+	return &Server{
+		store:     store,
+		hub:       NewHub(),
+		log:       log,
+		jwtSecret: cfg.JWTSecret,
+	}
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
+
 	mux.HandleFunc("POST /api/games", s.createGame)
 	mux.HandleFunc("GET /api/games/{id}", s.getGame)
 	mux.HandleFunc("POST /api/games/{id}/join", s.joinGame)
 	mux.HandleFunc("POST /api/games/{id}/moves", s.postMove)
 	mux.HandleFunc("GET /ws/games/{id}", s.wsGame)
-	return loggingMiddleware(s.log, corsMiddleware(mux))
+
+	mux.HandleFunc("GET /api/auth/me", s.getMe)
+	mux.HandleFunc("PUT /api/profile", s.putProfile)
+	mux.HandleFunc("GET /api/users/me/games", s.getMyGames)
+	mux.HandleFunc("GET /api/users/me/stats", s.getMyStats)
+
+	return loggingMiddleware(s.log, corsMiddleware(jwtMiddleware(s.jwtSecret, mux)))
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -93,7 +112,11 @@ func (s *Server) joinGame(w http.ResponseWriter, r *http.Request) {
 		seatIdx = *req.Seat
 	}
 
-	seat, token, err := s.store.Join(r.Context(), gameID, req.Name, seatIdx)
+	userID := ""
+	if u, ok := userFromContext(r.Context()); ok {
+		userID = u.ID
+	}
+	seat, token, err := s.store.Join(r.Context(), gameID, req.Name, userID, seatIdx)
 	if err != nil {
 		writeError(w, statusForJoinError(err), err.Error())
 		return
@@ -112,7 +135,7 @@ func (s *Server) joinGame(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) postMove(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
-	token := bearerToken(r)
+	token := playerToken(r)
 	if token == "" {
 		writeError(w, http.StatusUnauthorized, "missing player token")
 		return
@@ -169,17 +192,6 @@ func statusForMoveError(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
-}
-
-func bearerToken(r *http.Request) string {
-	h := r.Header.Get("Authorization")
-	if strings.HasPrefix(h, "Bearer ") {
-		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-	}
-	if t := r.Header.Get("X-Player-Token"); t != "" {
-		return t
-	}
-	return r.URL.Query().Get("token")
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

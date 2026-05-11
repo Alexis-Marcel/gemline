@@ -17,7 +17,12 @@ const (
 
 func (s *Server) wsGame(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	rec, ok := s.store.Get(id)
+	rec, ok, err := s.store.Get(r.Context(), id)
+	if err != nil {
+		s.log.Error("ws load game", "err", err)
+		http.Error(w, "could not load game", http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		http.Error(w, "game not found", http.StatusNotFound)
 		return

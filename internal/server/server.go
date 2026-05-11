@@ -16,12 +16,10 @@ type Server struct {
 	log   *slog.Logger
 }
 
-func New(log *slog.Logger) *Server {
-	return &Server{
-		store: NewStore(),
-		hub:   NewHub(),
-		log:   log,
-	}
+// New returns a Server backed by the given store. Callers wire the store with
+// the desired Repository (Postgres in production, noopRepo for tests).
+func New(log *slog.Logger, store *Store) *Server {
+	return &Server{store: store, hub: NewHub(), log: log}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -54,12 +52,25 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "players must be in [2, 6]")
 		return
 	}
-	rec := s.store.Create(req.Players)
-	writeJSON(w, http.StatusCreated, toGameDTO(rec))
+	rec, err := s.store.Create(r.Context(), req.Players)
+	if err != nil {
+		s.log.Error("create game", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not create game")
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	writeJSON(w, http.StatusCreated, dto)
 }
 
 func (s *Server) getGame(w http.ResponseWriter, r *http.Request) {
-	rec, ok := s.store.Get(r.PathValue("id"))
+	rec, ok, err := s.store.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.log.Error("get game", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not load game")
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "game not found")
 		return
@@ -71,11 +82,7 @@ func (s *Server) getGame(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) joinGame(w http.ResponseWriter, r *http.Request) {
-	rec, ok := s.store.Get(r.PathValue("id"))
-	if !ok {
-		writeError(w, http.StatusNotFound, "game not found")
-		return
-	}
+	gameID := r.PathValue("id")
 	var req joinGameRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
@@ -85,31 +92,26 @@ func (s *Server) joinGame(w http.ResponseWriter, r *http.Request) {
 	if req.Seat != nil {
 		seatIdx = *req.Seat
 	}
-	rec.Lock()
-	seat, err := Join(rec, req.Name, seatIdx)
-	var resp joinResponse
-	if err == nil {
-		resp = joinResponse{
-			Game:  toGameDTO(rec),
-			Seat:  toSeatDTO(seat),
-			Token: seat.Token,
-		}
-	}
-	rec.Unlock()
+
+	seat, token, err := s.store.Join(r.Context(), gameID, req.Name, seatIdx)
 	if err != nil {
 		writeError(w, statusForJoinError(err), err.Error())
 		return
 	}
-	s.hub.Broadcast(rec.ID, eventState(resp.Game))
+
+	// Snapshot the game for the response and the broadcast.
+	rec, _, _ := s.store.Get(r.Context(), gameID)
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+
+	resp := joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token}
+	s.hub.Broadcast(gameID, eventState(dto))
 	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) postMove(w http.ResponseWriter, r *http.Request) {
-	rec, ok := s.store.Get(r.PathValue("id"))
-	if !ok {
-		writeError(w, http.StatusNotFound, "game not found")
-		return
-	}
+	gameID := r.PathValue("id")
 	token := bearerToken(r)
 	if token == "" {
 		writeError(w, http.StatusUnauthorized, "missing player token")
@@ -121,42 +123,25 @@ func (s *Server) postMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rec.Lock()
-	seat, ok := rec.SeatByToken(token)
-	if !ok {
-		rec.Unlock()
-		writeError(w, http.StatusUnauthorized, "invalid token")
-		return
-	}
-	if rec.Status != StatusPlaying {
-		rec.Unlock()
-		writeError(w, http.StatusConflict, "game is not playing")
-		return
-	}
-	out, err := rec.State.ApplyMove(game.Move{
-		Player: seat.Color,
-		Pos:    game.Position{Q: req.Q, R: req.R},
-	})
+	out, rec, err := s.store.PlayMove(r.Context(), gameID, token, req.Q, req.R)
 	if err != nil {
-		rec.Unlock()
 		writeError(w, statusForMoveError(err), err.Error())
 		return
 	}
-	if rec.State.Winner != game.Empty {
-		rec.Status = StatusFinished
-	}
-	resp := moveResponse{
-		Game:     toGameDTO(rec),
-		Captures: toCaptureDTOs(out.Captures),
-	}
+
+	rec.Lock()
+	dto := toGameDTO(rec)
 	rec.Unlock()
 
-	s.hub.Broadcast(rec.ID, eventMove(resp))
+	resp := moveResponse{Game: dto, Captures: toCaptureDTOs(out.Captures)}
+	s.hub.Broadcast(gameID, eventMove(resp))
 	writeJSON(w, http.StatusOK, resp)
 }
 
 func statusForJoinError(err error) int {
 	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
 	case errors.Is(err, ErrSeatTaken), errors.Is(err, ErrNoFreeSeat):
 		return http.StatusConflict
 	case errors.Is(err, ErrNotPlaying):
@@ -168,6 +153,12 @@ func statusForJoinError(err error) int {
 
 func statusForMoveError(err error) int {
 	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrBadToken):
+		return http.StatusUnauthorized
+	case errors.Is(err, ErrNotPlaying):
+		return http.StatusConflict
 	case errors.Is(err, game.ErrOutOfBounds),
 		errors.Is(err, game.ErrCellOccupied),
 		errors.Is(err, game.ErrWrongTurn),

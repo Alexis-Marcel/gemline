@@ -43,22 +43,12 @@ export function Scoreboard({ game, mySeatIndex }: ScoreboardProps) {
                     </span>
                   )}
                 </div>
-                <div className="mt-1 grid grid-cols-3 gap-1 text-xs text-zinc-400">
+                <div className="mt-1 grid grid-cols-2 gap-1 text-xs text-zinc-400">
                   <Stat
                     label="Paires"
                     value={`${p.capturedPairs}/${t.capturePairsWin}`}
                   />
-                  <Stat
-                    label="4-runs"
-                    value={`${p.alignments4}/${t.align4ToWin}`}
-                  />
-                  <Stat
-                    label="5-runs"
-                    value={`${p.alignments5}/${t.align5ToWin}`}
-                  />
-                </div>
-                <div className="mt-1 text-xs text-zinc-500">
-                  {p.gemsRemaining} gemmes restantes
+                  <Stat label="Gemmes" value={`${p.gemsRemaining}`} />
                 </div>
               </div>
             </div>

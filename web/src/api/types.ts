@@ -26,8 +26,6 @@ export interface PlayerScore {
   color: Color;
   gemsRemaining: number;
   capturedPairs: number;
-  alignments4: number;
-  alignments5: number;
 }
 
 export interface Thresholds {

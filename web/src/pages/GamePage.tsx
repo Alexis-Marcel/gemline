@@ -5,6 +5,7 @@ import type { Game, WinKind } from "../api/types";
 import type { ConnStatus as WsConnStatus } from "../api/gameSocket";
 import { useGameSocket } from "../api/ws";
 import { Board } from "../components/Board";
+import { Objectives } from "../components/Objectives";
 import { Scoreboard } from "../components/Scoreboard";
 import { UserNav } from "../components/UserNav";
 import { clearCredentials, loadCredentials, saveCredentials } from "../lib/auth";
@@ -113,6 +114,8 @@ export function GamePage() {
         </header>
 
         <Scoreboard game={game} mySeatIndex={creds?.seatIndex ?? null} />
+
+        <Objectives thresholds={game.thresholds} />
 
         {game.status === "waiting" && !creds && (
           <JoinForm

@@ -30,9 +30,9 @@ export function Scoreboard({ game, mySeatIndex, presence = {} }: ScoreboardProps
         return (
           <li
             key={p.color}
-            className={`rounded-lg border p-3 transition ${
+            className={`rounded-lg border p-3 transition-colors ${
               isTurn
-                ? "border-yellow-400 bg-yellow-400/5"
+                ? "border-amber-400/60 bg-amber-400/5 shadow-[inset_3px_0_0_0_rgba(251,191,36,0.9)]"
                 : "border-zinc-800 bg-zinc-900/50"
             }`}
           >
@@ -61,7 +61,7 @@ export function Scoreboard({ game, mySeatIndex, presence = {} }: ScoreboardProps
                 </div>
                 <div className="mt-0.5 flex items-center gap-2 text-xs">
                   {isTurn && (
-                    <span className="font-medium text-yellow-400">à jouer</span>
+                    <span className="font-medium text-amber-400">à jouer</span>
                   )}
                   {showOffline && <DisconnectBadge />}
                 </div>

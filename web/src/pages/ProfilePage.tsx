@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import type { Profile, UserGame, UserStats } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
+import { Button } from "../components/Button";
 
 export function ProfilePage() {
   const { user, loading, signOut } = useAuth();
@@ -103,17 +104,16 @@ export function ProfilePage() {
               type="text"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
+              className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
               required
             />
           </label>
-          <button
+          <Button
             type="submit"
             disabled={saving || displayName.trim() === profile?.displayName}
-            className="rounded-md bg-yellow-500 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-yellow-400 disabled:opacity-50"
           >
             {saving ? "Enregistrement…" : "Enregistrer"}
-          </button>
+          </Button>
         </form>
         {error && (
           <p className="mt-3 text-sm text-red-300">{error}</p>

@@ -297,6 +297,57 @@ func (r *PostgresRepo) StatsForUser(ctx context.Context, userID string) (UserSta
 	return st, nil
 }
 
+func (r *PostgresRepo) AppendMessage(ctx context.Context, m *Message) error {
+	var sentAt time.Time
+	if err := r.pool.QueryRowContext(ctx, `
+		INSERT INTO messages (game_id, seat_index, author_color, author_name, body)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, sent_at
+	`, m.GameID, m.SeatIndex, int(m.AuthorColor), m.AuthorName, m.Body).Scan(&m.ID, &sentAt); err != nil {
+		return err
+	}
+	m.SentAt = sentAt.UTC().Format(time.RFC3339Nano)
+	return nil
+}
+
+func (r *PostgresRepo) MessagesForGame(ctx context.Context, gameID string, limit int) ([]Message, error) {
+	// Fetch the most-recent `limit` rows then reverse so the response is in
+	// chronological order (oldest first) — the natural order for rendering.
+	rows, err := r.pool.QueryContext(ctx, `
+		SELECT id, seat_index, author_color, author_name, body, sent_at
+		FROM messages WHERE game_id = $1
+		ORDER BY sent_at DESC LIMIT $2
+	`, gameID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]Message, 0)
+	for rows.Next() {
+		var (
+			m        Message
+			color    int
+			sentAt   time.Time
+		)
+		if err := rows.Scan(&m.ID, &m.SeatIndex, &color, &m.AuthorName, &m.Body, &sentAt); err != nil {
+			return nil, err
+		}
+		m.GameID = gameID
+		m.AuthorColor = game.Color(color)
+		m.SentAt = sentAt.UTC().Format(time.RFC3339Nano)
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Reverse in-place: oldest first.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
 func deriveOutcome(status Status, mine, winner game.Color) string {
 	if status != StatusFinished {
 		return "ongoing"

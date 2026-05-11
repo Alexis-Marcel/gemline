@@ -30,6 +30,14 @@ type Repository interface {
 
 	// StatsForUser returns aggregate counts across all of the user's games.
 	StatsForUser(ctx context.Context, userID string) (UserStats, error)
+
+	// AppendMessage persists a chat message and returns its DB-assigned id
+	// and sent_at timestamp.
+	AppendMessage(ctx context.Context, m *Message) error
+
+	// MessagesForGame returns the most recent messages in `gameID`, oldest
+	// first, up to `limit`.
+	MessagesForGame(ctx context.Context, gameID string, limit int) ([]Message, error)
 }
 
 // Profile is the user-controlled profile row.
@@ -59,6 +67,18 @@ type UserStats struct {
 	Ongoing int `json:"ongoing"`
 }
 
+// Message is a chat line posted in a game. AuthorColor/AuthorName are
+// denormalised snapshots captured at post time.
+type Message struct {
+	ID          int64      `json:"id"`
+	GameID      string     `json:"gameId"`
+	SeatIndex   int        `json:"seatIndex"`
+	AuthorColor game.Color `json:"authorColor"`
+	AuthorName  string     `json:"authorName"`
+	Body        string     `json:"body"`
+	SentAt      string     `json:"sentAt"`
+}
+
 // noopRepo lets the in-memory Store run without a database. It returns
 // ErrNoGame for any load — callers should treat that as "not found" and
 // fall back to whatever they have in memory.
@@ -79,4 +99,8 @@ func (noopRepo) GamesForUser(context.Context, string, int) ([]UserGame, error) {
 }
 func (noopRepo) StatsForUser(context.Context, string) (UserStats, error) {
 	return UserStats{}, nil
+}
+func (noopRepo) AppendMessage(context.Context, *Message) error { return nil }
+func (noopRepo) MessagesForGame(context.Context, string, int) ([]Message, error) {
+	return nil, nil
 }

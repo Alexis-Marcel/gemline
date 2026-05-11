@@ -5,6 +5,7 @@ import type { Game, Replay, WinKind } from "../api/types";
 import type { ConnStatus as WsConnStatus } from "../api/gameSocket";
 import { useGameSocket } from "../api/ws";
 import { Board } from "../components/Board";
+import { ChatPanel } from "../components/ChatPanel";
 import { Objectives } from "../components/Objectives";
 import { ReplayControls } from "../components/ReplayControls";
 import { Scoreboard } from "../components/Scoreboard";
@@ -149,6 +150,8 @@ export function GamePage() {
         <Scoreboard game={game} mySeatIndex={creds?.seatIndex ?? null} />
 
         <Objectives thresholds={game.thresholds} />
+
+        <ChatPanel gameId={id} playerToken={creds?.token ?? null} />
 
         {game.status === "waiting" && !creds && (
           <JoinForm

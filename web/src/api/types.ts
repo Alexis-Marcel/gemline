@@ -74,7 +74,8 @@ export interface JoinResponse {
 export type WsEvent =
   | { type: "state"; payload: Game }
   | { type: "move"; payload: MoveResponse }
-  | { type: "chat"; payload: Message };
+  | { type: "chat"; payload: Message }
+  | { type: "presence"; payload: { seatIndex: number; online: boolean } };
 
 export interface Message {
   id: number;

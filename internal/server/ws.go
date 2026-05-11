@@ -15,6 +15,13 @@ const (
 	wsPingTimeout  = 10 * time.Second
 )
 
+// wsClientMessage is anything the client may send to us. Only `hello` is
+// handled today; new branches can land on Type without breaking compat.
+type wsClientMessage struct {
+	Type  string `json:"type"`
+	Token string `json:"token,omitempty"`
+}
+
 func (s *Server) wsGame(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rec, ok, err := s.store.Get(r.Context(), id)
@@ -48,17 +55,11 @@ func (s *Server) wsGame(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// Reader goroutine: the protocol is broadcast-only for now, but we still
-	// need to read so the library can process control frames (pong replies to
-	// our pings, close frames, etc).
-	go func() {
-		defer cancel()
-		for {
-			if _, _, err := conn.Read(ctx); err != nil {
-				return
-			}
-		}
-	}()
+	// Reader goroutine: dispatches client messages. The "hello" message
+	// registers this connection's seat for presence tracking. Authentication
+	// can arrive any time after open — the client may resend it after a
+	// reconnect, for example.
+	go s.runReader(ctx, conn, rec, cancel)
 
 	pingTicker := time.NewTicker(wsPingInterval)
 	defer pingTicker.Stop()
@@ -90,6 +91,40 @@ func (s *Server) wsGame(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				s.log.Info("ws ping failed, closing", "game", id, "err", err)
 				return
+			}
+		}
+	}
+}
+
+// runReader owns the connection's read side: dispatches client messages and
+// tracks the seat assigned via "hello". When the read loop exits (closed or
+// errored) and the connection had registered a seat, we report it as
+// disconnected so the presence timer kicks in.
+func (s *Server) runReader(ctx context.Context, conn *websocket.Conn, rec *GameRecord, cancel context.CancelFunc) {
+	defer cancel()
+	seatIndex := -1
+	defer func() {
+		if seatIndex >= 0 {
+			s.store.SeatDisconnected(rec.ID, seatIndex)
+		}
+	}()
+
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		var msg wsClientMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+		if msg.Type == "hello" && seatIndex < 0 && msg.Token != "" {
+			rec.Lock()
+			seat, ok := rec.SeatByToken(msg.Token)
+			rec.Unlock()
+			if ok {
+				seatIndex = seat.Index
+				s.store.SeatConnected(rec.ID, seatIndex)
 			}
 		}
 	}

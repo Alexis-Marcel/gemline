@@ -24,6 +24,15 @@ func eventChat(m Message) Event {
 	return Event{Type: "chat", Payload: m}
 }
 
+type presencePayload struct {
+	SeatIndex int  `json:"seatIndex"`
+	Online    bool `json:"online"`
+}
+
+func eventPresence(seatIndex int, online bool) Event {
+	return Event{Type: "presence", Payload: presencePayload{SeatIndex: seatIndex, Online: online}}
+}
+
 // subscriber holds the channel a single client reads from. Sending blocks
 // when the buffer is full; we drop messages instead of blocking the hub.
 type subscriber struct {

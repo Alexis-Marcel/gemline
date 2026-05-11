@@ -18,7 +18,7 @@ import (
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return httptest.NewServer(New(log).Routes())
+	return httptest.NewServer(New(log, NewStore(nil)).Routes())
 }
 
 func TestHealthz(t *testing.T) {

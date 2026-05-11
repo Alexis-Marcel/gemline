@@ -12,33 +12,43 @@ Each player has a colored stock of 50 gems. On your turn you place one gem on an
 
 ## Status
 
-The server-side game engine and the multiplayer plumbing are complete and covered by tests (99.3% on `internal/game`). There is no frontend yet — you can drive the API with `curl` or the test suite, but you can't yet click on a board.
+The full vertical slice works end-to-end: a React frontend in `web/` lets two browsers join the same game and play in real time, the Go backend persists every move to Postgres so games survive a restart, and the engine itself is covered by tests (99.3% on `internal/game`).
 
-**Works:** game creation, joining with token-based seat assignment, turn enforcement, captures, alignments, win detection, WebSocket broadcast of moves to all subscribed clients.
+**Works:** game creation, token-gated joining, turn enforcement, captures, alignments, win detection, WebSocket broadcast with auto-reconnect, persistence to Postgres with full state replay on load, two-player UI.
 
-**Not yet:** UI, persistence (state is in-memory and lost on restart), reconnection / disconnect handling, AI opponents, rate limiting.
+**Not yet:** AI opponents, rate limiting, multi-instance deployment (the WebSocket hub is per-process — a second backend instance wouldn't share broadcasts without pub/sub).
 
 ## Getting started
 
+The stack is Go for the backend, Vite + React for the frontend, Postgres for persistence. Postgres runs via Docker Compose for local dev.
+
 ```sh
-go test ./...           # 28 engine tests + 8 server tests
-go run ./cmd/server     # listens on :8080 (override with ADDR=:9000)
+# 1. Start Postgres (once)
+docker compose up -d
+
+# 2. Backend
+DATABASE_URL='postgres://gemline:gemline@localhost:5432/gemline?sslmode=disable' \
+  go run ./cmd/server
+
+# 3. Frontend (in another shell)
+cd web && npm install && npm run dev
 ```
 
-Quick smoke test against a running server:
+The frontend serves on `:5173` and proxies `/api` and `/ws` to the backend on `:8080`. Visit `http://localhost:5173` to play.
+
+`DATABASE_URL` is optional: if unset, the backend falls back to a purely in-memory store (good for tests, but games are lost when the server stops).
+
+### Quick smoke test against the API
 
 ```sh
-# Create a 2-player game
 GAME=$(curl -s -X POST localhost:8080/api/games \
   -H 'Content-Type: application/json' -d '{"players":2}' | jq -r .id)
 
-# Both players join, capture the returned tokens
 TOK_A=$(curl -s -X POST localhost:8080/api/games/$GAME/join \
   -H 'Content-Type: application/json' -d '{"name":"Alice"}' | jq -r .token)
 TOK_B=$(curl -s -X POST localhost:8080/api/games/$GAME/join \
   -H 'Content-Type: application/json' -d '{"name":"Bob"}' | jq -r .token)
 
-# Alice plays at the center; tokens authenticate the player
 curl -s -X POST localhost:8080/api/games/$GAME/moves \
   -H "Authorization: Bearer $TOK_A" \
   -H 'Content-Type: application/json' -d '{"q":0,"r":0}'
@@ -55,7 +65,9 @@ curl -s -X POST localhost:8080/api/games/$GAME/moves \
 | GET    | `/ws/games/{id}`              | WebSocket                              | Live event stream             |
 | GET    | `/healthz`, `/readyz`         |                                        | Health checks                 |
 
-A game starts in `waiting` and transitions to `playing` once every seat is claimed. The WebSocket emits one `state` event on connect, then a `move` event after every placement.
+A game starts in `waiting` and transitions to `playing` once every seat is claimed. The WebSocket emits one `state` event on connect, then a `move` event after every placement. The server pings every 25s; the client reconnects with exponential backoff and ±30% jitter.
+
+The bearer token returned by `join` is sent once and then only its SHA-256 is persisted — comparing on the hash means an attacker reading the DB cannot impersonate a player, and a player keeps their seat across server restarts.
 
 ### Coordinates
 
@@ -66,29 +78,30 @@ The `cells` field of the game DTO is a flat array of length `(2·side − 1)² =
 ## Project layout
 
 ```
-cmd/server/        main entrypoint
-internal/game/     pure engine — no I/O, no concurrency
-  types.go         Color, Position, Move, errors
-  board.go         hex storage, In/At/Set, three line directions
-  rules.go         capture detection and run scanning
-  state.go         turn order, win conditions, ApplyMove
-internal/server/   HTTP + WebSocket layer
-  server.go        REST routes
-  store.go         in-memory game registry, seat/token assignment
-  hub.go           per-game pub/sub for WebSocket clients
-  ws.go            WebSocket handler
-  middleware.go    request logging
-  cors.go          dev-mode permissive CORS
-  dto.go           wire types
+cmd/server/             backend entrypoint
+internal/game/          pure engine — no I/O, no concurrency
+internal/server/        HTTP + WebSocket layer, in-memory cache, Postgres repo
+internal/db/            connection helper + embedded goose migrations
+web/                    Vite + React + Tailwind frontend
+  src/api/              wire types, REST client, WebSocket singleton
+  src/components/       Board (SVG hex grid) and Scoreboard
+  src/pages/            HomePage (create/join), GamePage (play)
+docker-compose.yml      Postgres for local dev
 ```
 
-The `game` package has no dependencies outside the standard library; the `server` package adds `github.com/coder/websocket`.
+Persistence is event-sourced: the database stores `games`, `seats`, and `moves`. On load, a game's state is rebuilt by replaying its moves through `ApplyMove`, so captures and win states are reproduced by the same rule engine used at play time. There is no separate snapshot; the move log is the source of truth.
 
 ## Tests
 
 ```sh
-go test ./...
-go test -cover ./internal/game/...   # 99.3 %
+go test ./...                                   # engine + REST + WS (hermetic)
+go test -cover ./internal/game/...              # 99.3 %
+
+# Integration tests that hit a real Postgres (started via docker compose):
+GEMLINE_TEST_DATABASE_URL='postgres://gemline:gemline@localhost:5432/gemline?sslmode=disable' \
+  go test ./internal/db/... ./internal/server/...
 ```
 
-The engine tests cover hex bounds, capture detection on all three axes, capture chaining (multi-axis and multi-pattern on a single axis), suicide non-capture, alignment counting before and after captures, win conditions for each kind (4, 5, 6 alignments, capture threshold), turn rotation for 2- and 3-player games, and every documented error path. The server tests cover the REST round trip including token-gated moves and the WebSocket broadcast.
+The hermetic suite covers hex bounds, capture detection on all three axes, capture chaining (multi-axis and multi-pattern on a single axis), suicide non-capture, alignment counting before and after captures, win conditions for each kind (4, 5, 6 alignments, capture threshold), turn rotation for 2- and 3-player games, and every documented error path. The server tests cover the REST round trip and the WebSocket broadcast.
+
+The integration suite verifies that a game replayed from Postgres produces the same in-memory state as the original — including the capture scenario, where two stones are removed by the rule engine during replay.

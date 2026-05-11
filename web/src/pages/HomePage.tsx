@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
+import { Button } from "../components/Button";
 import { UserNav } from "../components/UserNav";
 
 export function HomePage() {
@@ -35,7 +36,10 @@ export function HomePage() {
     <div className="mx-auto flex h-full max-w-md flex-col justify-center gap-8 p-6">
       <header className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-semibold text-zinc-100">Gemline</h1>
+          <h1 className="flex items-center gap-2 text-3xl font-semibold text-zinc-100">
+            <span aria-hidden className="inline-block h-5 w-5 rounded-sm bg-amber-400" />
+            Gemline
+          </h1>
           <p className="mt-1 text-sm text-zinc-400">
             Plateau hexagonal, alignement ou capture pour gagner.
           </p>
@@ -51,7 +55,7 @@ export function HomePage() {
         <label className="block text-sm text-zinc-400">
           Nombre de joueurs
           <select
-            className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
+            className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
             value={players}
             onChange={(e) => setPlayers(Number(e.target.value))}
           >
@@ -62,13 +66,9 @@ export function HomePage() {
             ))}
           </select>
         </label>
-        <button
-          type="submit"
-          disabled={creating}
-          className="w-full rounded-md bg-yellow-500 px-3 py-2 font-medium text-zinc-950 transition hover:bg-yellow-400 disabled:opacity-50"
-        >
+        <Button type="submit" disabled={creating} className="w-full">
           {creating ? "Création…" : "Créer"}
-        </button>
+        </Button>
       </form>
 
       <form
@@ -79,18 +79,15 @@ export function HomePage() {
         <label className="block text-sm text-zinc-400">
           ID de la partie
           <input
-            className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-zinc-100"
+            className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-zinc-100 focus:border-amber-400 focus:outline-none"
             placeholder="abcdef0123456789"
             value={joinId}
             onChange={(e) => setJoinId(e.target.value)}
           />
         </label>
-        <button
-          type="submit"
-          className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 font-medium text-zinc-100 transition hover:bg-zinc-700"
-        >
+        <Button type="submit" variant="secondary" className="w-full">
           Aller à la partie
-        </button>
+        </Button>
       </form>
 
       {error && (

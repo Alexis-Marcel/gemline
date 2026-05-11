@@ -193,7 +193,14 @@ export function GamePage() {
   return (
     <div className="mx-auto max-w-6xl p-3 lg:p-4">
       <header className="flex items-center justify-between">
-        <Link to="/" className="text-lg font-semibold text-zinc-100">
+        <Link
+          to="/"
+          className="flex items-center gap-2 text-lg font-semibold text-zinc-100 transition hover:text-amber-400"
+        >
+          <span
+            aria-hidden
+            className="inline-block h-4 w-4 rounded-sm bg-amber-400"
+          />
           Gemline
         </Link>
         <div className="flex items-center gap-3">
@@ -386,7 +393,7 @@ function JoinForm({
       <button
         type="submit"
         disabled={disabled || seatsFree === 0}
-        className="w-full rounded-md bg-yellow-500 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-yellow-400 disabled:opacity-50"
+        className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
       >
         {disabled ? "..." : "Rejoindre"}
       </button>
@@ -411,7 +418,7 @@ function ShareCard({ id }: { id: string }) {
 
 function Banner({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-yellow-400/40 bg-yellow-400/10 p-3 text-sm text-yellow-200">
+    <div className="rounded-xl border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-200">
       {children}
     </div>
   );

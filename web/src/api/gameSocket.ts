@@ -1,4 +1,4 @@
-import type { Game, WsEvent } from "./types";
+import type { Game, Message, WsEvent } from "./types";
 
 export type ConnStatus = "connecting" | "open" | "reconnecting" | "offline";
 
@@ -9,6 +9,7 @@ export interface ConnState {
 }
 
 type Listener = (state: ConnState) => void;
+type ChatListener = (msg: Message) => void;
 
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 15_000;
@@ -22,6 +23,7 @@ class GameSocket {
   private readonly gameId: string;
   private ws: WebSocket | null = null;
   private listeners = new Set<Listener>();
+  private chatListeners = new Set<ChatListener>();
   private reconnectTimer: number | null = null;
   private closed = false;
   private state: ConnState = {
@@ -41,8 +43,13 @@ class GameSocket {
     return () => this.listeners.delete(fn);
   }
 
+  subscribeChat(fn: ChatListener): () => void {
+    this.chatListeners.add(fn);
+    return () => this.chatListeners.delete(fn);
+  }
+
   hasSubscribers(): boolean {
-    return this.listeners.size > 0;
+    return this.listeners.size > 0 || this.chatListeners.size > 0;
   }
 
   close(): void {
@@ -90,6 +97,8 @@ class GameSocket {
         this.setState({ game: ev.payload });
       } else if (ev.type === "move") {
         this.setState({ game: ev.payload.game });
+      } else if (ev.type === "chat") {
+        for (const l of this.chatListeners) l(ev.payload);
       }
     };
 
@@ -143,6 +152,41 @@ export function acquireSocket(gameId: string, listener: Listener): () => void {
   }
 
   const unsubscribe = socket.subscribe(listener);
+
+  return () => {
+    unsubscribe();
+    const s = sockets.get(gameId);
+    if (s && !s.hasSubscribers()) {
+      const t = window.setTimeout(() => {
+        const s2 = sockets.get(gameId);
+        if (s2 && !s2.hasSubscribers()) {
+          s2.close();
+          sockets.delete(gameId);
+        }
+        cleanupTimers.delete(gameId);
+      }, CLEANUP_GRACE_MS);
+      cleanupTimers.set(gameId, t);
+    }
+  };
+}
+
+// acquireChatStream subscribes to chat events on the shared socket for
+// `gameId`. The lifecycle counts toward the socket's refcount: as long as a
+// chat listener is alive, the socket stays open. Returns the unsubscribe.
+export function acquireChatStream(gameId: string, listener: ChatListener): () => void {
+  const pending = cleanupTimers.get(gameId);
+  if (pending !== undefined) {
+    window.clearTimeout(pending);
+    cleanupTimers.delete(gameId);
+  }
+
+  let socket = sockets.get(gameId);
+  if (!socket) {
+    socket = new GameSocket(gameId);
+    sockets.set(gameId, socket);
+  }
+
+  const unsubscribe = socket.subscribeChat(listener);
 
   return () => {
     unsubscribe();

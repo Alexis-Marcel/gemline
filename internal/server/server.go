@@ -44,6 +44,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/join", s.joinGame)
 	mux.HandleFunc("POST /api/games/{id}/moves", s.postMove)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
+	mux.HandleFunc("GET /api/games/{id}/messages", s.getChat)
+	mux.HandleFunc("POST /api/games/{id}/messages", s.postChat)
 	mux.HandleFunc("GET /ws/games/{id}", s.wsGame)
 
 	mux.HandleFunc("GET /api/auth/me", s.getMe)

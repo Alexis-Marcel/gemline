@@ -17,7 +17,7 @@ export function UserNav() {
     return (
       <Link
         to="/login"
-        className="text-sm text-zinc-300 hover:text-yellow-400"
+        className="text-sm text-zinc-300 hover:text-amber-400"
       >
         Se connecter
       </Link>
@@ -32,7 +32,7 @@ export function UserNav() {
   return (
     <Link
       to="/profile"
-      className="flex items-center gap-2 text-sm text-zinc-200 hover:text-yellow-400"
+      className="flex items-center gap-2 text-sm text-zinc-200 hover:text-amber-400"
       title={user.email ?? undefined}
     >
       <span className="grid h-7 w-7 place-items-center rounded-full bg-zinc-800 text-xs font-medium text-zinc-200">

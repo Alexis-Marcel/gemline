@@ -44,7 +44,7 @@ export function PlayerClock({
         flagged
           ? "bg-red-500/20 text-red-300"
           : isActive && !frozen
-            ? "bg-yellow-400/20 text-yellow-200"
+            ? "bg-amber-400/20 text-amber-200"
             : "bg-zinc-800 text-zinc-300"
       }`}
     >

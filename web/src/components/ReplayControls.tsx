@@ -76,7 +76,7 @@ export function ReplayControls({ step, total, onChange, onExit }: ReplayControls
         max={total}
         value={step}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="mt-2 w-full accent-yellow-500"
+        className="mt-2 w-full accent-amber-400"
       />
     </div>
   );

@@ -3,6 +3,7 @@ import { api, ApiError } from "../api/client";
 import { acquireChatStream } from "../api/gameSocket";
 import type { Message } from "../api/types";
 import { gemColor } from "../lib/colors";
+import { Button } from "./Button";
 
 const MAX_LEN = 500;
 
@@ -79,7 +80,9 @@ export function ChatPanel({ gameId, playerToken }: ChatPanelProps) {
         className="max-h-64 min-h-32 flex-1 overflow-y-auto px-3 py-2 text-sm"
       >
         {messages.length === 0 ? (
-          <p className="text-xs text-zinc-500">Aucun message.</p>
+          <p className="text-xs italic text-zinc-500">
+            Tu peux discuter avec les autres joueurs ici.
+          </p>
         ) : (
           <ul className="space-y-1.5">
             {messages.map((m) => (
@@ -110,16 +113,15 @@ export function ChatPanel({ gameId, playerToken }: ChatPanelProps) {
               onChange={(e) => setDraft(e.target.value)}
               maxLength={MAX_LEN}
               placeholder="Message…"
-              className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm text-zinc-100"
+              className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm text-zinc-100 focus:border-amber-400 focus:outline-none"
               disabled={sending}
             />
-            <button
+            <Button
               type="submit"
               disabled={sending || draft.trim() === ""}
-              className="rounded-md bg-yellow-500 px-3 py-1 text-sm font-medium text-zinc-950 transition hover:bg-yellow-400 disabled:opacity-40"
             >
               Envoyer
-            </button>
+            </Button>
           </div>
           {error && <p className="mt-1 text-xs text-red-300">{error}</p>}
         </form>

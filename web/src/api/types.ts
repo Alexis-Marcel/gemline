@@ -93,3 +93,18 @@ export interface UserStats {
   lost: number;
   ongoing: number;
 }
+
+export interface ReplayStep {
+  ordinal: number;
+  player: Color;
+  q: number;
+  r: number;
+  captures: Capture[];
+}
+
+export interface Replay {
+  gameId: string;
+  boardSide: number;
+  players: number;
+  steps: ReplayStep[];
+}

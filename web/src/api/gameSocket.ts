@@ -1,4 +1,4 @@
-import type { Game, Message, WsEvent } from "./types";
+import type { Game, Message, MoveResponse, WsEvent } from "./types";
 
 export type ConnStatus = "connecting" | "open" | "reconnecting" | "offline";
 
@@ -11,6 +11,7 @@ export interface ConnState {
 type Listener = (state: ConnState) => void;
 type ChatListener = (msg: Message) => void;
 type PresenceListener = (seatIndex: number, online: boolean) => void;
+type MoveListener = (move: MoveResponse) => void;
 
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 15_000;
@@ -26,6 +27,7 @@ class GameSocket {
   private listeners = new Set<Listener>();
   private chatListeners = new Set<ChatListener>();
   private presenceListeners = new Set<PresenceListener>();
+  private moveListeners = new Set<MoveListener>();
   private reconnectTimer: number | null = null;
   private closed = false;
   /** Locally-tracked presence map (seatIndex → online). Lets new subscribers
@@ -76,11 +78,17 @@ class GameSocket {
     return () => this.presenceListeners.delete(fn);
   }
 
+  subscribeMove(fn: MoveListener): () => void {
+    this.moveListeners.add(fn);
+    return () => this.moveListeners.delete(fn);
+  }
+
   hasSubscribers(): boolean {
     return (
       this.listeners.size > 0 ||
       this.chatListeners.size > 0 ||
-      this.presenceListeners.size > 0
+      this.presenceListeners.size > 0 ||
+      this.moveListeners.size > 0
     );
   }
 
@@ -132,6 +140,7 @@ class GameSocket {
         this.setState({ game: ev.payload });
       } else if (ev.type === "move") {
         this.setState({ game: ev.payload.game });
+        for (const l of this.moveListeners) l(ev.payload);
       } else if (ev.type === "chat") {
         for (const l of this.chatListeners) l(ev.payload);
       } else if (ev.type === "presence") {
@@ -225,6 +234,37 @@ export function getSocket(gameId: string): GameSocket {
     sockets.set(gameId, socket);
   }
   return socket;
+}
+
+// acquireMoveStream subscribes to per-move events on the shared socket.
+// Useful when callers need the captures list, not just the resulting state.
+export function acquireMoveStream(gameId: string, listener: MoveListener): () => void {
+  const pending = cleanupTimers.get(gameId);
+  if (pending !== undefined) {
+    window.clearTimeout(pending);
+    cleanupTimers.delete(gameId);
+  }
+  let socket = sockets.get(gameId);
+  if (!socket) {
+    socket = new GameSocket(gameId);
+    sockets.set(gameId, socket);
+  }
+  const unsubscribe = socket.subscribeMove(listener);
+  return () => {
+    unsubscribe();
+    const s = sockets.get(gameId);
+    if (s && !s.hasSubscribers()) {
+      const t = window.setTimeout(() => {
+        const s2 = sockets.get(gameId);
+        if (s2 && !s2.hasSubscribers()) {
+          s2.close();
+          sockets.delete(gameId);
+        }
+        cleanupTimers.delete(gameId);
+      }, CLEANUP_GRACE_MS);
+      cleanupTimers.set(gameId, t);
+    }
+  };
 }
 
 // acquirePresenceStream subscribes to per-seat presence events on the shared

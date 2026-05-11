@@ -17,7 +17,7 @@ export function Scoreboard({ game, mySeatIndex, presence = {} }: ScoreboardProps
   const clockEnabled = t.initialTimeMs > 0;
   const gameOver = game.status === "finished";
   return (
-    <ul className="flex flex-col gap-2">
+    <ul className="grid grid-cols-2 gap-2 lg:flex lg:flex-col">
       {game.players.map((p, i) => {
         const seat = game.seats[i];
         const isTurn = game.turn === i && game.status === "playing";

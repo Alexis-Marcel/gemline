@@ -188,101 +188,111 @@ export function GamePage() {
     : game.cells;
   const boardHighlight = inReplay ? lastMoveAt(replay.steps, replayStep) : null;
 
-  return (
-    <div className="mx-auto flex h-full max-w-6xl flex-col gap-4 p-4 lg:flex-row">
-      <aside className="lg:w-72 flex flex-col gap-4">
-        <header className="flex items-baseline justify-between">
-          <Link to="/" className="text-lg font-semibold text-zinc-100">
-            Gemline
-          </Link>
-          <div className="flex items-center gap-3">
-            <ConnStatus status={wsStatus} attempt={wsAttempt} />
-            <UserNav />
-          </div>
-        </header>
+  const seatsFree = game.seats.filter((s) => !s.occupied).length;
 
+  return (
+    <div className="mx-auto max-w-6xl p-3 lg:p-4">
+      <header className="flex items-center justify-between">
+        <Link to="/" className="text-lg font-semibold text-zinc-100">
+          Gemline
+        </Link>
+        <div className="flex items-center gap-3">
+          <ConnStatus status={wsStatus} attempt={wsAttempt} />
+          <UserNav />
+        </div>
+      </header>
+
+      {/*
+        Layout:
+          mobile (default) — flex-col, DOM order: scoreboard → board → panels
+          desktop (lg)     — grid, scoreboard in col-1/row-1, board col-2/row-span-2,
+                             secondary panels col-1/row-2
+        Grid placement is set on each child, so DOM order isn't constrained by desktop's shape.
+      */}
+      <div className="mt-3 flex flex-col gap-3 lg:mt-4 lg:grid lg:grid-cols-[18rem_1fr] lg:items-start lg:gap-4">
         <Scoreboard
           game={game}
           mySeatIndex={creds?.seatIndex ?? null}
           presence={presence}
         />
 
-        <Objectives thresholds={game.thresholds} />
+        <main className="lg:col-start-2 lg:row-span-2">
+          <div className="aspect-square w-full rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 lg:aspect-auto lg:h-[min(80vh,calc(100vw-22rem))]">
+            <Board
+              side={inReplay ? replay.boardSide : game.boardSide}
+              cells={boardCells}
+              onPlay={inReplay ? undefined : onPlay}
+              disabled={inReplay || !isMyTurn || game.status !== "playing"}
+              highlight={boardHighlight}
+              ghosts={inReplay ? undefined : ghosts}
+            />
+          </div>
+        </main>
 
-        <ChatPanel gameId={id} playerToken={creds?.token ?? null} />
+        <section className="flex flex-col gap-3 lg:col-start-1 lg:row-start-2">
+          <Objectives thresholds={game.thresholds} />
 
-        {game.status === "waiting" && !creds && (
-          <JoinForm
-            value={name}
-            onChange={setName}
-            onSubmit={handleJoin}
-            disabled={joining}
-            seatsFree={game.seats.filter((s) => !s.occupied).length}
-          />
-        )}
+          {game.status === "waiting" && !creds && (
+            <JoinForm
+              value={name}
+              onChange={setName}
+              onSubmit={handleJoin}
+              disabled={joining}
+              seatsFree={seatsFree}
+            />
+          )}
 
-        {game.status === "waiting" && creds && (
-          <p className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3 text-sm text-zinc-300">
-            En attente de{" "}
-            {game.seats.filter((s) => !s.occupied).length} joueur(s)…
-          </p>
-        )}
+          {game.status === "waiting" && creds && (
+            <p className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3 text-sm text-zinc-300">
+              En attente de {seatsFree} joueur(s)…
+            </p>
+          )}
 
-        {game.status === "finished" && (
-          <Banner>
-            🏆 {gemName(game.winner)} gagne par {winKindLabel(game.winKind)}
-          </Banner>
-        )}
+          {game.status === "finished" && (
+            <Banner>
+              🏆 {gemName(game.winner)} gagne par {winKindLabel(game.winKind)}
+            </Banner>
+          )}
 
-        {inReplay ? (
-          <ReplayControls
-            step={replayStep}
-            total={replay.steps.length}
-            onChange={setReplayStep}
-            onExit={closeReplay}
-          />
-        ) : (
-          game.moveCount > 0 && (
+          {inReplay ? (
+            <ReplayControls
+              step={replayStep}
+              total={replay.steps.length}
+              onChange={setReplayStep}
+              onExit={closeReplay}
+            />
+          ) : (
+            game.moveCount > 0 && (
+              <button
+                onClick={openReplay}
+                disabled={replayLoading}
+                className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500 disabled:opacity-50"
+              >
+                {replayLoading ? "Chargement…" : "Revoir la partie"}
+              </button>
+            )
+          )}
+
+          <ChatPanel gameId={id} playerToken={creds?.token ?? null} />
+
+          <ShareCard id={id} />
+
+          {creds && (
             <button
-              onClick={openReplay}
-              disabled={replayLoading}
-              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500 disabled:opacity-50"
+              onClick={handleLeave}
+              className="text-xs text-zinc-500 hover:text-zinc-300"
             >
-              {replayLoading ? "Chargement…" : "Revoir la partie"}
+              Quitter la partie (efface mon token local)
             </button>
-          )
-        )}
+          )}
 
-        <ShareCard id={id} />
-
-        {creds && (
-          <button
-            onClick={handleLeave}
-            className="text-xs text-zinc-500 hover:text-zinc-300"
-          >
-            Quitter la partie (efface mon token local)
-          </button>
-        )}
-
-        {error && (
-          <p className="rounded-md border border-red-900/50 bg-red-950/30 p-3 text-sm text-red-300">
-            {error}
-          </p>
-        )}
-      </aside>
-
-      <main className="flex-1 min-h-0">
-        <div className="h-full rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
-          <Board
-            side={inReplay ? replay.boardSide : game.boardSide}
-            cells={boardCells}
-            onPlay={inReplay ? undefined : onPlay}
-            disabled={inReplay || !isMyTurn || game.status !== "playing"}
-            highlight={boardHighlight}
-            ghosts={inReplay ? undefined : ghosts}
-          />
-        </div>
-      </main>
+          {error && (
+            <p className="rounded-md border border-red-900/50 bg-red-950/30 p-3 text-sm text-red-300">
+              {error}
+            </p>
+          )}
+        </section>
+      </div>
     </div>
   );
 }

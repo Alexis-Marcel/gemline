@@ -28,8 +28,10 @@ type playerDTO struct {
 	Color         game.Color `json:"color"`
 	GemsRemaining int        `json:"gemsRemaining"`
 	CapturedPairs int        `json:"capturedPairs"`
-	Alignments4   int        `json:"alignments4"`
-	Alignments5   int        `json:"alignments5"`
+	// Alignment counts are deliberately not exposed: counting your own and
+	// your opponents' lines is part of the game. Win detection still uses
+	// them server-side, and the WinKind field reveals how a finished game
+	// was decided.
 }
 
 type gameDTO struct {
@@ -77,8 +79,6 @@ func toGameDTO(rec *GameRecord) gameDTO {
 			Color:         p.Color,
 			GemsRemaining: p.GemsRemaining,
 			CapturedPairs: p.CapturedPairs,
-			Alignments4:   s.CountAlignments(p.Color, 4),
-			Alignments5:   s.CountAlignments(p.Color, 5),
 		}
 	}
 	seats := make([]seatDTO, len(rec.Seats))

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { Game } from "../api/types";
 import { gemColor, gemName } from "../lib/colors";
 import { PlayerClock } from "./PlayerClock";
@@ -5,9 +6,13 @@ import { PlayerClock } from "./PlayerClock";
 interface ScoreboardProps {
   game: Game;
   mySeatIndex: number | null;
+  /** Per-seat presence flags pushed by the server (key = seatIndex). */
+  presence?: Record<number, boolean>;
 }
 
-export function Scoreboard({ game, mySeatIndex }: ScoreboardProps) {
+const DISCONNECT_GRACE_MS = 60_000;
+
+export function Scoreboard({ game, mySeatIndex, presence = {} }: ScoreboardProps) {
   const t = game.thresholds;
   const clockEnabled = t.initialTimeMs > 0;
   const gameOver = game.status === "finished";
@@ -17,6 +22,11 @@ export function Scoreboard({ game, mySeatIndex }: ScoreboardProps) {
         const seat = game.seats[i];
         const isTurn = game.turn === i && game.status === "playing";
         const isYou = mySeatIndex === i;
+        const online = presence[i];
+        // Only show offline state for seats that are actually claimed and
+        // when the game is in play (not waiting / finished).
+        const showOffline =
+          seat.occupied && game.status === "playing" && online === false;
         return (
           <li
             key={p.color}
@@ -49,11 +59,12 @@ export function Scoreboard({ game, mySeatIndex }: ScoreboardProps) {
                     />
                   )}
                 </div>
-                {isTurn && (
-                  <div className="mt-0.5 text-xs font-medium text-yellow-400">
-                    à jouer
-                  </div>
-                )}
+                <div className="mt-0.5 flex items-center gap-2 text-xs">
+                  {isTurn && (
+                    <span className="font-medium text-yellow-400">à jouer</span>
+                  )}
+                  {showOffline && <DisconnectBadge />}
+                </div>
                 <div className="mt-1 grid grid-cols-2 gap-1 text-xs text-zinc-400">
                   <Stat
                     label="Paires"
@@ -67,6 +78,30 @@ export function Scoreboard({ game, mySeatIndex }: ScoreboardProps) {
         );
       })}
     </ul>
+  );
+}
+
+/**
+ * DisconnectBadge counts down the disconnect-grace period. We don't get a
+ * server-side timestamp for when the seat went offline, so we anchor at
+ * mount — i.e. when the client observed the presence flip. Worst case the
+ * displayed countdown is slightly off, but it's the right order of magnitude
+ * and gives players an honest signal that a forfeit is about to land.
+ */
+function DisconnectBadge() {
+  const [remaining, setRemaining] = useState(DISCONNECT_GRACE_MS);
+  useEffect(() => {
+    const start = Date.now();
+    const id = window.setInterval(() => {
+      setRemaining(Math.max(0, DISCONNECT_GRACE_MS - (Date.now() - start)));
+    }, 500);
+    return () => window.clearInterval(id);
+  }, []);
+  const seconds = Math.ceil(remaining / 1000);
+  return (
+    <span className="rounded bg-red-500/20 px-1.5 py-0.5 font-medium text-red-300">
+      hors-ligne {seconds > 0 ? `· ${seconds}s` : "· forfait"}
+    </span>
   );
 }
 

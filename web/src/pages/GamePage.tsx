@@ -2,7 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import type { Game, Replay, WinKind } from "../api/types";
-import type { ConnStatus as WsConnStatus } from "../api/gameSocket";
+import {
+  acquirePresenceStream,
+  getSocket,
+  type ConnStatus as WsConnStatus,
+} from "../api/gameSocket";
 import { useGameSocket } from "../api/ws";
 import { Board } from "../components/Board";
 import { ChatPanel } from "../components/ChatPanel";
@@ -30,6 +34,11 @@ export function GamePage() {
   const [replayStep, setReplayStep] = useState(0);
   const [replayLoading, setReplayLoading] = useState(false);
 
+  // Per-seat presence map fed by the shared socket. true = at least one live
+  // WebSocket; false = nobody is on this seat right now; undefined = unknown
+  // (we haven't received a presence event yet, default to optimistic online).
+  const [presence, setPresence] = useState<Record<number, boolean>>({});
+
   // Prefer the most recent snapshot from either the WS stream or a local
   // mutation (e.g. our own move) so the UI never appears stale.
   const game = useMemo(() => {
@@ -39,6 +48,23 @@ export function GamePage() {
   }, [liveGame, localGame]);
 
   const creds = useMemo(() => loadCredentials(id), [id, game]);
+
+  // Push our seat token to the shared socket so the server can mark us as
+  // online (and cancel any disconnect-grace timer that was running).
+  useEffect(() => {
+    const socket = getSocket(id);
+    socket.setHelloToken(creds?.token ?? null);
+    return () => {
+      socket.setHelloToken(null);
+    };
+  }, [id, creds?.token]);
+
+  // Subscribe to presence events for everyone in this game.
+  useEffect(() => {
+    return acquirePresenceStream(id, (seatIndex, online) => {
+      setPresence((prev) => ({ ...prev, [seatIndex]: online }));
+    });
+  }, [id]);
 
   const isMyTurn =
     !!game &&
@@ -147,7 +173,11 @@ export function GamePage() {
           </div>
         </header>
 
-        <Scoreboard game={game} mySeatIndex={creds?.seatIndex ?? null} />
+        <Scoreboard
+          game={game}
+          mySeatIndex={creds?.seatIndex ?? null}
+          presence={presence}
+        />
 
         <Objectives thresholds={game.thresholds} />
 

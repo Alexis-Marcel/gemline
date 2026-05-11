@@ -87,11 +87,15 @@ func (r *GameRecord) AllSeated() bool {
 // chess clock — it schedules per-game timeout timers and applies the
 // resulting forfeits when they fire.
 type Store struct {
-	mu     sync.Mutex
-	games  map[string]*GameRecord
-	repo   Repository
-	clocks *clockManager
-	onFlag func(gameID string)
+	mu       sync.Mutex
+	games    map[string]*GameRecord
+	repo     Repository
+	clocks   *clockManager
+	presence *presenceManager
+	seatRefs map[string]map[int]int // gameID → seatIndex → live connections
+
+	onState    func(gameID string)                                // state changed (forfeit, etc.)
+	onPresence func(gameID string, seatIndex int, online bool)    // presence transition
 }
 
 func NewStore(repo Repository) *Store {
@@ -99,19 +103,31 @@ func NewStore(repo Repository) *Store {
 		repo = noopRepo{}
 	}
 	return &Store{
-		games:  make(map[string]*GameRecord),
-		repo:   repo,
-		clocks: newClockManager(),
+		games:    make(map[string]*GameRecord),
+		repo:     repo,
+		clocks:   newClockManager(),
+		presence: newPresenceManager(),
+		seatRefs: make(map[string]map[int]int),
 	}
 }
 
-// SetFlagListener registers a callback invoked whenever a clock-driven
-// forfeit ends a game. The Server wires it to a hub broadcast so connected
-// clients see the new state immediately. Safe to call once before serving.
-func (s *Store) SetFlagListener(fn func(gameID string)) { s.onFlag = fn }
+// SetStateListener registers a callback fired whenever the Store mutates a
+// game outside the request-driven path (clock flag, disconnect forfeit).
+// The Server hooks it to a hub broadcast so clients see the new state.
+func (s *Store) SetStateListener(fn func(gameID string)) { s.onState = fn }
 
-// Close stops every running clock timer. Call on shutdown.
-func (s *Store) Close() { s.clocks.CancelAll() }
+// SetPresenceListener registers a callback fired whenever a seat's online
+// state flips. The Server forwards it as a `presence` WS event so other
+// players see the indicator update without a full state push.
+func (s *Store) SetPresenceListener(fn func(gameID string, seatIndex int, online bool)) {
+	s.onPresence = fn
+}
+
+// Close stops every running clock + presence timer. Call on shutdown.
+func (s *Store) Close() {
+	s.clocks.CancelAll()
+	s.presence.CancelAll()
+}
 
 // armClock schedules (or cancels) the timeout for the active player of
 // `rec`. Must be called with rec.Lock held.
@@ -125,6 +141,103 @@ func (s *Store) armClock(rec *GameRecord) {
 	s.clocks.Schedule(id, time.Duration(remainingMs)*time.Millisecond, func() {
 		s.handleFlag(id)
 	})
+}
+
+// SeatConnected is called by the WS handler after a successful hello. It
+// bumps the refcount for that seat and, if the seat just came back online
+// (0→1), cancels any pending disconnect-grace timer and notifies listeners.
+// `color` is the seat's player color, used to feed into the engine for the
+// "is this the active player?" check on the timer side.
+func (s *Store) SeatConnected(gameID string, seatIndex int) {
+	s.mu.Lock()
+	if s.seatRefs[gameID] == nil {
+		s.seatRefs[gameID] = make(map[int]int)
+	}
+	prev := s.seatRefs[gameID][seatIndex]
+	s.seatRefs[gameID][seatIndex] = prev + 1
+	s.mu.Unlock()
+
+	if prev == 0 {
+		s.presence.Cancel(gameID, seatIndex)
+		if s.onPresence != nil {
+			s.onPresence(gameID, seatIndex, true)
+		}
+	}
+}
+
+// SeatDisconnected is the symmetric call when a WS that owned a seat closes.
+// On the 1→0 transition we start a disconnect-grace timer; if it fires
+// before the seat comes back, the player forfeits.
+func (s *Store) SeatDisconnected(gameID string, seatIndex int) {
+	s.mu.Lock()
+	if s.seatRefs[gameID] == nil {
+		s.mu.Unlock()
+		return // unknown game (shouldn't happen, but tolerate)
+	}
+	prev := s.seatRefs[gameID][seatIndex]
+	if prev <= 0 {
+		s.mu.Unlock()
+		return
+	}
+	s.seatRefs[gameID][seatIndex] = prev - 1
+	now := s.seatRefs[gameID][seatIndex]
+	s.mu.Unlock()
+
+	if now != 0 {
+		return
+	}
+	s.presence.Schedule(gameID, seatIndex, DisconnectGracePeriod, func() {
+		s.handleDisconnectTimeout(gameID, seatIndex)
+	})
+	if s.onPresence != nil {
+		s.onPresence(gameID, seatIndex, false)
+	}
+}
+
+// SeatOnline reports whether the given seat currently has at least one live
+// WebSocket connection in this Store.
+func (s *Store) SeatOnline(gameID string, seatIndex int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m, ok := s.seatRefs[gameID]; ok {
+		return m[seatIndex] > 0
+	}
+	return false
+}
+
+// handleDisconnectTimeout is called by presenceManager when the grace period
+// expires for a seat with no live connection.
+func (s *Store) handleDisconnectTimeout(gameID string, seatIndex int) {
+	ctx := context.Background()
+	s.mu.Lock()
+	rec, ok := s.games[gameID]
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	rec.Lock()
+	if rec.State.IsOver() || rec.Status != StatusPlaying {
+		rec.Unlock()
+		return
+	}
+	if seatIndex < 0 || seatIndex >= len(rec.Seats) {
+		rec.Unlock()
+		return
+	}
+	loser := rec.Seats[seatIndex].Color
+	rec.State.Forfeit(loser)
+	rec.Status = StatusFinished
+	winner := rec.State.Winner
+	winKind := rec.State.WinKind
+	rec.Unlock()
+
+	s.clocks.Cancel(gameID)
+	s.presence.CancelGame(gameID)
+	_ = s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind)
+	if s.onState != nil {
+		s.onState(gameID)
+	}
 }
 
 // handleFlag is fired by the clock manager when the active player's time
@@ -158,12 +271,13 @@ func (s *Store) handleFlag(gameID string) {
 	winKind := rec.State.WinKind
 	rec.Unlock()
 
+	s.presence.CancelGame(gameID)
 	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
 		// Persistence failed but the in-memory state is the truth.
 		// We do not retry; an admin can inspect the row if needed.
 	}
-	if s.onFlag != nil {
-		s.onFlag(gameID)
+	if s.onState != nil {
+		s.onState(gameID)
 	}
 }
 

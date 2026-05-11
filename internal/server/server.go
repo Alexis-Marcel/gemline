@@ -33,9 +33,9 @@ func New(log *slog.Logger, store *Store, cfg Config) *Server {
 		log:       log,
 		jwtSecret: cfg.JWTSecret,
 	}
-	// When a player's clock runs out, push the new state to every WS
-	// subscriber so they see the forfeit immediately.
-	store.SetFlagListener(func(gameID string) {
+	// When a player's clock runs out or their disconnect grace expires,
+	// push the new state to every WS subscriber so they see the forfeit.
+	store.SetStateListener(func(gameID string) {
 		rec, ok, err := store.Get(context.Background(), gameID)
 		if err != nil || !ok {
 			return
@@ -44,6 +44,12 @@ func New(log *slog.Logger, store *Store, cfg Config) *Server {
 		dto := toGameDTO(rec)
 		rec.Unlock()
 		srv.hub.Broadcast(gameID, eventState(dto))
+	})
+	// Presence changes (a seat just went online or offline) are broadcast
+	// as a lightweight `presence` event so the UI can flip the badge
+	// without a full state push.
+	store.SetPresenceListener(func(gameID string, seatIndex int, online bool) {
+		srv.hub.Broadcast(gameID, eventPresence(seatIndex, online))
 	})
 	return srv
 }

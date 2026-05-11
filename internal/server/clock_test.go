@@ -19,7 +19,7 @@ func withTestStore(t *testing.T) (*Store, *sync.WaitGroup, *string) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	notified := ""
-	store.SetFlagListener(func(gameID string) {
+	store.SetStateListener(func(gameID string) {
 		notified = gameID
 		wg.Done()
 	})

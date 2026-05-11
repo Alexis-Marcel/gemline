@@ -70,3 +70,28 @@ export interface JoinResponse {
 export type WsEvent =
   | { type: "state"; payload: Game }
   | { type: "move"; payload: MoveResponse };
+
+export interface Profile {
+  userId: string;
+  email: string;
+  displayName: string;
+}
+
+export interface UserGame {
+  gameId: string;
+  status: Status;
+  seatIndex: number;
+  color: Color;
+  winnerColor: Color;
+  outcome: "won" | "lost" | "draw" | "ongoing";
+  moveCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserStats {
+  total: number;
+  won: number;
+  lost: number;
+  ongoing: number;
+}

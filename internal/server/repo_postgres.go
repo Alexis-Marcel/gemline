@@ -29,9 +29,9 @@ func (r *PostgresRepo) SaveNewGame(ctx context.Context, rec *GameRecord) error {
 
 	cfg := rec.State.Config
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO games (id, status, board_side, capture_pairs_win, align4_to_win, align5_to_win)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, rec.ID, rec.Status, cfg.BoardSide, cfg.CapturePairsWin, cfg.Align4ToWin, cfg.Align5ToWin)
+		INSERT INTO games (id, status, board_side, capture_pairs_win, align4_to_win, align5_to_win, initial_time_ms, increment_ms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, rec.ID, rec.Status, cfg.BoardSide, cfg.CapturePairsWin, cfg.Align4ToWin, cfg.Align5ToWin, cfg.InitialTimeMs, cfg.IncrementMs)
 	if err != nil {
 		return fmt.Errorf("insert game: %w", err)
 	}
@@ -51,20 +51,22 @@ func (r *PostgresRepo) SaveNewGame(ctx context.Context, rec *GameRecord) error {
 func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, error) {
 	row := r.pool.QueryRowContext(ctx, `
 		SELECT status, board_side, capture_pairs_win, align4_to_win, align5_to_win,
-		       winner_color, win_kind, created_at
+		       winner_color, win_kind, initial_time_ms, increment_ms, created_at
 		FROM games WHERE id = $1
 	`, id)
 	var (
-		status       Status
-		boardSide    int
-		captureWin   int
-		align4       int
-		align5       int
-		winnerColor  int
-		winKind      int
-		createdAt    time.Time
+		status        Status
+		boardSide     int
+		captureWin    int
+		align4        int
+		align5        int
+		winnerColor   int
+		winKind       int
+		initialTimeMs int64
+		incrementMs   int64
+		createdAt     time.Time
 	)
-	if err := row.Scan(&status, &boardSide, &captureWin, &align4, &align5, &winnerColor, &winKind, &createdAt); err != nil {
+	if err := row.Scan(&status, &boardSide, &captureWin, &align4, &align5, &winnerColor, &winKind, &initialTimeMs, &incrementMs, &createdAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -116,36 +118,59 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 		CapturePairsWin: captureWin,
 		Align4ToWin:     align4,
 		Align5ToWin:     align5,
+		InitialTimeMs:   initialTimeMs,
+		IncrementMs:     incrementMs,
 	}
 	state := game.NewGame(colors, cfg)
+	state.Winner = game.Color(winnerColor)
+	state.WinKind = game.WinKind(winKind)
 
-	// Replay moves through ApplyMove so captures and wins are reproduced from
-	// the rule engine (single source of truth for derived state).
+	// Replay moves through ApplyMove so captures, wins, AND chess-clock
+	// deductions are reproduced from the same rule engine that produced
+	// them at play time. played_at is passed as the move's "now" so each
+	// player's TimeRemainingMs converges to the same value it had live.
 	moveRows, err := r.pool.QueryContext(ctx, `
-		SELECT color, q, r FROM moves WHERE game_id = $1 ORDER BY ordinal
+		SELECT color, q, r, played_at FROM moves WHERE game_id = $1 ORDER BY ordinal
 	`, id)
 	if err != nil {
 		return nil, fmt.Errorf("select moves: %w", err)
 	}
 	defer moveRows.Close()
 
+	// Walk the move log to rebuild the in-memory state. We start the clock
+	// from a reference that won't accidentally drain time for a game whose
+	// players haven't been around: use the first move's played_at if any,
+	// otherwise leave TurnStartedAt zero until the live code path sets it.
+	var lastPlayed time.Time
 	for moveRows.Next() {
 		var (
 			colorInt int
 			q, rr    int
+			playedAt time.Time
 		)
-		if err := moveRows.Scan(&colorInt, &q, &rr); err != nil {
+		if err := moveRows.Scan(&colorInt, &q, &rr, &playedAt); err != nil {
 			return nil, fmt.Errorf("scan move: %w", err)
+		}
+		if state.TurnStartedAt.IsZero() {
+			state.TurnStartedAt = playedAt // first move's start = its own timestamp
 		}
 		if _, err := state.ApplyMove(game.Move{
 			Player: game.Color(colorInt),
 			Pos:    game.Position{Q: q, R: rr},
-		}); err != nil {
+		}, playedAt); err != nil {
 			return nil, fmt.Errorf("replay move: %w", err)
 		}
+		lastPlayed = playedAt
 	}
 	if err := moveRows.Err(); err != nil {
 		return nil, err
+	}
+
+	// On reload, if the game is in progress with no moves yet, restart the
+	// clock from "now" rather than created_at — otherwise a long-idle game
+	// would flag the active player immediately on load.
+	if status == StatusPlaying && lastPlayed.IsZero() && state.ClockEnabled() {
+		state.TurnStartedAt = time.Now()
 	}
 
 	return &GameRecord{
@@ -178,6 +203,15 @@ func (r *PostgresRepo) UpdateSeat(ctx context.Context, gameID string, seat *Seat
 		return fmt.Errorf("update game status: %w", err)
 	}
 	return tx.Commit()
+}
+
+func (r *PostgresRepo) UpdateOutcome(ctx context.Context, gameID string, status Status, winner game.Color, winKind game.WinKind) error {
+	_, err := r.pool.ExecContext(ctx, `
+		UPDATE games
+		SET status = $1, winner_color = $2, win_kind = $3, updated_at = NOW()
+		WHERE id = $4
+	`, status, int(winner), int(winKind), gameID)
+	return err
 }
 
 func (r *PostgresRepo) AppendMove(ctx context.Context, gameID string, ordinal int, m game.Move, winner game.Color, winKind game.WinKind, status Status) error {

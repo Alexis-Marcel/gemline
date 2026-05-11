@@ -1,13 +1,24 @@
 package game
 
-// Config holds the win thresholds and board side for a game.
+import "time"
+
+// Config holds the win thresholds, board side, and time control for a game.
 type Config struct {
 	BoardSide       int // intersections per side of the hexagonal board
 	CapturePairsWin int // captured pairs required to win
 	Align4ToWin     int // distinct maximal 4-alignments required
 	Align5ToWin     int // distinct maximal 5-alignments required
 	// A 6-alignment is always an instant win, regardless of config.
+
+	// InitialTimeMs is the chess-clock budget per player at the start of the
+	// game. Zero disables time control entirely (clocks aren't tracked).
+	InitialTimeMs int64
+	// IncrementMs is the Fischer-style bonus added to a player's clock after
+	// every move they make. Zero = no increment.
+	IncrementMs int64
 }
+
+const DefaultInitialTimeMs int64 = 10 * 60 * 1000 // 10 minutes
 
 // DefaultConfig returns thresholds for `numPlayers` (2..6).
 //
@@ -15,7 +26,11 @@ type Config struct {
 // placeholders, biased toward keeping multi-player games tractable, and
 // should be revisited once the official rulebook is available.
 func DefaultConfig(numPlayers int) Config {
-	cfg := Config{BoardSide: DefaultBoardSide}
+	cfg := Config{
+		BoardSide:     DefaultBoardSide,
+		InitialTimeMs: DefaultInitialTimeMs,
+		IncrementMs:   0,
+	}
 	switch numPlayers {
 	case 2:
 		cfg.CapturePairsWin = 10
@@ -46,30 +61,70 @@ func DefaultConfig(numPlayers int) Config {
 // GameState is an in-progress (or finished) game. It is not safe for
 // concurrent use — callers must serialize access externally.
 type GameState struct {
-	Config  Config
-	Board   *Board
-	Players []Player
-	Turn    int
-	History []Move
-	Winner  Color
-	WinKind WinKind
+	Config        Config
+	Board         *Board
+	Players       []Player
+	Turn          int
+	History       []Move
+	Winner        Color
+	WinKind       WinKind
+	TurnStartedAt time.Time // when the current player's clock started ticking
 }
 
 func NewGame(playerColors []Color, cfg Config) *GameState {
 	players := make([]Player, len(playerColors))
 	for i, c := range playerColors {
-		players[i] = Player{Color: c, GemsRemaining: GemsPerPlayer}
+		players[i] = Player{
+			Color:           c,
+			GemsRemaining:   GemsPerPlayer,
+			TimeRemainingMs: cfg.InitialTimeMs,
+		}
 	}
 	return &GameState{
-		Config:  cfg,
-		Board:   NewBoard(cfg.BoardSide),
-		Players: players,
+		Config:        cfg,
+		Board:         NewBoard(cfg.BoardSide),
+		Players:       players,
+		TurnStartedAt: time.Time{}, // zero value; set on first move via clock-disabled fallback
+	}
+}
+
+// StartClock initialises the turn-start timestamp. Call once after NewGame
+// to begin counting time against the first player. If time control is
+// disabled (Config.InitialTimeMs == 0), this is a no-op.
+func (g *GameState) StartClock(now time.Time) {
+	if g.Config.InitialTimeMs > 0 {
+		g.TurnStartedAt = now
 	}
 }
 
 func (g *GameState) CurrentPlayer() *Player { return &g.Players[g.Turn] }
 
-func (g *GameState) IsOver() bool { return g.Winner != Empty }
+// IsOver reports whether the game is finished. A finished game either has
+// a Winner (most cases) or a non-zero WinKind without a winner (multi-player
+// timeout — see Forfeit).
+func (g *GameState) IsOver() bool { return g.Winner != Empty || g.WinKind != WinNone }
+
+// ClockEnabled reports whether time control is active for this game.
+func (g *GameState) ClockEnabled() bool { return g.Config.InitialTimeMs > 0 }
+
+// RemainingForActive returns the active player's clock value if the game
+// were to be checked right now, accounting for the elapsed time since
+// TurnStartedAt. When clocks are disabled it returns the player's stored
+// TimeRemainingMs unchanged.
+func (g *GameState) RemainingForActive(now time.Time) int64 {
+	if !g.ClockEnabled() || g.IsOver() {
+		return g.CurrentPlayer().TimeRemainingMs
+	}
+	if g.TurnStartedAt.IsZero() {
+		return g.CurrentPlayer().TimeRemainingMs
+	}
+	elapsed := now.Sub(g.TurnStartedAt).Milliseconds()
+	r := g.CurrentPlayer().TimeRemainingMs - elapsed
+	if r < 0 {
+		return 0
+	}
+	return r
+}
 
 // CountAlignments returns the number of maximal runs of `color` of length
 // exactly `length`. Convenience wrapper for callers that don't want to
@@ -78,10 +133,12 @@ func (g *GameState) CountAlignments(color Color, length int) int {
 	return CountMaximalRuns(g.Board, color, length)
 }
 
-// ApplyMove places a stone, resolves captures, and updates win state. The
-// returned MoveResult lists the captures triggered and, if the game ended,
-// the winner and the kind of win.
-func (g *GameState) ApplyMove(m Move) (MoveResult, error) {
+// ApplyMove places a stone, resolves captures, updates win state, and
+// advances the chess clock. `now` is the move's timestamp; the active
+// player's elapsed time (now − TurnStartedAt) is deducted from their clock
+// before the move is applied. If they have already used up their time the
+// move fails with ErrFlagged.
+func (g *GameState) ApplyMove(m Move, now time.Time) (MoveResult, error) {
 	var res MoveResult
 	if g.IsOver() {
 		return res, ErrGameOver
@@ -98,6 +155,18 @@ func (g *GameState) ApplyMove(m Move) (MoveResult, error) {
 	cur := g.CurrentPlayer()
 	if cur.GemsRemaining <= 0 {
 		return res, ErrNoGemsLeft
+	}
+
+	if g.ClockEnabled() && !g.TurnStartedAt.IsZero() {
+		elapsed := now.Sub(g.TurnStartedAt).Milliseconds()
+		if elapsed < 0 {
+			elapsed = 0 // tolerate small clock skews
+		}
+		if elapsed > cur.TimeRemainingMs {
+			return res, ErrFlagged
+		}
+		cur.TimeRemainingMs -= elapsed
+		cur.TimeRemainingMs += g.Config.IncrementMs
 	}
 
 	g.Board.Set(m.Pos, m.Player)
@@ -121,7 +190,37 @@ func (g *GameState) ApplyMove(m Move) (MoveResult, error) {
 	}
 
 	g.Turn = (g.Turn + 1) % len(g.Players)
+	if g.ClockEnabled() {
+		g.TurnStartedAt = now
+	}
 	return res, nil
+}
+
+// Forfeit ends the game by declaring `loser` out of time. With exactly two
+// players, the surviving player is recorded as the winner; with more, the
+// game ends with no winner (Winner == Empty) but WinKind == WinTimeout.
+// No-op if the game is already over.
+func (g *GameState) Forfeit(loser Color) {
+	if g.IsOver() {
+		return
+	}
+	g.WinKind = WinTimeout
+	if len(g.Players) == 2 {
+		for _, p := range g.Players {
+			if p.Color != loser {
+				g.Winner = p.Color
+				return
+			}
+		}
+	}
+	// 3+ players: end the game without a winner.
+	g.Winner = Empty
+	// Mark the loser's clock at zero for clarity in the wire state.
+	for i := range g.Players {
+		if g.Players[i].Color == loser {
+			g.Players[i].TimeRemainingMs = 0
+		}
+	}
 }
 
 // checkWin returns the kind of win achieved by `p`, or WinNone. Alignment

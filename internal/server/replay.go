@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/alexis/gemline/internal/game"
 )
@@ -31,11 +32,14 @@ func (s *Server) getReplay(w http.ResponseWriter, r *http.Request) {
 	rec.Unlock()
 
 	// Replay against a fresh GameState so we can capture per-move MoveResults
-	// without touching the cached record.
+	// without touching the cached record. We don't care about clock progression
+	// here — the captures/wins are what the replay UI consumes — so a fixed
+	// zero `now` is enough.
 	replay := game.NewGame(colors, cfg)
 	steps := make([]replayStepDTO, 0, len(history))
+	var zeroTime time.Time
 	for i, m := range history {
-		res, err := replay.ApplyMove(m)
+		res, err := replay.ApplyMove(m, zeroTime)
 		if err != nil {
 			s.log.Error("replay apply", "err", err, "ordinal", i)
 			writeError(w, http.StatusInternalServerError, "replay failed")

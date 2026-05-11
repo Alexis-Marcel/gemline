@@ -1,6 +1,9 @@
 package game
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func setStones(b *Board, stones map[Position]Color) {
 	for p, c := range stones {
@@ -208,7 +211,7 @@ func TestHasRun(t *testing.T) {
 
 func TestApplyMove_AlternatesAndDecrementsGems(t *testing.T) {
 	g := NewGame([]Color{C1, C2}, DefaultConfig(2))
-	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)}); err != nil {
+	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)}, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if g.CurrentPlayer().Color != C2 {
@@ -221,15 +224,15 @@ func TestApplyMove_AlternatesAndDecrementsGems(t *testing.T) {
 
 func TestApplyMove_RejectsWrongTurn(t *testing.T) {
 	g := NewGame([]Color{C1, C2}, DefaultConfig(2))
-	if _, err := g.ApplyMove(Move{Player: C2, Pos: pos(0, 0)}); err != ErrWrongTurn {
+	if _, err := g.ApplyMove(Move{Player: C2, Pos: pos(0, 0)}, time.Time{}); err != ErrWrongTurn {
 		t.Fatalf("want ErrWrongTurn, got %v", err)
 	}
 }
 
 func TestApplyMove_RejectsOccupied(t *testing.T) {
 	g := NewGame([]Color{C1, C2}, DefaultConfig(2))
-	_, _ = g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)})
-	if _, err := g.ApplyMove(Move{Player: C2, Pos: pos(0, 0)}); err != ErrCellOccupied {
+	_, _ = g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)}, time.Time{})
+	if _, err := g.ApplyMove(Move{Player: C2, Pos: pos(0, 0)}, time.Time{}); err != ErrCellOccupied {
 		t.Fatalf("want ErrCellOccupied, got %v", err)
 	}
 }
@@ -237,10 +240,10 @@ func TestApplyMove_RejectsOccupied(t *testing.T) {
 func TestApplyMove_RejectsOutOfBounds(t *testing.T) {
 	g := NewGame([]Color{C1, C2}, DefaultConfig(2))
 	// q+r exceeds side-1 → off-board.
-	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(6, 6)}); err != ErrOutOfBounds {
+	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(6, 6)}, time.Time{}); err != ErrOutOfBounds {
 		t.Fatalf("want ErrOutOfBounds for (6,6), got %v", err)
 	}
-	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(11, 0)}); err != ErrOutOfBounds {
+	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(11, 0)}, time.Time{}); err != ErrOutOfBounds {
 		t.Fatalf("want ErrOutOfBounds for (11,0), got %v", err)
 	}
 }
@@ -250,13 +253,13 @@ func TestApplyMove_RejectsAfterGameOver(t *testing.T) {
 	for q := -3; q <= 1; q++ {
 		g.Board.Set(pos(q, 0), C1)
 	}
-	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(2, 0)}); err != nil {
+	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(2, 0)}, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if !g.IsOver() {
 		t.Fatalf("game should be over after the winning placement")
 	}
-	if _, err := g.ApplyMove(Move{Player: C2, Pos: pos(0, 1)}); err != ErrGameOver {
+	if _, err := g.ApplyMove(Move{Player: C2, Pos: pos(0, 1)}, time.Time{}); err != ErrGameOver {
 		t.Fatalf("want ErrGameOver, got %v", err)
 	}
 }
@@ -266,7 +269,7 @@ func TestApplyMove_CaptureRemovesGemsAndIncrementsPairs(t *testing.T) {
 	g.Board.Set(pos(-2, 0), C1)
 	g.Board.Set(pos(-1, 0), C2)
 	g.Board.Set(pos(0, 0), C2)
-	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)})
+	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +291,7 @@ func TestWin_Alignment6(t *testing.T) {
 	for q := -3; q <= 1; q++ {
 		g.Board.Set(pos(q, 0), C1)
 	}
-	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(2, 0)})
+	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(2, 0)}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +306,7 @@ func TestWin_Alignment5_BelowThresholdDoesNotWin(t *testing.T) {
 	for q := -3; q <= 0; q++ {
 		g.Board.Set(pos(q, 0), C1)
 	}
-	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)})
+	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +321,7 @@ func TestWin_Alignment5_AtThreshold(t *testing.T) {
 	for q := -3; q <= 0; q++ {
 		g.Board.Set(pos(q, 0), C1)
 	}
-	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)})
+	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +336,7 @@ func TestWin_Alignment4_AtThreshold(t *testing.T) {
 	for q := -2; q <= 0; q++ {
 		g.Board.Set(pos(q, 0), C1)
 	}
-	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)})
+	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +351,7 @@ func TestWin_Capture(t *testing.T) {
 	g.Board.Set(pos(-2, 0), C1)
 	g.Board.Set(pos(-1, 0), C2)
 	g.Board.Set(pos(0, 0), C2)
-	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)})
+	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +425,7 @@ func TestApplyMove_ThreePlayerRotation(t *testing.T) {
 		{C1, pos(0, -3)}, // wraps back to player 0
 	}
 	for i, m := range plays {
-		if _, err := g.ApplyMove(Move{Player: m.who, Pos: m.p}); err != nil {
+		if _, err := g.ApplyMove(Move{Player: m.who, Pos: m.p}, time.Time{}); err != nil {
 			t.Fatalf("step %d (%v): %v", i, m.who, err)
 		}
 	}
@@ -436,7 +439,7 @@ func TestApplyMove_ThreePlayerRotation(t *testing.T) {
 func TestApplyMove_RejectsWhenNoGemsLeft(t *testing.T) {
 	g := NewGame([]Color{C1, C2}, DefaultConfig(2))
 	g.Players[0].GemsRemaining = 0
-	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)}); err != ErrNoGemsLeft {
+	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)}, time.Time{}); err != ErrNoGemsLeft {
 		t.Fatalf("want ErrNoGemsLeft, got %v", err)
 	}
 }
@@ -463,6 +466,84 @@ func TestCapture_TwoCapturesOnSameAxis(t *testing.T) {
 	}
 }
 
+// ---- Chess clock ----
+
+func TestClock_TickAccrualAndIncrement(t *testing.T) {
+	cfg := DefaultConfig(2)
+	cfg.InitialTimeMs = 10_000
+	cfg.IncrementMs = 500
+	g := NewGame([]Color{C1, C2}, cfg)
+	t0 := time.Unix(1000, 0)
+	g.StartClock(t0)
+
+	// C1 thinks for 2s, then plays.
+	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)}, t0.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// C1 spent 2s (-2000) + got 500 increment = -1500 from 10000 -> 8500.
+	if got := g.Players[0].TimeRemainingMs; got != 8500 {
+		t.Errorf("C1 time after move: got %d, want 8500", got)
+	}
+	// C2's clock hasn't ticked yet.
+	if got := g.Players[1].TimeRemainingMs; got != 10_000 {
+		t.Errorf("C2 time should be untouched: got %d", got)
+	}
+	// TurnStartedAt advanced to the move's `now`.
+	if !g.TurnStartedAt.Equal(t0.Add(2 * time.Second)) {
+		t.Errorf("TurnStartedAt didn't advance: got %v", g.TurnStartedAt)
+	}
+}
+
+func TestClock_FlaggedOnExpiredMove(t *testing.T) {
+	cfg := DefaultConfig(2)
+	cfg.InitialTimeMs = 500 // half a second
+	g := NewGame([]Color{C1, C2}, cfg)
+	t0 := time.Unix(1000, 0)
+	g.StartClock(t0)
+
+	// C1 tries to play 2s later — clock has already expired.
+	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)}, t0.Add(2*time.Second)); err != ErrFlagged {
+		t.Fatalf("want ErrFlagged, got %v", err)
+	}
+}
+
+func TestClock_DisabledWhenInitialZero(t *testing.T) {
+	// Default tests pass time.Time{} and never call StartClock — clocks
+	// should not interfere.
+	g := NewGame([]Color{C1, C2}, Config{BoardSide: 11}) // zero clock config
+	t0 := time.Unix(1000, 0)
+	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)}, t0); err != nil {
+		t.Fatal(err)
+	}
+	if g.Players[0].TimeRemainingMs != 0 || g.Players[1].TimeRemainingMs != 0 {
+		t.Fatalf("disabled clocks should stay at 0")
+	}
+}
+
+func TestForfeit_TwoPlayer(t *testing.T) {
+	g := NewGame([]Color{C1, C2}, DefaultConfig(2))
+	g.Forfeit(C1)
+	if g.WinKind != WinTimeout {
+		t.Errorf("WinKind = %v, want WinTimeout", g.WinKind)
+	}
+	if g.Winner != C2 {
+		t.Errorf("Winner = %v, want C2 (the surviving player)", g.Winner)
+	}
+	if !g.IsOver() {
+		t.Errorf("IsOver should return true after forfeit")
+	}
+}
+
+func TestForfeit_NoOpOnFinishedGame(t *testing.T) {
+	g := NewGame([]Color{C1, C2}, DefaultConfig(2))
+	g.Winner = C1
+	g.WinKind = WinAlignment6
+	g.Forfeit(C1) // should not overwrite the existing decision
+	if g.Winner != C1 || g.WinKind != WinAlignment6 {
+		t.Fatalf("Forfeit overwrote a finished game: winner=%v kind=%v", g.Winner, g.WinKind)
+	}
+}
+
 // ---- Interaction of capture and alignments ----
 
 // TestCaptureBreaksOpponentAlignment verifies that the (computed-on-demand)
@@ -484,7 +565,7 @@ func TestCaptureBreaksOpponentAlignment(t *testing.T) {
 		t.Fatalf("setup: want 1 four-run for C2, got %d", got)
 	}
 
-	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)})
+	res, err := g.ApplyMove(Move{Player: C1, Pos: pos(1, 0)}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,6 +20,10 @@ func eventMove(mr moveResponse) Event {
 	return Event{Type: "move", Payload: mr}
 }
 
+func eventChat(m Message) Event {
+	return Event{Type: "chat", Payload: m}
+}
+
 // subscriber holds the channel a single client reads from. Sending blocks
 // when the buffer is full; we drop messages instead of blocking the hub.
 type subscriber struct {

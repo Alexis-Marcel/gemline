@@ -2,6 +2,7 @@ import { supabase } from "./supabase";
 import type {
   Game,
   JoinResponse,
+  Message,
   MoveResponse,
   Profile,
   Replay,
@@ -76,6 +77,18 @@ export const api = {
 
   getReplay(id: string) {
     return request<Replay>(`/api/games/${id}/replay`);
+  },
+
+  getMessages(id: string) {
+    return request<Message[]>(`/api/games/${id}/messages`);
+  },
+
+  postMessage(id: string, playerToken: string, body: string) {
+    return request<Message>(`/api/games/${id}/messages`, {
+      method: "POST",
+      playerToken,
+      body: JSON.stringify({ body }),
+    });
   },
 
   postMove(id: string, playerToken: string, q: number, r: number) {

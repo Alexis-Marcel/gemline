@@ -67,7 +67,18 @@ export interface JoinResponse {
 
 export type WsEvent =
   | { type: "state"; payload: Game }
-  | { type: "move"; payload: MoveResponse };
+  | { type: "move"; payload: MoveResponse }
+  | { type: "chat"; payload: Message };
+
+export interface Message {
+  id: number;
+  gameId: string;
+  seatIndex: number;
+  authorColor: Color;
+  authorName: string;
+  body: string;
+  sentAt: string;
+}
 
 export interface Profile {
   userId: string;

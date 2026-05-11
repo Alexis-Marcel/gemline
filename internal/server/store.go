@@ -289,3 +289,68 @@ func (s *Store) GamesForUser(ctx context.Context, userID string, limit int) ([]U
 func (s *Store) StatsForUser(ctx context.Context, userID string) (UserStats, error) {
 	return s.repo.StatsForUser(ctx, userID)
 }
+
+// PostMessage authenticates the bearer seat token and appends a chat message
+// from that seat. The body is trimmed and capped at MaxMessageLength.
+func (s *Store) PostMessage(ctx context.Context, gameID, token, body string) (*Message, error) {
+	body = trimMessage(body)
+	if body == "" {
+		return nil, ErrEmptyMessage
+	}
+
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	defer rec.Unlock()
+
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
+		return nil, ErrBadToken
+	}
+
+	m := &Message{
+		GameID:      gameID,
+		SeatIndex:   seat.Index,
+		AuthorColor: seat.Color,
+		AuthorName:  seat.Name,
+		Body:        body,
+	}
+	if err := s.repo.AppendMessage(ctx, m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (s *Store) MessagesForGame(ctx context.Context, gameID string, limit int) ([]Message, error) {
+	return s.repo.MessagesForGame(ctx, gameID, limit)
+}
+
+const MaxMessageLength = 500
+
+var ErrEmptyMessage = errors.New("message body is empty")
+
+func trimMessage(body string) string {
+	out := make([]rune, 0, len(body))
+	for _, r := range body {
+		if r == '\t' {
+			r = ' '
+		}
+		out = append(out, r)
+	}
+	for len(out) > 0 && (out[0] == ' ' || out[0] == '\n' || out[0] == '\r') {
+		out = out[1:]
+	}
+	for len(out) > 0 && (out[len(out)-1] == ' ' || out[len(out)-1] == '\n' || out[len(out)-1] == '\r') {
+		out = out[:len(out)-1]
+	}
+	if len(out) > MaxMessageLength {
+		out = out[:MaxMessageLength]
+	}
+	return string(out)
+}

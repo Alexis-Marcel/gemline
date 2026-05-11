@@ -10,16 +10,35 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alexis/gemline/internal/db"
 	"github.com/alexis/gemline/internal/server"
 )
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	addr := getenv("ADDR", ":8080")
+	dsn := os.Getenv("DATABASE_URL")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var repo server.Repository
+	if dsn != "" {
+		pool, err := db.Open(ctx, dsn)
+		if err != nil {
+			log.Error("database connection failed", "err", err)
+			os.Exit(1)
+		}
+		defer pool.Close()
+		repo = server.NewPostgresRepo(pool)
+		log.Info("persistence enabled", "driver", "postgres")
+	} else {
+		log.Info("persistence disabled — running with in-memory store only")
+	}
 
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      server.New(log).Routes(),
+		Handler:      server.New(log, server.NewStore(repo)).Routes(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -38,9 +57,9 @@ func main() {
 	<-sig
 
 	log.Info("shutting down")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown error", "err", err)
 	}
 }

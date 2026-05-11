@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gemline-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gemline
+      POSTGRES_PASSWORD: gemline
+      POSTGRES_DB: gemline
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gemline -d gemline"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+volumes:
+  postgres-data:

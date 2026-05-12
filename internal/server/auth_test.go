@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,18 @@ import (
 )
 
 const testJWTSecret = "test-secret-do-not-use-in-prod"
+
+// testHS256Keyfunc forges a Keyfunc that validates HS256 tokens signed
+// with the given secret. Only used in tests — production code only
+// understands the asymmetric scheme served by Supabase's JWKS.
+func testHS256Keyfunc(secret string) jwt.Keyfunc {
+	return func(t *jwt.Token) (interface{}, error) {
+		if t.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+			return nil, fmt.Errorf("unexpected signing method: %s", t.Method.Alg())
+		}
+		return []byte(secret), nil
+	}
+}
 
 func makeJWT(t *testing.T, secret, sub, email string) string {
 	t.Helper()
@@ -29,7 +42,7 @@ func makeJWT(t *testing.T, secret, sub, email string) string {
 
 func TestJWTMiddleware_AnonymousPasses(t *testing.T) {
 	called := false
-	handler := jwtMiddleware(hs256Keyfunc(testJWTSecret), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := jwtMiddleware(testHS256Keyfunc(testJWTSecret), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := userFromContext(r.Context()); ok {
 			t.Error("expected no user in context for anonymous request")
 		}
@@ -47,7 +60,7 @@ func TestJWTMiddleware_AnonymousPasses(t *testing.T) {
 func TestJWTMiddleware_ValidTokenSetsUser(t *testing.T) {
 	want := "abc-123"
 	called := false
-	handler := jwtMiddleware(hs256Keyfunc(testJWTSecret), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := jwtMiddleware(testHS256Keyfunc(testJWTSecret), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, ok := userFromContext(r.Context())
 		if !ok || u.ID != want {
 			t.Errorf("user in context = %+v, want id=%s", u, want)
@@ -63,7 +76,7 @@ func TestJWTMiddleware_ValidTokenSetsUser(t *testing.T) {
 }
 
 func TestJWTMiddleware_BadSignatureFallsBackToAnonymous(t *testing.T) {
-	handler := jwtMiddleware(hs256Keyfunc(testJWTSecret), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := jwtMiddleware(testHS256Keyfunc(testJWTSecret), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := userFromContext(r.Context()); ok {
 			t.Error("user in context despite bad signature")
 		}

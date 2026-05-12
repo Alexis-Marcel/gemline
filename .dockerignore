@@ -1,0 +1,15 @@
+.git
+.github
+.screenshots
+.env
+.env.local
+*.test
+/bin
+/dist
+coverage.txt
+web/node_modules
+web/dist
+web/.env*
+README.md
+DEPLOY.md
+docker-compose.yml

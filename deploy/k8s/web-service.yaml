@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemline-web
+  namespace: gemline
+spec:
+  type: ClusterIP
+  selector:
+    app: gemline-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

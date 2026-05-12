@@ -1,0 +1,25 @@
+# `kubectl apply -k deploy/k8s/` to deploy everything in one shot.
+# The Secret and ClusterIssuer are deliberately NOT in this list — they
+# carry environment-specific values (real DSN, email, hostname) and are
+# applied out-of-band, once per cluster.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: gemline
+
+resources:
+  - namespace.yaml
+  - server-deployment.yaml
+  - server-service.yaml
+  - web-deployment.yaml
+  - web-service.yaml
+  - ingress.yaml
+
+# CI flips the `latest` tag to the commit SHA via `kustomize edit set image`
+# before applying, so a rollback is just a re-apply with the previous tag.
+images:
+  - name: ghcr.io/alexis-marcel/gemline-server
+    newTag: latest
+  - name: ghcr.io/alexis-marcel/gemline-web
+    newTag: latest

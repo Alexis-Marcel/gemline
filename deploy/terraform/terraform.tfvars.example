@@ -1,8 +1,20 @@
 # Copy to terraform.tfvars (gitignored) and fill in.
-# Token: Hetzner Cloud Console → your project → Security → API Tokens
+
+# Hetzner Cloud API token (Console → Security → API Tokens, Read & Write).
 hcloud_token = ""
 
+# Shared join secret for every k3s node in this cluster.
+# Generate once with: openssl rand -hex 32
+# (Anyone with this token can register as a node, so treat it like a password.)
+k3s_token = ""
+
+# Number of worker nodes. 0 = single-node cluster (CP only).
+# 1 = a 2-node cluster (CP + 1 worker). Default if unset.
+# worker_count = 1
+
 # Optional overrides
-# server_type         = "cx22"          # cx22 (4 GB) is the sweet spot for k3s
+# server_type         = "cx22"          # cx22 = 2 vCPU / 4 GB, sweet spot for k3s
+# worker_server_type  = "cx22"
 # location            = "fsn1"          # fsn1 / nbg1 / hel1 / ash / hil
+# network_zone        = "eu-central"    # eu-central / us-east / us-west
 # ssh_public_key_path = "~/.ssh/id_ed25519.pub"

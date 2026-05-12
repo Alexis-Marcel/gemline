@@ -119,9 +119,9 @@ jobs:
             exit 0
           fi
           git add deploy/k8s/kustomization.yaml
-          git commit -m "deploy: bump images to ${GITHUB_SHA::7}
-
-[skip ci]"
+          # The [skip ci] tag prevents this commit from re-triggering
+          # the same workflow in an infinite loop.
+          git commit -m "deploy: bump images to ${GITHUB_SHA::7} [skip ci]"
           # Pull-rebase in case another deploy raced us (concurrency:
           # group:deploy makes this unlikely but it's cheap insurance).
           git pull --rebase origin main

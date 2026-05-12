@@ -1,0 +1,14 @@
+:8080 {
+    root * /srv
+    encode zstd gzip
+
+    # SPA fallback: every non-asset path serves index.html so the
+    # client-side router can take over. Built assets under /assets/ keep
+    # their long cache headers thanks to Caddy's default file_server.
+    try_files {path} /index.html
+    file_server
+
+    @assets path /assets/*
+    header @assets Cache-Control "public, max-age=31536000, immutable"
+    header Cache-Control "no-cache"
+}

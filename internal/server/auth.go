@@ -19,11 +19,10 @@ import (
 // Both can be present simultaneously: an authenticated user playing a seat
 // they claimed will send both headers on every move.
 //
-// Verification supports both signing schemes Supabase uses:
-//   - Legacy HS256 with a shared secret (Config.JWTSecret)
-//   - New asymmetric ES256/RS256 via a JWKS endpoint (Config.SupabaseURL).
-//     The keyfunc library fetches the JWKS, caches it, and refreshes on
-//     key rotation in the background.
+// Verification uses Supabase's JWT Signing Keys (asymmetric ES256/RS256).
+// The keyfunc library fetches the JWKS from
+// <SUPABASE_URL>/auth/v1/.well-known/jwks.json, caches it, and refreshes
+// on key rotation in the background.
 
 type userCtxKey struct{}
 
@@ -45,17 +44,6 @@ type supabaseClaims struct {
 	Email string `json:"email,omitempty"`
 	Role  string `json:"role,omitempty"`
 	jwt.RegisteredClaims
-}
-
-// hs256Keyfunc returns a Keyfunc that validates HS256-signed tokens with
-// the given shared secret. Used for legacy Supabase projects (and tests).
-func hs256Keyfunc(secret string) jwt.Keyfunc {
-	return func(t *jwt.Token) (interface{}, error) {
-		if t.Method.Alg() != jwt.SigningMethodHS256.Alg() {
-			return nil, fmt.Errorf("unexpected signing method: %s", t.Method.Alg())
-		}
-		return []byte(secret), nil
-	}
 }
 
 // jwksKeyfunc returns a Keyfunc that validates tokens against the JWKS

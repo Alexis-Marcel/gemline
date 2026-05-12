@@ -48,7 +48,6 @@ func main() {
 
 	cfg := server.Config{
 		SupabaseURL: os.Getenv("SUPABASE_URL"),
-		JWTSecret:   os.Getenv("SUPABASE_JWT_SECRET"),
 	}
 
 	srv := &http.Server{

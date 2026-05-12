@@ -1,0 +1,18 @@
+# Provider binaries + plugin cache (large, machine-specific).
+.terraform/
+
+# State files contain resource ids and sensitive outputs.
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate.lock.info
+
+# Variable files keep your hcloud_token in plaintext.
+terraform.tfvars
+*.auto.tfvars
+
+# Crash dumps from terraform itself.
+crash.log
+crash.*.log
+
+# Keep tracked: .terraform.lock.hcl (provider lock file, similar to
+# package-lock.json — needed for reproducible installs).

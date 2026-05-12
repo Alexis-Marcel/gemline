@@ -22,8 +22,11 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_SERVER: ghcr.io/${{ github.repository_owner }}/gemline-server
-  IMAGE_WEB: ghcr.io/${{ github.repository_owner }}/gemline-web
+  # GHCR requires lowercase image names. github.repository_owner respects
+  # the case of the GitHub handle (Alexis-Marcel), which fails the push.
+  # Hardcoded lowercase — bump this if you rename or fork the repo.
+  IMAGE_SERVER: ghcr.io/alexis-marcel/gemline-server
+  IMAGE_WEB: ghcr.io/alexis-marcel/gemline-web
 
 # We avoid two parallel deploys racing on the manifests bump.
 concurrency:

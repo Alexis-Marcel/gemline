@@ -24,8 +24,13 @@ TLS_SAN_OPT=""
 [ -n "$PUBLIC_IP" ] && TLS_SAN_OPT="--tls-san=$PUBLIC_IP"
 
 echo "==> installing k3s server (private=$PRIVATE_IP, public=$PUBLIC_IP)"
+# klipper-lb (servicelb) is kept enabled: with type: LoadBalancer services
+# on bare-metal k3s, it spawns svclb-* DaemonSet pods that bind the host
+# ports (80/443 for Traefik) and route to the service endpoints. Without
+# it the LoadBalancer stays <pending> forever and there's no path from the
+# public IP to the ingress controller.
 curl -sfL https://get.k3s.io | \
-  INSTALL_K3S_EXEC="server --disable=servicelb --node-ip=$PRIVATE_IP --advertise-address=$PRIVATE_IP --flannel-iface=enp7s0 $TLS_SAN_OPT" \
+  INSTALL_K3S_EXEC="server --node-ip=$PRIVATE_IP --advertise-address=$PRIVATE_IP --flannel-iface=enp7s0 $TLS_SAN_OPT" \
   K3S_TOKEN="$TOKEN" \
   sh -
 

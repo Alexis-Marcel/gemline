@@ -47,10 +47,8 @@ func main() {
 	}
 
 	cfg := server.Config{
-		JWTSecret: os.Getenv("SUPABASE_JWT_SECRET"),
-	}
-	if cfg.JWTSecret == "" {
-		log.Warn("SUPABASE_JWT_SECRET not set — user auth endpoints will respond 401")
+		SupabaseURL: os.Getenv("SUPABASE_URL"),
+		JWTSecret:   os.Getenv("SUPABASE_JWT_SECRET"),
 	}
 
 	srv := &http.Server{

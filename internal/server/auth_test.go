@@ -29,7 +29,7 @@ func makeJWT(t *testing.T, secret, sub, email string) string {
 
 func TestJWTMiddleware_AnonymousPasses(t *testing.T) {
 	called := false
-	handler := jwtMiddleware(testJWTSecret, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := jwtMiddleware(hs256Keyfunc(testJWTSecret), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := userFromContext(r.Context()); ok {
 			t.Error("expected no user in context for anonymous request")
 		}
@@ -47,7 +47,7 @@ func TestJWTMiddleware_AnonymousPasses(t *testing.T) {
 func TestJWTMiddleware_ValidTokenSetsUser(t *testing.T) {
 	want := "abc-123"
 	called := false
-	handler := jwtMiddleware(testJWTSecret, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := jwtMiddleware(hs256Keyfunc(testJWTSecret), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, ok := userFromContext(r.Context())
 		if !ok || u.ID != want {
 			t.Errorf("user in context = %+v, want id=%s", u, want)
@@ -63,7 +63,7 @@ func TestJWTMiddleware_ValidTokenSetsUser(t *testing.T) {
 }
 
 func TestJWTMiddleware_BadSignatureFallsBackToAnonymous(t *testing.T) {
-	handler := jwtMiddleware(testJWTSecret, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := jwtMiddleware(hs256Keyfunc(testJWTSecret), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := userFromContext(r.Context()); ok {
 			t.Error("user in context despite bad signature")
 		}

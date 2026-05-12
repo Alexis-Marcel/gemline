@@ -8,30 +8,50 @@ import (
 	"net/http"
 
 	"github.com/alexis/gemline/internal/game"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type Server struct {
-	store     *Store
-	hub       *Hub
-	log       *slog.Logger
-	jwtSecret string
+	store    *Store
+	hub      *Hub
+	log      *slog.Logger
+	verifier jwt.Keyfunc
 }
 
 // Config holds optional dependencies that change how the server behaves.
+//
+// Auth precedence: if SupabaseURL is set, the server fetches Supabase's
+// JWKS document from <SupabaseURL>/auth/v1/.well-known/jwks.json and
+// verifies asymmetrically-signed JWTs (Supabase's 2025 default). If only
+// JWTSecret is set, the server falls back to legacy HS256 verification.
+// If neither is set, all auth-protected endpoints respond 401.
 type Config struct {
-	// JWTSecret is the HMAC secret used to verify Supabase-issued JWTs.
-	// When empty, all incoming requests are treated as anonymous; endpoints
-	// that require a user respond 401.
-	JWTSecret string
+	SupabaseURL string // project URL, used for JWKS discovery
+	JWTSecret   string // legacy HS256 secret
 }
 
 // New returns a Server backed by the given store and config.
 func New(log *slog.Logger, store *Store, cfg Config) *Server {
 	srv := &Server{
-		store:     store,
-		hub:       NewHub(),
-		log:       log,
-		jwtSecret: cfg.JWTSecret,
+		store: store,
+		hub:   NewHub(),
+		log:   log,
+	}
+
+	switch {
+	case cfg.SupabaseURL != "":
+		kf, err := jwksKeyfunc(cfg.SupabaseURL)
+		if err != nil {
+			log.Error("could not initialise JWKS verifier", "err", err)
+		} else {
+			srv.verifier = kf
+			log.Info("auth enabled", "scheme", "jwks", "url", cfg.SupabaseURL)
+		}
+	case cfg.JWTSecret != "":
+		srv.verifier = hs256Keyfunc(cfg.JWTSecret)
+		log.Info("auth enabled", "scheme", "hs256 (legacy)")
+	default:
+		log.Warn("auth disabled — set SUPABASE_URL or SUPABASE_JWT_SECRET to enable")
 	}
 	// When a player's clock runs out or their disconnect grace expires,
 	// push the new state to every WS subscriber so they see the forfeit.
@@ -73,7 +93,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/users/me/games", s.getMyGames)
 	mux.HandleFunc("GET /api/users/me/stats", s.getMyStats)
 
-	return loggingMiddleware(s.log, corsMiddleware(jwtMiddleware(s.jwtSecret, mux)))
+	return loggingMiddleware(s.log, corsMiddleware(jwtMiddleware(s.verifier, mux)))
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {

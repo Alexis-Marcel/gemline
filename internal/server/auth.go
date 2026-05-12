@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -17,6 +18,12 @@ import (
 //
 // Both can be present simultaneously: an authenticated user playing a seat
 // they claimed will send both headers on every move.
+//
+// Verification supports both signing schemes Supabase uses:
+//   - Legacy HS256 with a shared secret (Config.JWTSecret)
+//   - New asymmetric ES256/RS256 via a JWKS endpoint (Config.SupabaseURL).
+//     The keyfunc library fetches the JWKS, caches it, and refreshes on
+//     key rotation in the background.
 
 type userCtxKey struct{}
 
@@ -40,20 +47,38 @@ type supabaseClaims struct {
 	jwt.RegisteredClaims
 }
 
-// parseSupabaseJWT verifies an HS256 signature against `secret` and returns
-// the claims. Anonymous (unauthenticated) callers should not invoke this —
-// they simply skip the auth step.
-func parseSupabaseJWT(token, secret string) (*supabaseClaims, error) {
-	if secret == "" {
-		return nil, errors.New("JWT secret not configured")
-	}
-	claims := &supabaseClaims{}
-	parsed, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
+// hs256Keyfunc returns a Keyfunc that validates HS256-signed tokens with
+// the given shared secret. Used for legacy Supabase projects (and tests).
+func hs256Keyfunc(secret string) jwt.Keyfunc {
+	return func(t *jwt.Token) (interface{}, error) {
 		if t.Method.Alg() != jwt.SigningMethodHS256.Alg() {
 			return nil, fmt.Errorf("unexpected signing method: %s", t.Method.Alg())
 		}
 		return []byte(secret), nil
-	})
+	}
+}
+
+// jwksKeyfunc returns a Keyfunc that validates tokens against the JWKS
+// published by Supabase. Pass the project URL (e.g. https://<id>.supabase.co);
+// the JWKS path is appended automatically.
+func jwksKeyfunc(supabaseURL string) (jwt.Keyfunc, error) {
+	jwksURL := strings.TrimRight(supabaseURL, "/") + "/auth/v1/.well-known/jwks.json"
+	kf, err := keyfunc.NewDefault([]string{jwksURL})
+	if err != nil {
+		return nil, fmt.Errorf("init jwks keyfunc: %w", err)
+	}
+	return kf.Keyfunc, nil
+}
+
+// parseSupabaseJWT verifies the token using `verifier` and returns the
+// claims. Anonymous (unauthenticated) callers should not invoke this —
+// they simply skip the auth step.
+func parseSupabaseJWT(token string, verifier jwt.Keyfunc) (*supabaseClaims, error) {
+	if verifier == nil {
+		return nil, errors.New("JWT verifier not configured")
+	}
+	claims := &supabaseClaims{}
+	parsed, err := jwt.ParseWithClaims(token, claims, verifier)
 	if err != nil {
 		return nil, err
 	}
@@ -71,14 +96,14 @@ func parseSupabaseJWT(token, secret string) (*supabaseClaims, error) {
 // on missing/invalid JWT — endpoints that require auth check the context
 // themselves via requireUser. This way public endpoints (game CRUD,
 // anonymous join) keep working without a token.
-func jwtMiddleware(secret string, next http.Handler) http.Handler {
+func jwtMiddleware(verifier jwt.Keyfunc, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := authorizationBearer(r)
-		if token == "" || secret == "" {
+		if token == "" || verifier == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
-		claims, err := parseSupabaseJWT(token, secret)
+		claims, err := parseSupabaseJWT(token, verifier)
 		if err != nil {
 			// Bad/expired token: behave as if anonymous rather than 401-ing
 			// every public endpoint. Endpoints that need a user surface their

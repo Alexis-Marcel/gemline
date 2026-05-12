@@ -9,17 +9,19 @@ kind: Kustomization
 namespace: gemline
 
 resources:
-  - namespace.yaml
-  - server-deployment.yaml
-  - server-service.yaml
-  - web-deployment.yaml
-  - web-service.yaml
-  - ingress.yaml
+- namespace.yaml
+- server-deployment.yaml
+- server-service.yaml
+- web-deployment.yaml
+- web-service.yaml
+- ingress.yaml
 
 # CI flips the `latest` tag to the commit SHA via `kustomize edit set image`
 # before applying, so a rollback is just a re-apply with the previous tag.
 images:
-  - name: ghcr.io/alexis-marcel/gemline-server
-    newTag: latest
-  - name: ghcr.io/alexis-marcel/gemline-web
-    newTag: latest
+- name: ghcr.io/alexis-marcel/gemline-server
+  newName: ghcr.io/alexis-marcel/gemline-server
+  newTag: 14d64a4db7e4467828c7eb80489d5909a8e2d9a2
+- name: ghcr.io/alexis-marcel/gemline-web
+  newName: ghcr.io/alexis-marcel/gemline-web
+  newTag: 14d64a4db7e4467828c7eb80489d5909a8e2d9a2

@@ -21,9 +21,9 @@ variable "server_name" {
 }
 
 variable "server_type" {
-  description = "Hetzner type for the control-plane node. cx22 = 2 vCPU / 4 GB."
+  description = "Hetzner type for the control-plane node. cx23 = 2 vCPU / 4 GB."
   type        = string
-  default     = "cx22"
+  default     = "cx23"
 }
 
 variable "worker_count" {
@@ -35,7 +35,7 @@ variable "worker_count" {
 variable "worker_server_type" {
   description = "Hetzner type for each worker. Match server_type unless you want asymmetric nodes."
   type        = string
-  default     = "cx22"
+  default     = "cx23"
 }
 
 variable "location" {

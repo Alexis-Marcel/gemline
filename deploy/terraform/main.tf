@@ -104,9 +104,9 @@ resource "hcloud_server_network" "workers" {
 # Firewalls
 # ---------------------------------------------------------------------------
 
-# Public firewall: only SSH + HTTP(S) reach the cluster from outside.
-# kube-apiserver (:6443) is NOT exposed publicly — administer via SSH
-# tunnel or whitelist your IP if you really need remote kubectl.
+# Public firewall: SSH + HTTP(S) are open to the world; the Kubernetes
+# API is closed by default and opens only to source IPs listed in
+# var.kubeapi_allowed_ips (defense-in-depth on top of mTLS).
 resource "hcloud_firewall" "public" {
   name = "${var.server_name}-public"
 
@@ -127,6 +127,18 @@ resource "hcloud_firewall" "public" {
     protocol   = "tcp"
     port       = "443"
     source_ips = ["0.0.0.0/0", "::/0"]
+  }
+
+  # Conditional kube-apiserver rule. When kubeapi_allowed_ips is empty,
+  # no rule is emitted and the port stays closed (SSH tunnel only).
+  dynamic "rule" {
+    for_each = length(var.kubeapi_allowed_ips) > 0 ? [1] : []
+    content {
+      direction  = "in"
+      protocol   = "tcp"
+      port       = "6443"
+      source_ips = var.kubeapi_allowed_ips
+    }
   }
 }
 

@@ -17,10 +17,10 @@ spec:
   ingressClassName: traefik
   tls:
     - hosts:
-        - gemline.example.com # ← edit me
+        - gemline.werilo.fr
       secretName: gemline-tls
   rules:
-    - host: gemline.example.com # ← edit me
+    - host: gemline.werilo.fr
       http:
         paths:
           - path: /api

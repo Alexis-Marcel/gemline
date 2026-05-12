@@ -10,8 +10,17 @@ set -euo pipefail
 
 ARGOCD_VERSION="v2.12.4"
 
+echo "==> creating argocd namespace"
+kubectl get namespace argocd >/dev/null 2>&1 || kubectl create namespace argocd
+
 echo "==> installing ArgoCD ${ARGOCD_VERSION}"
-kubectl apply -k "github.com/argoproj/argo-cd//manifests/cluster-install?ref=${ARGOCD_VERSION}"
+# We deliberately use the flat install.yaml (not the kustomize bundle at
+# manifests/cluster-install) because the latter silently falls back to
+# kubectl's current namespace if `argocd` doesn't exist yet — landing
+# the install in `default`. The flat manifest has the namespace baked
+# in and combined with `-n argocd` is unambiguous.
+kubectl apply -n argocd \
+  -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
 
 echo "==> waiting for ArgoCD components"
 for d in argocd-server argocd-repo-server argocd-applicationset-controller argocd-notifications-controller; do

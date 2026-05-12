@@ -12,9 +12,19 @@ import (
 
 	"github.com/alexis/gemline/internal/db"
 	"github.com/alexis/gemline/internal/server"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Load .env (and .env.local if present) before reading any env var so
+	// local dev can keep secrets out of the shell. .env.local takes
+	// precedence over .env because godotenv.Load doesn't overwrite vars
+	// that are already set — we load the override file first.
+	// Production deployments won't have these files; godotenv.Load
+	// returns "file not found" errors we deliberately ignore.
+	_ = godotenv.Load(".env.local")
+	_ = godotenv.Load(".env")
+
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	addr := getenv("ADDR", ":8080")
 	dsn := os.Getenv("DATABASE_URL")

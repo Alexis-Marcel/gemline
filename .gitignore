@@ -10,3 +10,6 @@ coverage.txt
 node_modules/
 web/dist/
 .screenshots/
+.env
+.env.local
+.env.*.local

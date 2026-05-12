@@ -28,7 +28,8 @@ The stack is Go for the backend, Vite + React for the frontend, Postgres for per
 2. Grab three values from your project settings:
    - **DATABASE_URL** — Settings → Database → Connection string (URI format).
    - **VITE_SUPABASE_URL** and **VITE_SUPABASE_PUBLISHABLE_KEY** — Settings → API.
-   - **SUPABASE_JWT_SECRET** — Settings → API → JWT Settings.
+   - **SUPABASE_URL** — Settings → API → Project URL. The backend fetches the JWKS that verifies user JWTs (Supabase's 2025 asymmetric scheme).
+   - (Legacy projects only) **SUPABASE_JWT_SECRET** — Settings → API → JWT Settings. Used as a fallback HS256 verifier when SUPABASE_URL is empty.
 3. Frontend env vars: copy `web/.env.example` to `web/.env.local` and paste the `VITE_SUPABASE_*` values.
 
 ### Run
@@ -36,7 +37,7 @@ The stack is Go for the backend, Vite + React for the frontend, Postgres for per
 ```sh
 # Backend
 DATABASE_URL='<your Supabase DATABASE_URL>' \
-SUPABASE_JWT_SECRET='<your JWT secret>' \
+SUPABASE_URL='https://<your-project>.supabase.co' \
   go run ./cmd/server
 
 # Frontend (separate shell)
@@ -45,7 +46,7 @@ cd web && npm install && npm run dev
 
 The frontend serves on `:5173` and proxies `/api` and `/ws` to the backend on `:8080`. Visit `http://localhost:5173` to play.
 
-`DATABASE_URL` is optional — if unset, games stay in memory and are lost on restart. `SUPABASE_JWT_SECRET` is also optional — if unset, the user-auth endpoints respond 401, but anonymous play still works. For an offline-friendly dev loop without Supabase, `docker compose up -d` brings up a local Postgres on `localhost:5432` with credentials `gemline / gemline`.
+Both `DATABASE_URL` and the auth variables are optional — if unset, games stay in memory and `/api/auth/*` returns 401, but anonymous play still works. The backend reads its environment from a `.env` (and optional `.env.local` override) at the repo root in addition to the shell, so you can `cp .env.example .env` once and forget about it. For an offline-friendly dev loop without Supabase, `docker compose up -d` brings up a local Postgres on `localhost:5432` with credentials `gemline / gemline`.
 
 ### Quick smoke test against the API
 

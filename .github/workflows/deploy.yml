@@ -1,5 +1,9 @@
 name: deploy
 
+# GitOps flow: build the images, push them to GHCR with a SHA tag, then
+# commit the new tag into deploy/k8s/kustomization.yaml. ArgoCD watches
+# the repo and rolls the cluster forward when it sees the commit.
+
 on:
   push:
     branches: [main]
@@ -20,6 +24,11 @@ env:
   REGISTRY: ghcr.io
   IMAGE_SERVER: ghcr.io/${{ github.repository_owner }}/gemline-server
   IMAGE_WEB: ghcr.io/${{ github.repository_owner }}/gemline-web
+
+# We avoid two parallel deploys racing on the manifests bump.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
 
 jobs:
   build-server:
@@ -75,39 +84,45 @@ jobs:
           cache-from: type=gha,scope=web
           cache-to: type=gha,scope=web,mode=max
 
-  rollout:
+  bump-manifest:
+    # Edit the kustomization image tag and push back. ArgoCD's auto-sync
+    # picks the commit up within a minute and rolls the cluster.
     needs: [build-server, build-web]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Configure kubectl
+        with:
+          # Use a token that can push: GITHUB_TOKEN is enough because we
+          # only need contents:write on this repo.
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install kustomize
         run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
-          chmod 600 ~/.kube/config
-      - name: Pin images to the new SHA
+          curl -sLo /tmp/kustomize.tar.gz \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz
+          tar -xzf /tmp/kustomize.tar.gz -C /tmp
+          sudo mv /tmp/kustomize /usr/local/bin/
+      - name: Pin images to the commit SHA
+        working-directory: deploy/k8s
         run: |
-          cd deploy/k8s
-          kubectl kustomize . >/dev/null  # syntax check
-          # Build a temporary kustomization with the SHA tag and apply it.
-          cat > kustomization.runtime.yaml <<EOF
-          apiVersion: kustomize.config.k8s.io/v1beta1
-          kind: Kustomization
-          resources: [kustomization.yaml]
-          images:
-            - name: ${{ env.IMAGE_SERVER }}
-              newTag: ${{ github.sha }}
-            - name: ${{ env.IMAGE_WEB }}
-              newTag: ${{ github.sha }}
-          EOF
-      - name: Apply
+          kustomize edit set image \
+            ${{ env.IMAGE_SERVER }}=${{ env.IMAGE_SERVER }}:${{ github.sha }}
+          kustomize edit set image \
+            ${{ env.IMAGE_WEB }}=${{ env.IMAGE_WEB }}:${{ github.sha }}
+      - name: Commit and push
         run: |
-          kubectl apply -k deploy/k8s/
-          kubectl -n gemline set image deployment/gemline-server \
-            server=${{ env.IMAGE_SERVER }}:${{ github.sha }}
-          kubectl -n gemline set image deployment/gemline-web \
-            web=${{ env.IMAGE_WEB }}:${{ github.sha }}
-      - name: Wait for rollout
-        run: |
-          kubectl -n gemline rollout status deployment/gemline-server --timeout=2m
-          kubectl -n gemline rollout status deployment/gemline-web --timeout=2m
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet deploy/k8s/kustomization.yaml; then
+            echo "no manifest change — skipping commit"
+            exit 0
+          fi
+          git add deploy/k8s/kustomization.yaml
+          git commit -m "deploy: bump images to ${GITHUB_SHA::7}
+
+[skip ci]"
+          # Pull-rebase in case another deploy raced us (concurrency:
+          # group:deploy makes this unlikely but it's cheap insurance).
+          git pull --rebase origin main
+          git push

@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+# Token: Hetzner Cloud Console → your project → Security → API Tokens
+hcloud_token = ""
+
+# Optional overrides
+# server_type         = "cx22"          # cx22 (4 GB) is the sweet spot for k3s
+# location            = "fsn1"          # fsn1 / nbg1 / hel1 / ash / hil
+# ssh_public_key_path = "~/.ssh/id_ed25519.pub"

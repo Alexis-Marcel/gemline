@@ -27,7 +27,7 @@ The stack is Go for the backend, Vite + React for the frontend, Postgres for per
 1. Create a free project at [supabase.com](https://supabase.com).
 2. Grab three values from your project settings:
    - **DATABASE_URL** — Settings → Database → Connection string (URI format).
-   - **VITE_SUPABASE_URL** and **VITE_SUPABASE_ANON_KEY** — Settings → API.
+   - **VITE_SUPABASE_URL** and **VITE_SUPABASE_PUBLISHABLE_KEY** — Settings → API.
    - **SUPABASE_JWT_SECRET** — Settings → API → JWT Settings.
 3. Frontend env vars: copy `web/.env.example` to `web/.env.local` and paste the `VITE_SUPABASE_*` values.
 

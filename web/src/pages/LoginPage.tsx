@@ -157,7 +157,7 @@ function NotConfiguredNotice() {
   return (
     <p className="mb-4 rounded-md border border-amber-900/50 bg-amber-950/30 p-3 text-xs text-amber-200">
       Auth indisponible : variables <code>VITE_SUPABASE_URL</code> et{" "}
-      <code>VITE_SUPABASE_ANON_KEY</code> non configurées (voir{" "}
+      <code>VITE_SUPABASE_PUBLISHABLE_KEY</code> non configurées (voir{" "}
       <code>web/.env.local</code>).
     </p>
   );

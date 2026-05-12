@@ -54,7 +54,10 @@ spec:
             initialDelaySeconds: 1
             periodSeconds: 5
           securityContext:
+            # Caddy's image runs as root by default; running it non-root
+            # would need a custom uid + writable /data emptyDir for its
+            # config store. Static-file server behind the ingress with no
+            # privilege escalation + all capabilities dropped is fine.
             allowPrivilegeEscalation: false
-            runAsNonRoot: true
             capabilities:
               drop: ["ALL"]

@@ -8,7 +8,11 @@
 
 set -euo pipefail
 
-ARGOCD_VERSION="v2.12.4"
+# v3 is required for k3s 1.31+: v2 ships an older Deployment schema that
+# doesn't know about .status.terminatingReplicas, so diff calculation
+# fails ("field not declared in schema") and sync status oscillates as
+# Unknown.
+ARGOCD_VERSION="v3.4.1"
 
 echo "==> creating argocd namespace"
 kubectl get namespace argocd >/dev/null 2>&1 || kubectl create namespace argocd

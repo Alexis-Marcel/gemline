@@ -54,10 +54,10 @@ spec:
             initialDelaySeconds: 1
             periodSeconds: 5
           securityContext:
-            # Caddy's image runs as root by default; running it non-root
-            # would need a custom uid + writable /data emptyDir for its
-            # config store. Static-file server behind the ingress with no
-            # privilege escalation + all capabilities dropped is fine.
+            # The Caddy binary has cap_net_bind_service set as a file
+            # capability, so dropping all capabilities at the pod level
+            # makes the kernel refuse to exec it (EPERM). The image runs
+            # as root by default but the container is a plain static-file
+            # server behind the ingress; allowPrivilegeEscalation:false
+            # is enough hardening here.
             allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]

@@ -41,23 +41,38 @@ the CI. Data lives in your **Supabase** project.
 
 ## One-time setup
 
-### 1. Provision a VPS — Terraform
+### 1. Provision the cluster — Terraform
 
 ```sh
 cd deploy/terraform
 cp terraform.tfvars.example terraform.tfvars
-# fill in hcloud_token (Hetzner Console → Security → API Tokens)
+
+# Hetzner API token: Console → Security → API Tokens (Read & Write)
+# k3s join secret:    openssl rand -hex 32
+
 terraform init
 terraform apply
 ```
 
-Cloud-init runs `deploy/bootstrap.sh` automatically as soon as the
-server boots, so k3s + cert-manager are already installed by the time
-SSH is reachable (~3 minutes after apply).
+By default this provisions:
 
-Don't want IaC? Click through Hetzner Cloud's web UI to create a
-`CX22` (2 vCPU / 4 GB / 40 GB) on Ubuntu 24.04 with your SSH key,
-then run `bash deploy/bootstrap.sh` on it manually.
+- 1 **control-plane** node (k3s server) with the public IP
+- 1 **worker** node (k3s agent), joining via the private network
+
+Cloud-init templates in `deploy/terraform/cloud-init/` are filled in by
+Terraform with the pre-shared `k3s_token` and the right private IPs, so
+the cluster forms itself without any further SSH session. Total time
+from `terraform apply` to a Ready cluster: ~3 minutes.
+
+To change the cluster size, edit `worker_count` in
+`terraform.tfvars` and re-apply — Terraform adds or removes nodes
+in place.
+
+#### Single-node fallback
+
+Set `worker_count = 0` for a single-node cluster (CP only), or skip
+Terraform entirely and run `bash deploy/bootstrap.sh` on any Ubuntu
+24.04 VPS to get the same k3s + cert-manager install.
 
 ### 2. Point your domain at it
 
@@ -195,16 +210,44 @@ kubectl -n gemline get challenge
 The most common cause is DNS not pointing at the VPS yet, or port 80
 blocked at the firewall. Let's Encrypt's HTTP-01 challenge needs both.
 
+## Scaling out
+
+### Adding workers
+
+Bump `worker_count` in `deploy/terraform/terraform.tfvars` and
+`terraform apply`. New nodes provision in ~90 s, register themselves
+with the CP automatically, and start receiving pods scheduled by the
+default kube-scheduler.
+
+The web Deployment already declares a `topologySpreadConstraints` on
+`kubernetes.io/hostname`, so adding nodes immediately spreads the 3
+web replicas across them. Watch with:
+
+```sh
+kubectl -n gemline get pods -o wide
+```
+
+### Why the backend stays at replicas = 1
+
+The in-process WebSocket hub is the source of the limit. With 2+
+replicas, a player whose WS lands on pod A sees moves broadcast from
+pod A; a player on pod B sees moves broadcast from pod B. Both
+mutate Postgres correctly via the REST path, but the live updates
+diverge — bad UX.
+
+The fix is a pub/sub backplane: when a move lands on one pod, it
+re-broadcasts via Postgres `LISTEN/NOTIFY` (we already have
+Postgres) or Redis pub/sub. Every pod subscribes and re-emits to its
+local WS subscribers. Not implemented yet — replicas=1 is the
+honest current ceiling.
+
 ## Known limits
 
-- **Single backend replica** — the WebSocket hub is per-process. Adding
-  a second replica today would mean half the players miss broadcasts
-  from the other half. Adding inter-process pub/sub (Postgres
-  `LISTEN/NOTIFY`, Redis, NATS) would lift this.
-- **Single node** — no HA. If the VPS goes down, the app goes down.
-  Acceptable for a portfolio project; for anything more, switch to a
-  managed Kubernetes (DOKS, GKE Autopilot, etc.) and the same manifests
-  apply.
-- **No in-cluster Postgres** — we lean on Supabase. If Supabase is down
-  the app can still serve the SPA and the static parts but games won't
-  load.
+- **Single backend replica** — see above.
+- **Single CP** — if the CP node dies, the cluster API is down even
+  if workers keep running their pods. Going HA needs 3+ control-plane
+  nodes with embedded etcd (`k3s server --cluster-init` on the first,
+  `--server https://<first-cp-priv-ip>:6443` on the others). Possible
+  but not wired in our current Terraform.
+- **No in-cluster Postgres** — we lean on Supabase. If Supabase is
+  down, the SPA still serves but games don't load.

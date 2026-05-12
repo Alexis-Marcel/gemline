@@ -7,7 +7,7 @@ metadata:
     app: gemline-web
 spec:
   # Stateless static-file server; safe to scale horizontally.
-  replicas: 2
+  replicas: 3
   selector:
     matchLabels:
       app: gemline-web
@@ -16,6 +16,17 @@ spec:
       labels:
         app: gemline-web
     spec:
+      # Spread replicas across nodes so losing one node doesn't take down
+      # the whole web tier. With replicas=3 and 2 nodes we get 2/1 split;
+      # with 3+ nodes we get one per node. ScheduleAnyway means we
+      # tolerate skew during rollouts instead of getting stuck.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: gemline-web
       containers:
         - name: web
           image: ghcr.io/alexis-marcel/gemline-web:latest

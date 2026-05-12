@@ -18,3 +18,13 @@ k3s_token = ""
 # location            = "fsn1"          # fsn1 / nbg1 / hel1 / ash / hil
 # network_zone        = "eu-central"    # eu-central / us-east / us-west
 # ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+
+# Source IPs allowed to talk to the Kubernetes API (:6443). Empty = closed,
+# kubectl works only via SSH tunnel. To enable direct kubectl from your
+# laptop, list your public IPv4 (/32) and ideally your IPv6 /64 prefix:
+#   curl -s -4 ifconfig.me           # IPv4
+#   curl -s -6 ifconfig.me           # full IPv6, take the first 4 groups + "::/64"
+# kubeapi_allowed_ips = [
+#   "82.65.x.y/32",
+#   "2a01:cb0c:18f7:5d00::/64",
+# ]

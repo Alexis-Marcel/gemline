@@ -67,3 +67,21 @@ variable "ssh_key_name" {
   type        = string
   default     = "gemline"
 }
+
+variable "kubeapi_allowed_ips" {
+  description = <<-EOT
+    CIDRs allowed to reach the Kubernetes API on :6443.
+    The API enforces mTLS regardless, but restricting by source IP adds
+    defense-in-depth against stolen kubeconfigs and zero-day exploits in
+    kube-apiserver.
+
+    Default (empty list) keeps the port closed — admin via SSH tunnel.
+    To allow direct kubectl from your laptop, set both:
+      - your IPv4: result of `curl -s -4 ifconfig.me` with /32 suffix
+      - your IPv6 /64 prefix (the first 4 groups, the rest replaced by ::)
+    Example:
+      kubeapi_allowed_ips = ["82.65.x.y/32", "2a01:cb0c:18f7:5d00::/64"]
+  EOT
+  type        = list(string)
+  default     = []
+}

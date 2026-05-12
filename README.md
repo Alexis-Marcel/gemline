@@ -28,8 +28,7 @@ The stack is Go for the backend, Vite + React for the frontend, Postgres for per
 2. Grab three values from your project settings:
    - **DATABASE_URL** — Settings → Database → Connection string (URI format).
    - **VITE_SUPABASE_URL** and **VITE_SUPABASE_PUBLISHABLE_KEY** — Settings → API.
-   - **SUPABASE_URL** — Settings → API → Project URL. The backend fetches the JWKS that verifies user JWTs (Supabase's 2025 asymmetric scheme).
-   - (Legacy projects only) **SUPABASE_JWT_SECRET** — Settings → API → JWT Settings. Used as a fallback HS256 verifier when SUPABASE_URL is empty.
+   - **SUPABASE_URL** — Settings → API → Project URL. The backend fetches the JWKS that verifies user JWTs.
 3. Frontend env vars: copy `web/.env.example` to `web/.env.local` and paste the `VITE_SUPABASE_*` values.
 
 ### Run

@@ -20,14 +20,12 @@ type Server struct {
 
 // Config holds optional dependencies that change how the server behaves.
 //
-// Auth precedence: if SupabaseURL is set, the server fetches Supabase's
-// JWKS document from <SupabaseURL>/auth/v1/.well-known/jwks.json and
-// verifies asymmetrically-signed JWTs (Supabase's 2025 default). If only
-// JWTSecret is set, the server falls back to legacy HS256 verification.
-// If neither is set, all auth-protected endpoints respond 401.
+// When SupabaseURL is set, the server fetches Supabase's JWKS document
+// from <SupabaseURL>/auth/v1/.well-known/jwks.json and verifies
+// asymmetrically-signed user JWTs. When it's empty, auth is disabled
+// and every /api/auth/* endpoint responds 401.
 type Config struct {
-	SupabaseURL string // project URL, used for JWKS discovery
-	JWTSecret   string // legacy HS256 secret
+	SupabaseURL string
 }
 
 // New returns a Server backed by the given store and config.
@@ -38,20 +36,13 @@ func New(log *slog.Logger, store *Store, cfg Config) *Server {
 		log:   log,
 	}
 
-	switch {
-	case cfg.SupabaseURL != "":
-		kf, err := jwksKeyfunc(cfg.SupabaseURL)
-		if err != nil {
-			log.Error("could not initialise JWKS verifier", "err", err)
-		} else {
-			srv.verifier = kf
-			log.Info("auth enabled", "scheme", "jwks", "url", cfg.SupabaseURL)
-		}
-	case cfg.JWTSecret != "":
-		srv.verifier = hs256Keyfunc(cfg.JWTSecret)
-		log.Info("auth enabled", "scheme", "hs256 (legacy)")
-	default:
-		log.Warn("auth disabled — set SUPABASE_URL or SUPABASE_JWT_SECRET to enable")
+	if cfg.SupabaseURL == "" {
+		log.Warn("auth disabled — set SUPABASE_URL to enable")
+	} else if kf, err := jwksKeyfunc(cfg.SupabaseURL); err != nil {
+		log.Error("could not initialise JWKS verifier", "err", err)
+	} else {
+		srv.verifier = kf
+		log.Info("auth enabled", "scheme", "jwks", "url", cfg.SupabaseURL)
 	}
 	// When a player's clock runs out or their disconnect grace expires,
 	// push the new state to every WS subscriber so they see the forfeit.

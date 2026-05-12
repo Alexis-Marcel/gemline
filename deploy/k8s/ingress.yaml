@@ -1,0 +1,60 @@
+# Path-based routing on a single hostname:
+#   /api/*, /ws/*, /healthz, /readyz → server
+#   everything else                  → web (Caddy serves the SPA)
+#
+# TLS is provisioned automatically by cert-manager once the
+# letsencrypt-prod ClusterIssuer is in place (see DEPLOY.md).
+# Traefik is the default ingress controller on k3s, so no install needed.
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gemline
+  namespace: gemline
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - gemline.example.com # ← edit me
+      secretName: gemline-tls
+  rules:
+    - host: gemline.example.com # ← edit me
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: gemline-server
+                port:
+                  number: 80
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: gemline-server
+                port:
+                  number: 80
+          - path: /healthz
+            pathType: Prefix
+            backend:
+              service:
+                name: gemline-server
+                port:
+                  number: 80
+          - path: /readyz
+            pathType: Prefix
+            backend:
+              service:
+                name: gemline-server
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gemline-web
+                port:
+                  number: 80

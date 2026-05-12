@@ -1,0 +1,18 @@
+# cert-manager ClusterIssuer for Let's Encrypt production. Apply once,
+# after installing cert-manager (see DEPLOY.md). Edit the email below
+# to receive expiry warnings from Let's Encrypt.
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: you@example.com # ← edit me
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik

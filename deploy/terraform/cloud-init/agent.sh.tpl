@@ -17,8 +17,12 @@ for i in $(seq 1 60); do
 done
 
 echo "==> waiting for control plane API at $CP_PRIVATE_IP:6443"
+# Use a TCP probe rather than HTTP: kube-apiserver answers / with 401
+# (no auth provided), and curl -f rejects that as a failure, so the
+# previous curl-based check looped forever and the agent install never
+# ran. nc -z just checks the port is open, which is what we want.
 for i in $(seq 1 120); do
-  if curl -fsk -o /dev/null "https://$CP_PRIVATE_IP:6443/"; then
+  if nc -zw 5 "$CP_PRIVATE_IP" 6443 2>/dev/null; then
     echo "CP reachable"
     break
   fi

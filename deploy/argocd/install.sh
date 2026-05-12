@@ -23,7 +23,13 @@ echo "==> installing ArgoCD ${ARGOCD_VERSION}"
 # kubectl's current namespace if `argocd` doesn't exist yet — landing
 # the install in `default`. The flat manifest has the namespace baked
 # in and combined with `-n argocd` is unambiguous.
-kubectl apply -n argocd \
+#
+# --server-side is required: the applicationsets.argoproj.io CRD carries
+# an OpenAPI schema larger than the 256KB limit on the
+# last-applied-configuration annotation that client-side apply uses.
+# --force-conflicts lets us take ownership of fields previously managed
+# by an older ArgoCD install.
+kubectl apply -n argocd --server-side --force-conflicts \
   -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
 
 echo "==> waiting for ArgoCD components"

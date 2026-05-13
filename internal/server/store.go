@@ -49,6 +49,8 @@ var (
 	ErrBotsOnPublic      = errors.New("bots cannot be added to public games")
 	ErrAnonymousOnPublic = errors.New("public games require authentication to join")
 	ErrBadSeatIndex      = errors.New("seat index out of range")
+	ErrPublicCannotStart = errors.New("public games start automatically; manual start is only for private games")
+	ErrTooFewToStart     = errors.New("at least 2 seats must be occupied to start")
 )
 
 // Seat is a play slot in a game. Once claimed, only the SHA-256 of the
@@ -724,6 +726,76 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 // stuffed by whoever holds the URL. When the placement fills the last seat
 // the game transitions to playing and (if seat 0 is a bot) its first move
 // is scheduled.
+// Start finalises a private game in `waiting`: unoccupied seats are dropped
+// (they stay empty — no bot fillers, the host decides upfront whether to
+// add bots before clicking Start), the engine is rebuilt with the remaining
+// players' colours, status flips to `playing`, and the clock starts. The
+// caller's seat token authorises the start; the trust model is "you have
+// the private URL = you can decide to start".
+//
+// Disallowed:
+//   - Public games (matchmaking owns those — they auto-start once the
+//     opponent arrives).
+//   - Games with fewer than 2 occupied seats (no opponent to play against).
+func (s *Store) Start(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	if rec.Visibility != VisibilityPrivate {
+		rec.Unlock()
+		return rec, ErrPublicCannotStart
+	}
+	if rec.Status != StatusWaiting {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if _, ok := rec.SeatByToken(token); !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	occupied := make([]Seat, 0, len(rec.Seats))
+	for _, st := range rec.Seats {
+		if st.Occupied {
+			occupied = append(occupied, st)
+		}
+	}
+	if len(occupied) < 2 {
+		rec.Unlock()
+		return rec, ErrTooFewToStart
+	}
+
+	// Trim: the new seats array is just the previously-occupied seats, with
+	// fresh contiguous indices 0..N-1. We keep each seat's original colour
+	// so clients that remembered "I'm Bleu" still find themselves.
+	colors := make([]game.Color, len(occupied))
+	for i := range occupied {
+		occupied[i].Index = i
+		colors[i] = occupied[i].Color
+	}
+	rec.Seats = occupied
+	// Rebuild the engine for the new player count. Safe because the game
+	// has no moves yet (we just enforced Status == Waiting).
+	rec.State = game.NewGame(colors, rec.State.Config)
+	rec.Status = StatusPlaying
+	rec.State.StartClock(time.Now())
+	s.armClock(rec)
+	status := rec.Status
+	rec.Unlock()
+
+	if err := s.repo.FinalizeStart(ctx, gameID, status); err != nil {
+		// In-memory truth wins (same policy as other finalize paths).
+		_ = err
+	}
+	s.maybeScheduleBot(rec)
+	return rec, nil
+}
+
 func (s *Store) AddBot(ctx context.Context, gameID string, seatIdx int) (*GameRecord, error) {
 	rec, ok, err := s.Get(ctx, gameID)
 	if err != nil {

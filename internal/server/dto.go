@@ -9,6 +9,10 @@ import (
 type createGameRequest struct {
 	Players    int    `json:"players"`
 	Visibility string `json:"visibility,omitempty"` // "public" | "private" (default)
+	// Name is consumed only for anonymous callers — authenticated users
+	// have their display name pulled from the profile server-side. Empty
+	// for anonymous = 400.
+	Name string `json:"name,omitempty"`
 }
 
 // matchmakeRequest is the body of POST /api/games/matchmake. The frontend

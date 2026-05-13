@@ -52,19 +52,25 @@ func TestCreateGameStartsWaiting(t *testing.T) {
 	}
 }
 
-func TestCreateGameWithPublicVisibility(t *testing.T) {
+func TestCreateGameRejectsPublicVisibility(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := createGameWithBody(t, ts, `{"players":2,"visibility":"public"}`, http.StatusCreated)
-	if g.Visibility != VisibilityPublic {
-		t.Fatalf("want public, got %q", g.Visibility)
-	}
+	// Public games can only come from matchmaking now — accept-as-public
+	// on the create endpoint would let anyone open a permanent public room.
+	_ = createGameWithBody(t, ts, `{"players":2,"visibility":"public","name":"Host"}`, http.StatusBadRequest)
 }
 
 func TestCreateGameRejectsBadVisibility(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	_ = createGameWithBody(t, ts, `{"players":2,"visibility":"unicorn"}`, http.StatusBadRequest)
+	_ = createGameWithBody(t, ts, `{"players":2,"visibility":"unicorn","name":"Host"}`, http.StatusBadRequest)
+}
+
+func TestCreateGameRejectsAnonymousWithoutName(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	// No JWT, no name → can't auto-join the creator anywhere.
+	_ = createGameWithBody(t, ts, `{"players":2}`, http.StatusBadRequest)
 }
 
 func TestRematchRequiresFinishedGame(t *testing.T) {
@@ -352,8 +358,9 @@ func TestAddBotFillsEmptySeat(t *testing.T) {
 func TestAddBotRejectedOnPublicGame(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := createGameWithBody(t, ts, `{"players":2,"visibility":"public"}`, http.StatusCreated)
-	postAddBotRaw(t, ts, g.ID, 1, http.StatusConflict)
+	// Public games only come from matchmaking now.
+	pub := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	postAddBotRaw(t, ts, pub.Game.ID, 1, http.StatusConflict)
 }
 
 func TestAddBotRejectedOnTakenSeat(t *testing.T) {
@@ -504,6 +511,79 @@ func TestLeaveSeatFreesIt(t *testing.T) {
 	}
 }
 
+func TestStartTrimsToOccupiedSeats(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 6) // private, 6 seats, all empty
+	a := joinGame(t, ts, g.ID, "Alice", nil)
+	b := joinGame(t, ts, g.ID, "Bob", nil)
+	// Private games must NOT auto-start when AllSeated — but here only 2/6
+	// are seated so the assertion is doubly safe.
+	if a.Game.Status != StatusWaiting || b.Game.Status != StatusWaiting {
+		t.Fatalf("game must stay waiting before Start (status=%s)", b.Game.Status)
+	}
+	out := postStart(t, ts, g.ID, a.Token, http.StatusOK)
+	if out.Status != StatusPlaying {
+		t.Fatalf("want playing after Start, got %s", out.Status)
+	}
+	// Trim: only the previously-occupied 2 seats survive — empty ones are
+	// gone entirely from the wire view.
+	if len(out.Seats) != 2 {
+		t.Fatalf("want 2 seats after Start (trim of 6→2), got %d", len(out.Seats))
+	}
+	for i, seat := range out.Seats {
+		if !seat.Occupied || seat.IsBot {
+			t.Fatalf("seat %d should be an occupied human after Start: %+v", i, seat)
+		}
+	}
+	if len(out.Players) != 2 {
+		t.Fatalf("engine players must match seat count after trim, got %d", len(out.Players))
+	}
+}
+
+func TestStartPreservesUserColors(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 6)
+	// Alice in seat 2 (C3), Bob in seat 4 (C5) — non-contiguous.
+	two := 2
+	four := 4
+	a := joinGame(t, ts, g.ID, "Alice", &two)
+	b := joinGame(t, ts, g.ID, "Bob", &four)
+	out := postStart(t, ts, g.ID, a.Token, http.StatusOK)
+	// After trim, Alice keeps C3 and Bob keeps C5 — the engine doesn't
+	// re-colour them, just re-orders. Names follow the colour.
+	colors := []game.Color{out.Seats[0].Color, out.Seats[1].Color}
+	if colors[0] != a.Seat.Color || colors[1] != b.Seat.Color {
+		t.Fatalf("trim should preserve original colours, got %v (wanted Alice=%v, Bob=%v)",
+			colors, a.Seat.Color, b.Seat.Color)
+	}
+}
+
+func TestStartRejectsWithFewerThanTwo(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 6)
+	a := joinGame(t, ts, g.ID, "Alice", nil)
+	postStartRaw(t, ts, g.ID, a.Token, http.StatusConflict)
+}
+
+func TestStartRejectsOnPublic(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	pub := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	postStartRaw(t, ts, pub.Game.ID, pub.Token, http.StatusConflict)
+}
+
+func TestStartRejectsWithoutToken(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 6)
+	_ = joinGame(t, ts, g.ID, "Alice", nil)
+	_ = joinGame(t, ts, g.ID, "Bob", nil)
+	postStartRaw(t, ts, g.ID, "", http.StatusUnauthorized)
+}
+
 func TestJoinPublicRejectsAnonymous(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -565,22 +645,34 @@ func TestLeaderboardEmptyByDefault(t *testing.T) {
 
 // ---- helpers ----
 
+// createGame produces a private game with every seat still empty, matching
+// the old test convention. The HTTP endpoint atomically auto-joins the
+// caller now, so we do create-then-leave under the hood so the legacy
+// tests can treat the returned game as "fresh, nobody seated yet".
 func createGame(t *testing.T, ts *httptest.Server, players int) gameDTO {
 	t.Helper()
-	body := strings.NewReader(`{"players":` + itoa(players) + `}`)
+	body := strings.NewReader(`{"players":` + itoa(players) + `,"name":"__seed__"}`)
 	resp, err := http.Post(ts.URL+"/api/games", "application/json", body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create: status=%d", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create: status=%d body=%s", resp.StatusCode, b)
 	}
-	var g gameDTO
-	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
+	var j joinResponse
+	if err := json.NewDecoder(resp.Body).Decode(&j); err != nil {
 		t.Fatal(err)
 	}
-	return g
+	// Vacate the seed seat so the caller can treat the game as empty.
+	leaveResp, err := postLeave(t, ts, j.Game.ID, j.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaveResp.Body.Close()
+	// Re-fetch the now-empty game state.
+	return getGameViaHTTP(t, ts, j.Game.ID)
 }
 
 func joinGame(t *testing.T, ts *httptest.Server, id, name string, seat *int) joinResponse {
@@ -681,6 +773,29 @@ func postAddBotRaw(t *testing.T, ts *httptest.Server, gameID string, seatIdx, wa
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("addBot: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
+	}
+	return resp
+}
+
+func postStart(t *testing.T, ts *httptest.Server, gameID, token string, wantStatus int) gameDTO {
+	t.Helper()
+	return decodeGameDTO(t, postStartRaw(t, ts, gameID, token, wantStatus))
+}
+
+func postStartRaw(t *testing.T, ts *httptest.Server, gameID, token string, wantStatus int) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+gameID+"/start", nil)
+	if token != "" {
+		req.Header.Set("X-Player-Token", token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != wantStatus {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("start: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
 	}
 	return resp
 }

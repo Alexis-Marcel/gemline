@@ -111,6 +111,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/rematch", s.rematchGame)
 	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/bot", s.addBot)
 	mux.HandleFunc("POST /api/games/{id}/leave", s.leaveSeat)
+	mux.HandleFunc("POST /api/games/{id}/start", s.startGame)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
 	mux.HandleFunc("GET /api/games/{id}/messages", s.getChat)
 	mux.HandleFunc("POST /api/games/{id}/messages", s.postChat)
@@ -133,6 +134,11 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
+// createGame creates a private game (visibility=private only; public games
+// only come from matchmaking) and atomically auto-joins the caller so the
+// client lands on the game already seated. Authenticated users have their
+// display name pulled from the profile; anonymous users must supply a name
+// in the request body. We won't ask them to retype it on the game page.
 func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 	var req createGameRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -147,20 +153,45 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 	if vis == "" {
 		vis = VisibilityPrivate
 	}
-	if vis != VisibilityPrivate && vis != VisibilityPublic {
-		writeError(w, http.StatusBadRequest, "visibility must be 'public' or 'private'")
+	// Only private games are creatable this way — public games are created
+	// implicitly by Store.Matchmake when no public candidate exists.
+	if vis != VisibilityPrivate {
+		writeError(w, http.StatusBadRequest, "only private games are creatable directly; use /matchmake for public")
 		return
 	}
+
+	// Resolve the host's display name. Auth → profile (always available
+	// via displayNameFor's fallbacks). Anonymous → required from body.
+	userID := ""
+	name := strings.TrimSpace(req.Name)
+	if u, ok := userFromContext(r.Context()); ok {
+		userID = u.ID
+		if name == "" {
+			name = s.displayNameFor(r.Context(), u)
+		}
+	}
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "name required for anonymous create")
+		return
+	}
+
 	rec, err := s.store.Create(r.Context(), req.Players, vis)
 	if err != nil {
 		s.log.Error("create game", "err", err)
 		writeError(w, http.StatusInternalServerError, "could not create game")
 		return
 	}
+	seat, token, err := s.store.Join(r.Context(), rec.ID, name, userID, 0)
+	if err != nil {
+		s.log.Error("create-join", "err", err)
+		writeError(w, statusForJoinError(err), err.Error())
+		return
+	}
 	rec.Lock()
 	dto := toGameDTO(rec)
 	rec.Unlock()
-	writeJSON(w, http.StatusCreated, dto)
+	s.hub.Broadcast(rec.ID, eventState(dto))
+	writeJSON(w, http.StatusCreated, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
 }
 
 // matchmakeGame returns the public waiting game the caller should join — an
@@ -238,6 +269,43 @@ func (s *Server) addBot(w http.ResponseWriter, r *http.Request) {
 	rec.Unlock()
 	s.hub.Broadcast(gameID, eventState(dto))
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// startGame finalises a private game (fill empty seats with bots, flip to
+// playing). Authentication is via the seat token — any participant can
+// kick off the start in a private game.
+func (s *Server) startGame(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	token := playerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing player token")
+		return
+	}
+	rec, err := s.store.Start(r.Context(), gameID, token)
+	if err != nil {
+		writeError(w, statusForStartError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	s.hub.Broadcast(gameID, eventState(dto))
+	writeJSON(w, http.StatusOK, dto)
+}
+
+func statusForStartError(err error) int {
+	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrBadToken):
+		return http.StatusUnauthorized
+	case errors.Is(err, ErrNotPlaying),
+		errors.Is(err, ErrPublicCannotStart),
+		errors.Is(err, ErrTooFewToStart):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // leaveSeat frees the caller's seat in a still-waiting game. Equivalent to

@@ -131,13 +131,17 @@ export function ProfilePage() {
           </Link>
         </div>
         {stats ? (
-          <dl className="grid grid-cols-2 gap-3 md:grid-cols-5">
-            <Stat label="Elo" value={stats.rating} accent="text-amber-300" />
-            <Stat label="Total" value={stats.total} />
-            <Stat label="Victoires" value={stats.won} accent="text-emerald-400" />
-            <Stat label="Défaites" value={stats.lost} accent="text-red-400" />
-            <Stat label="En cours" value={stats.ongoing} accent="text-amber-400" />
-          </dl>
+          <>
+            <dl className="mb-3 grid grid-cols-2 gap-3">
+              <Stat label="Elo 1 contre 1" value={stats.ratingOneVOne} accent="text-amber-300" />
+              <Stat label="Elo multi" value={stats.ratingMulti} accent="text-amber-300" />
+            </dl>
+            <dl className="grid grid-cols-3 gap-3">
+              <Stat label="Victoires" value={stats.won} accent="text-emerald-400" />
+              <Stat label="Défaites" value={stats.lost} accent="text-red-400" />
+              <Stat label="En cours" value={stats.ongoing} accent="text-amber-400" />
+            </dl>
+          </>
         ) : (
           <p className="text-sm text-zinc-400">—</p>
         )}

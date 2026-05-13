@@ -324,19 +324,23 @@ func (r *PostgresRepo) GamesForUser(ctx context.Context, userID string, limit in
 }
 
 func (r *PostgresRepo) StatsForUser(ctx context.Context, userID string) (UserStats, error) {
+	// Per-mode ratings are pulled via correlated subqueries with the
+	// elo.DefaultRating fallback baked in. Keeping it in a single query
+	// avoids a round-trip per mode at the cost of slightly busier SQL.
 	row := r.pool.QueryRowContext(ctx, `
 		SELECT
 		  COUNT(*) AS total,
 		  COUNT(*) FILTER (WHERE g.status = 'finished' AND g.winner_color = s.color) AS won,
 		  COUNT(*) FILTER (WHERE g.status = 'finished' AND g.winner_color <> s.color AND g.winner_color <> 0) AS lost,
 		  COUNT(*) FILTER (WHERE g.status <> 'finished') AS ongoing,
-		  COALESCE((SELECT rating FROM ratings WHERE user_id = $1), 1200) AS rating
+		  COALESCE((SELECT rating FROM ratings WHERE user_id = $1 AND mode = '1v1'), 1200) AS rating_1v1,
+		  COALESCE((SELECT rating FROM ratings WHERE user_id = $1 AND mode = 'multi'), 1200) AS rating_multi
 		FROM seats s
 		JOIN games g ON g.id = s.game_id
 		WHERE s.user_id = $1
 	`, userID)
 	var st UserStats
-	if err := row.Scan(&st.Total, &st.Won, &st.Lost, &st.Ongoing, &st.Rating); err != nil {
+	if err := row.Scan(&st.Total, &st.Won, &st.Lost, &st.Ongoing, &st.RatingOneVOne, &st.RatingMulti); err != nil {
 		return UserStats{}, err
 	}
 	return st, nil
@@ -448,19 +452,20 @@ func (r *PostgresRepo) SetRematchLink(ctx context.Context, originalID, newID str
 	return got.String, nil
 }
 
-func (r *PostgresRepo) RatingFor(ctx context.Context, userID string) (Rating, error) {
+func (r *PostgresRepo) RatingFor(ctx context.Context, userID, mode string) (Rating, error) {
 	row := r.pool.QueryRowContext(ctx, `
 		SELECT rating, games, wins, losses, draws, updated_at
-		FROM ratings WHERE user_id = $1
-	`, userID)
+		FROM ratings WHERE user_id = $1 AND mode = $2
+	`, userID, mode)
 	var (
 		rt        Rating
 		updatedAt time.Time
 	)
 	rt.UserID = userID
+	rt.Mode = mode
 	if err := row.Scan(&rt.Rating, &rt.Games, &rt.Wins, &rt.Losses, &rt.Draws, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Rating{UserID: userID}, nil
+			return Rating{UserID: userID, Mode: mode}, nil
 		}
 		return Rating{}, err
 	}
@@ -468,10 +473,10 @@ func (r *PostgresRepo) RatingFor(ctx context.Context, userID string) (Rating, er
 	return rt, nil
 }
 
-func (r *PostgresRepo) RatingsFor(ctx context.Context, userIDs []string) ([]Rating, error) {
+func (r *PostgresRepo) RatingsFor(ctx context.Context, userIDs []string, mode string) ([]Rating, error) {
 	out := make([]Rating, len(userIDs))
 	for i, id := range userIDs {
-		rt, err := r.RatingFor(ctx, id)
+		rt, err := r.RatingFor(ctx, id, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -480,7 +485,7 @@ func (r *PostgresRepo) RatingsFor(ctx context.Context, userIDs []string) ([]Rati
 	return out, nil
 }
 
-func (r *PostgresRepo) ApplyRatedGame(ctx context.Context, gameID string, updates []RatingUpdate) (bool, error) {
+func (r *PostgresRepo) ApplyRatedGame(ctx context.Context, gameID, mode string, updates []RatingUpdate) (bool, error) {
 	tx, err := r.pool.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -515,18 +520,18 @@ func (r *PostgresRepo) ApplyRatedGame(ctx context.Context, gameID string, update
 			draw = 1
 		}
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO ratings (user_id, rating, games, wins, losses, draws)
-			VALUES ($1, $2, 1, $3, $4, $5)
-			ON CONFLICT (user_id) DO UPDATE
+			INSERT INTO ratings (user_id, mode, rating, games, wins, losses, draws)
+			VALUES ($1, $2, $3, 1, $4, $5, $6)
+			ON CONFLICT (user_id, mode) DO UPDATE
 			SET rating     = EXCLUDED.rating,
 			    games      = ratings.games + 1,
 			    wins       = ratings.wins + EXCLUDED.wins,
 			    losses     = ratings.losses + EXCLUDED.losses,
 			    draws      = ratings.draws + EXCLUDED.draws,
 			    updated_at = NOW()
-		`, u.UserID, u.NewRating, win, loss, draw)
+		`, u.UserID, mode, u.NewRating, win, loss, draw)
 		if err != nil {
-			return false, fmt.Errorf("upsert rating %s: %w", u.UserID, err)
+			return false, fmt.Errorf("upsert rating %s/%s: %w", u.UserID, mode, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -535,16 +540,18 @@ func (r *PostgresRepo) ApplyRatedGame(ctx context.Context, gameID string, update
 	return true, nil
 }
 
-func (r *PostgresRepo) Leaderboard(ctx context.Context, limit int) ([]LeaderboardEntry, error) {
+func (r *PostgresRepo) Leaderboard(ctx context.Context, mode string, limit int) ([]LeaderboardEntry, error) {
 	// Inner join on profiles — anonymous-only users with no display name
-	// shouldn't appear on a public board.
+	// shouldn't appear on a public board. Filtered by mode so a strong 1v1
+	// player doesn't end up high on the multi board (and vice versa).
 	rows, err := r.pool.QueryContext(ctx, `
 		SELECT r.user_id, p.display_name, r.rating, r.games, r.wins, r.losses, r.draws
 		FROM ratings r
 		JOIN profiles p ON p.user_id = r.user_id
+		WHERE r.mode = $1
 		ORDER BY r.rating DESC, r.updated_at DESC
-		LIMIT $1
-	`, limit)
+		LIMIT $2
+	`, mode, limit)
 	if err != nil {
 		return nil, err
 	}

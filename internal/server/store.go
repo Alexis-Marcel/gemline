@@ -972,7 +972,13 @@ func (s *Store) Matchmake(ctx context.Context, players int, excludeUserID string
 	if candidates == nil {
 		candidates = s.scanLobbyCache(50)
 	}
-	callerRating := s.fetchCallerRating(ctx, excludeUserID)
+	// Matchmaking always pairs within a single rating bucket; players=2
+	// uses the 1v1 ratings, players>2 uses the multi ratings.
+	ratingMode := RatingModeMulti
+	if players == 2 {
+		ratingMode = RatingMode1v1
+	}
+	callerRating := s.fetchCallerRating(ctx, excludeUserID, ratingMode)
 
 	type scored struct {
 		rec   *GameRecord
@@ -1021,7 +1027,7 @@ func (s *Store) Matchmake(ctx context.Context, players int, excludeUserID string
 		}
 
 		age := now.Sub(c.CreatedAt)
-		avg := s.averageRating(ctx, occupantUserIDs)
+		avg := s.averageRating(ctx, occupantUserIDs, ratingMode)
 		delta := math.Abs(float64(callerRating) - float64(avg))
 
 		if players == 2 && !withinBand(callerRating, avg, age) {
@@ -1062,27 +1068,27 @@ func (s *Store) Matchmake(ctx context.Context, players int, excludeUserID string
 	return s.Create(ctx, players, VisibilityPublic)
 }
 
-// fetchCallerRating resolves a user's current Elo, falling back to the
-// default when they have no rated games yet (or no user, for anonymous —
-// not reachable for matchmake but cheap to guard).
-func (s *Store) fetchCallerRating(ctx context.Context, userID string) int {
+// fetchCallerRating resolves a user's current Elo in the given mode,
+// falling back to the default when they have no rated games yet (or no
+// user, for anonymous — not reachable for matchmake but cheap to guard).
+func (s *Store) fetchCallerRating(ctx context.Context, userID, mode string) int {
 	if userID == "" {
 		return elo.DefaultRating
 	}
-	r, err := s.repo.RatingFor(ctx, userID)
+	r, err := s.repo.RatingFor(ctx, userID, mode)
 	if err != nil || r.Games == 0 {
 		return elo.DefaultRating
 	}
 	return r.Rating
 }
 
-// averageRating returns the mean Elo of the supplied users, with unrated
-// users taking the default. Empty list → default rating.
-func (s *Store) averageRating(ctx context.Context, userIDs []string) int {
+// averageRating returns the mean Elo of the supplied users in the given
+// mode, with unrated users taking the default. Empty list → default rating.
+func (s *Store) averageRating(ctx context.Context, userIDs []string, mode string) int {
 	if len(userIDs) == 0 {
 		return elo.DefaultRating
 	}
-	ratings, err := s.repo.RatingsFor(ctx, userIDs)
+	ratings, err := s.repo.RatingsFor(ctx, userIDs, mode)
 	if err != nil {
 		return elo.DefaultRating
 	}
@@ -1408,71 +1414,138 @@ func (s *Store) playBotTurnIfNeeded(rec *GameRecord) {
 // game lock. Idempotency lives in the repo (UPDATE … WHERE rated_at IS NULL),
 // so calling this twice from different code paths is safe.
 //
-// Eligible games: visibility=public AND exactly 2 seats AND neither seat is
-// a bot AND both seats have a user_id. Anything else (private games, bot
-// games, multijoueur, anonymous play) is ignored.
+// Eligible games: visibility=public AND every seat is an authenticated
+// human (no bots, no anonymous). 2-player games update the 1v1 rating
+// pool; 3+ player games update the multi pool via the moyenne-des-
+// adversaires zero-sum extension (see elo.UpdateMulti). Games that end
+// without a winner (multi timeout — Winner == Empty) are skipped: there's
+// nothing to credit.
 func (s *Store) maybeApplyRating(rec *GameRecord) {
 	rec.Lock()
 	if rec.Status != StatusFinished {
 		rec.Unlock()
 		return
 	}
-	if rec.Visibility != VisibilityPublic || len(rec.Seats) != 2 {
+	if rec.Visibility != VisibilityPublic || len(rec.Seats) < 2 {
 		rec.Unlock()
 		return
 	}
-	a, b := rec.Seats[0], rec.Seats[1]
-	if a.IsBot || b.IsBot || a.UserID == "" || b.UserID == "" {
-		rec.Unlock()
-		return
+	// Every seat must be an authed human, otherwise we'd rate a mixed
+	// human/bot game which would corrupt ratings.
+	for _, st := range rec.Seats {
+		if st.IsBot || st.UserID == "" {
+			rec.Unlock()
+			return
+		}
 	}
+	seats := append([]Seat(nil), rec.Seats...)
 	winnerColor := rec.State.Winner
 	gameID := rec.ID
 	rec.Unlock()
 
-	go func() {
-		ctx := context.Background()
-		ratings, err := s.repo.RatingsFor(ctx, []string{a.UserID, b.UserID})
-		if err != nil || len(ratings) != 2 {
-			return
-		}
-		ratingA := ratings[0].Rating
-		if ratings[0].Games == 0 {
-			ratingA = elo.DefaultRating
-		}
-		ratingB := ratings[1].Rating
-		if ratings[1].Games == 0 {
-			ratingB = elo.DefaultRating
-		}
-
-		var outcomeA, outcomeB elo.Outcome
-		var resultA, resultB rune
-		switch winnerColor {
-		case a.Color:
-			outcomeA, outcomeB = elo.Win, elo.Loss
-			resultA, resultB = 'W', 'L'
-		case b.Color:
-			outcomeA, outcomeB = elo.Loss, elo.Win
-			resultA, resultB = 'L', 'W'
-		default:
-			outcomeA, outcomeB = elo.Draw, elo.Draw
-			resultA, resultB = 'D', 'D'
-		}
-
-		updates := []RatingUpdate{
-			{UserID: a.UserID, NewRating: elo.Update(ratingA, ratingB, outcomeA), Result: resultA},
-			{UserID: b.UserID, NewRating: elo.Update(ratingB, ratingA, outcomeB), Result: resultB},
-		}
-		_, _ = s.repo.ApplyRatedGame(ctx, gameID, updates)
-	}()
+	if len(seats) == 2 {
+		go s.applyRating1v1(gameID, seats, winnerColor)
+	} else if winnerColor != game.Empty {
+		go s.applyRatingMulti(gameID, seats, winnerColor)
+	}
 }
 
-// Leaderboard surfaces the top-rated players, joined with their profile name.
-func (s *Store) Leaderboard(ctx context.Context, limit int) ([]LeaderboardEntry, error) {
+// applyRating1v1 implements the standard pairwise Elo update used since
+// the very first ratings commit, scoped now to mode='1v1'. Draw counts
+// land on both players (zero net delta, but games/draws columns bumped).
+func (s *Store) applyRating1v1(gameID string, seats []Seat, winnerColor game.Color) {
+	ctx := context.Background()
+	a, b := seats[0], seats[1]
+	ratings, err := s.repo.RatingsFor(ctx, []string{a.UserID, b.UserID}, RatingMode1v1)
+	if err != nil || len(ratings) != 2 {
+		return
+	}
+	rA := ratingOrDefault(ratings[0])
+	rB := ratingOrDefault(ratings[1])
+
+	var outcomeA, outcomeB elo.Outcome
+	var resultA, resultB rune
+	switch winnerColor {
+	case a.Color:
+		outcomeA, outcomeB = elo.Win, elo.Loss
+		resultA, resultB = 'W', 'L'
+	case b.Color:
+		outcomeA, outcomeB = elo.Loss, elo.Win
+		resultA, resultB = 'L', 'W'
+	default:
+		outcomeA, outcomeB = elo.Draw, elo.Draw
+		resultA, resultB = 'D', 'D'
+	}
+	updates := []RatingUpdate{
+		{UserID: a.UserID, NewRating: elo.Update(rA, rB, outcomeA), Result: resultA},
+		{UserID: b.UserID, NewRating: elo.Update(rB, rA, outcomeB), Result: resultB},
+	}
+	_, _ = s.repo.ApplyRatedGame(ctx, gameID, RatingMode1v1, updates)
+}
+
+// applyRatingMulti applies the zero-sum moyenne-des-adversaires extension:
+// the winner gains the standard Elo amount measured against the average
+// rating of the rest of the field, and that exact gain is split among the
+// losers (per-loser loss = winner_gain / N). Multi games that end without
+// a winner are skipped at the caller — there's nothing to credit.
+func (s *Store) applyRatingMulti(gameID string, seats []Seat, winnerColor game.Color) {
+	ctx := context.Background()
+	userIDs := make([]string, len(seats))
+	for i, st := range seats {
+		userIDs[i] = st.UserID
+	}
+	ratings, err := s.repo.RatingsFor(ctx, userIDs, RatingModeMulti)
+	if err != nil || len(ratings) != len(seats) {
+		return
+	}
+
+	// Separate winner from opponents while preserving the opponents' seat
+	// order so RatingUpdate.UserID lines up with the right new rating.
+	var (
+		winnerSeat   Seat
+		winnerRating int
+		oppIDs       []string
+		oppRatings   []int
+	)
+	for i, st := range seats {
+		r := ratingOrDefault(ratings[i])
+		if st.Color == winnerColor {
+			winnerSeat = st
+			winnerRating = r
+		} else {
+			oppIDs = append(oppIDs, st.UserID)
+			oppRatings = append(oppRatings, r)
+		}
+	}
+	if winnerSeat.UserID == "" {
+		return // winner didn't match any seat — shouldn't happen
+	}
+
+	results := elo.UpdateMulti(winnerSeat.UserID, winnerRating, oppIDs, oppRatings)
+	updates := make([]RatingUpdate, len(results))
+	for i, r := range results {
+		updates[i] = RatingUpdate{UserID: r.UserID, NewRating: r.NewRating, Result: r.Result}
+	}
+	_, _ = s.repo.ApplyRatedGame(ctx, gameID, RatingModeMulti, updates)
+}
+
+func ratingOrDefault(r Rating) int {
+	if r.Games == 0 {
+		return elo.DefaultRating
+	}
+	return r.Rating
+}
+
+// Leaderboard surfaces the top-rated players for the given mode, joined
+// with their profile name.
+func (s *Store) Leaderboard(ctx context.Context, mode string, limit int) ([]LeaderboardEntry, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	return s.repo.Leaderboard(ctx, limit)
+	if mode != RatingMode1v1 && mode != RatingModeMulti {
+		mode = RatingMode1v1
+	}
+	return s.repo.Leaderboard(ctx, mode, limit)
 }
 
 func firstFreeSeat(seats []Seat) int {

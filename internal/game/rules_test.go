@@ -301,7 +301,7 @@ func TestWin_Alignment6(t *testing.T) {
 }
 
 func TestWin_Alignment5_BelowThresholdDoesNotWin(t *testing.T) {
-	cfg := DefaultConfig(2) // Align5ToWin = 2
+	cfg := DefaultConfig(2) // Align5ToWin = 3
 	g := NewGame([]Color{C1, C2}, cfg)
 	for q := -3; q <= 0; q++ {
 		g.Board.Set(pos(q, 0), C1)

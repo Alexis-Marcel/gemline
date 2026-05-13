@@ -42,6 +42,18 @@ type Repository interface {
 	// MessagesForGame returns the most recent messages in `gameID`, oldest
 	// first, up to `limit`.
 	MessagesForGame(ctx context.Context, gameID string, limit int) ([]Message, error)
+
+	// LobbyGames returns public games still in `waiting`, most recent first,
+	// capped at `limit`. Each entry exposes only the metadata the lobby
+	// renders — no seat tokens, no chat.
+	LobbyGames(ctx context.Context, limit int) ([]LobbyEntry, error)
+
+	// SetRematchLink writes rematch_game_id on `originalID` *if and only if*
+	// it isn't set yet. Returns the rematch game ID that's now associated
+	// with the original (either `newID` on success, or whatever ID was
+	// already there on a lost race). This is the source of truth used by
+	// Store.Rematch to resolve concurrent rematch calls.
+	SetRematchLink(ctx context.Context, originalID, newID string) (string, error)
 }
 
 // Profile is the user-controlled profile row.
@@ -110,4 +122,12 @@ func (noopRepo) StatsForUser(context.Context, string) (UserStats, error) {
 func (noopRepo) AppendMessage(context.Context, *Message) error { return nil }
 func (noopRepo) MessagesForGame(context.Context, string, int) ([]Message, error) {
 	return nil, nil
+}
+func (noopRepo) LobbyGames(context.Context, int) ([]LobbyEntry, error) {
+	return nil, nil
+}
+func (noopRepo) SetRematchLink(_ context.Context, _, newID string) (string, error) {
+	// No DB → no link tracking. Returning newID keeps Store.Rematch's
+	// idempotency contract intact for single-process, in-memory runs.
+	return newID, nil
 }

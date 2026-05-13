@@ -13,3 +13,8 @@ web/dist/
 .env
 .env.local
 .env.*.local
+
+# Local Terraform state — contains cluster secrets, never commit.
+*.tfstate
+*.tfstate.*
+.terraform/

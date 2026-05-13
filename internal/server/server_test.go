@@ -412,7 +412,10 @@ func TestMatchmakeRejectsAnonymous(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	// No X-Test-User-ID header → 401.
-	resp, _ := http.Post(ts.URL+"/api/games/matchmake", "application/json", strings.NewReader(`{"players":2}`))
+	resp, err := http.Post(ts.URL+"/api/games/matchmake", "application/json", strings.NewReader(`{"players":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d", resp.StatusCode)

@@ -17,7 +17,7 @@ import { ReplayControls } from "../components/ReplayControls";
 import { Scoreboard } from "../components/Scoreboard";
 import { UserNav } from "../components/UserNav";
 import { clearCredentials, loadCredentials, saveCredentials } from "../lib/auth";
-import { gemColor, gemName } from "../lib/colors";
+import { gemName } from "../lib/colors";
 import { cellsAtStep, lastMoveAt } from "../lib/replay";
 
 export function GamePage() {

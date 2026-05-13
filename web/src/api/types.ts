@@ -5,15 +5,18 @@ export type Color = -1 | 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export const OFF_BOARD: Color = -1;
 export const EMPTY: Color = 0;
 
-export type WinKind = 0 | 1 | 2 | 3 | 4 | 5;
+export type WinKind = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 export const WIN_NONE: WinKind = 0;
 export const WIN_ALIGN6: WinKind = 1;
 export const WIN_ALIGN5: WinKind = 2;
 export const WIN_ALIGN4: WinKind = 3;
 export const WIN_CAPTURE: WinKind = 4;
 export const WIN_TIMEOUT: WinKind = 5;
+export const WIN_RESIGN: WinKind = 6;
+export const WIN_DRAW: WinKind = 7;
 
 export type Status = "waiting" | "playing" | "finished";
+export type Visibility = "public" | "private";
 
 export interface Seat {
   index: number;
@@ -52,6 +55,23 @@ export interface Game {
   thresholds: Thresholds;
   /** ISO-8601 timestamp when the active player's turn started. Empty when the game hasn't started yet. */
   turnStartedAt?: string;
+  visibility: Visibility;
+  /** ID of the rematch game spawned from this one, if any. */
+  rematchGameId?: string;
+  /** Seat index that currently has a draw offer pending, -1 when no offer is active. */
+  drawOfferBy: number;
+}
+
+export interface LobbyEntry {
+  gameId: string;
+  players: number;
+  seated: number;
+  createdAt: string;
+}
+
+export interface RematchResponse {
+  gameId: string;
+  game: Game;
 }
 
 export interface Capture {

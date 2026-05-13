@@ -7,7 +7,9 @@ import (
 )
 
 type createGameRequest struct {
-	Players int `json:"players"`
+	Players    int    `json:"players"`
+	Bots       int    `json:"bots,omitempty"`
+	Visibility string `json:"visibility,omitempty"` // "public" | "private" (default)
 }
 
 type joinGameRequest struct {
@@ -56,6 +58,31 @@ type gameDTO struct {
 	// against the active player's TimeRemainingMs. Empty for not-yet-started
 	// games (status = "waiting").
 	TurnStartedAt string `json:"turnStartedAt,omitempty"`
+
+	Visibility    Visibility `json:"visibility"`
+	RematchGameID string     `json:"rematchGameId,omitempty"`
+
+	// DrawOfferBy is the seat index that currently has a draw offer
+	// pending, or -1 when no offer is active. Only meaningful while
+	// status == "playing".
+	DrawOfferBy int `json:"drawOfferBy"`
+}
+
+// lobbyEntryDTO is the wire shape of a public-lobby entry. We keep the JSON
+// timestamp as RFC 3339 so the frontend can sort and format with Date directly.
+type lobbyEntryDTO struct {
+	GameID    string `json:"gameId"`
+	Players   int    `json:"players"`
+	Seated    int    `json:"seated"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// rematchResponse is what POST /api/games/{id}/rematch returns: the new game's
+// full state, plus the new ID broken out so the frontend can navigate without
+// needing to crack open the game payload.
+type rematchResponse struct {
+	GameID string  `json:"gameId"`
+	Game   gameDTO `json:"game"`
 }
 
 type thresholdsDTO struct {
@@ -126,18 +153,31 @@ func toGameDTO(rec *GameRecord) gameDTO {
 	if !s.TurnStartedAt.IsZero() {
 		turnStartedAt = s.TurnStartedAt.UTC().Format(time.RFC3339Nano)
 	}
+	vis := rec.Visibility
+	if vis == "" {
+		vis = VisibilityPrivate
+	}
+	// Defensive copy of the cells: the dto outlives the rec.Lock scope, so
+	// after the caller Unlocks any subsequent board mutation (e.g. a bot
+	// move) would race with json.Encoder iterating dto.Cells. Holding the
+	// slice header by value isn't enough — the backing array is shared.
+	cells := make([]game.Color, len(s.Board.Cells))
+	copy(cells, s.Board.Cells)
 	return gameDTO{
 		ID:            rec.ID,
 		Status:        rec.Status,
 		BoardSide:     s.Board.Side,
-		Cells:         s.Board.Cells,
+		Cells:         cells,
 		TurnStartedAt: turnStartedAt,
-		Players:   players,
-		Seats:     seats,
-		Turn:      s.Turn,
-		Winner:    s.Winner,
-		WinKind:   s.WinKind,
-		MoveCount: len(s.History),
+		Players:       players,
+		Seats:         seats,
+		Turn:          s.Turn,
+		Winner:        s.Winner,
+		WinKind:       s.WinKind,
+		MoveCount:     len(s.History),
+		Visibility:    vis,
+		RematchGameID: rec.RematchGameID,
+		DrawOfferBy:   rec.DrawOfferBy,
 		Thresholds: thresholdsDTO{
 			CapturePairsWin: s.Config.CapturePairsWin,
 			Align4ToWin:     s.Config.Align4ToWin,

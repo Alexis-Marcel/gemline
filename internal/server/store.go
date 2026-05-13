@@ -7,9 +7,11 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/alexis/gemline/internal/ai"
 	"github.com/alexis/gemline/internal/game"
 )
 
@@ -21,12 +23,29 @@ const (
 	StatusFinished Status = "finished"
 )
 
+// Visibility decides whether a game shows up in the public lobby. Private
+// games are still joinable by anyone holding the URL — visibility is purely
+// about *discovery*, not access control.
+type Visibility string
+
+const (
+	VisibilityPrivate Visibility = "private"
+	VisibilityPublic  Visibility = "public"
+)
+
 var (
-	ErrGameNotFound = errors.New("game not found")
-	ErrSeatTaken    = errors.New("seat already taken")
-	ErrNoFreeSeat   = errors.New("no free seat")
-	ErrBadToken     = errors.New("invalid player token")
-	ErrNotPlaying   = errors.New("game is not in playing state")
+	ErrGameNotFound  = errors.New("game not found")
+	ErrSeatTaken     = errors.New("seat already taken")
+	ErrNoFreeSeat    = errors.New("no free seat")
+	ErrBadToken      = errors.New("invalid player token")
+	ErrNotPlaying    = errors.New("game is not in playing state")
+	ErrNotFinished   = errors.New("game is not finished")
+	ErrBadVisibility = errors.New("invalid visibility")
+	ErrDrawNotOffered = errors.New("no draw offer pending")
+	ErrCannotAcceptOwnDrawOffer = errors.New("the offering player cannot accept their own draw offer")
+	ErrDrawAlreadyOffered = errors.New("a draw is already being offered")
+	ErrDrawUnsupported = errors.New("draw is only supported in 2-player games")
+	ErrBadBotCount = errors.New("bot count must be between 0 and the player count")
 )
 
 // Seat is a play slot in a game. Once claimed, only the SHA-256 of the
@@ -44,12 +63,21 @@ type Seat struct {
 }
 
 type GameRecord struct {
-	mu        sync.Mutex
-	ID        string
-	State     *game.GameState
-	Seats     []Seat
-	Status    Status
-	CreatedAt time.Time
+	mu            sync.Mutex
+	ID            string
+	State         *game.GameState
+	Seats         []Seat
+	Status        Status
+	Visibility    Visibility
+	RematchGameID string // ID of the rematch game spawned from this one, if any
+	CreatedAt     time.Time
+
+	// DrawOfferBy is the seat index of the player currently offering a draw,
+	// or -1 if no offer is pending. Draw is only supported in 2-player games
+	// (see Store.OfferDraw). Lives on GameRecord rather than GameState because
+	// it is not part of the engine's pure rule logic and is not persisted —
+	// an offer cancels naturally on server restart (the player can re-offer).
+	DrawOfferBy int
 }
 
 func (r *GameRecord) Lock()   { r.mu.Lock() }
@@ -94,8 +122,17 @@ type Store struct {
 	presence *presenceManager
 	seatRefs map[string]map[int]int // gameID → seatIndex → live connections
 
-	onState    func(gameID string)                                // state changed (forfeit, etc.)
-	onPresence func(gameID string, seatIndex int, online bool)    // presence transition
+	onState     func(gameID string)                             // state changed (forfeit, etc.)
+	onPresence  func(gameID string, seatIndex int, online bool) // presence transition
+	onDrawOffer func(gameID string, offeredBy int)              // draw offer set (>=0) or cleared (-1)
+	onMove      func(gameID string, mv game.MoveResult)         // a move was applied (used to feed WS)
+
+	// botEngine is shared across all bot seats; it carries its own PRNG so
+	// concurrent BestMove calls don't fight over a global random source.
+	botEngine *ai.Engine
+	// botDelay is the artificial pause before a bot plays, so games don't
+	// feel uncannily fast. Tests set it to 0 via WithBotDelay for speed.
+	botDelay time.Duration
 }
 
 func NewStore(repo Repository) *Store {
@@ -103,12 +140,29 @@ func NewStore(repo Repository) *Store {
 		repo = noopRepo{}
 	}
 	return &Store{
-		games:    make(map[string]*GameRecord),
-		repo:     repo,
-		clocks:   newClockManager(),
-		presence: newPresenceManager(),
-		seatRefs: make(map[string]map[int]int),
+		games:     make(map[string]*GameRecord),
+		repo:      repo,
+		clocks:    newClockManager(),
+		presence:  newPresenceManager(),
+		seatRefs:  make(map[string]map[int]int),
+		botEngine: ai.NewEngine(time.Now().UnixNano()),
+		botDelay:  600 * time.Millisecond,
 	}
+}
+
+// WithBotDelay overrides the artificial think-time between a bot's turn
+// coming up and its move being applied. Tests pass 0 for speed.
+func (s *Store) WithBotDelay(d time.Duration) *Store {
+	s.botDelay = d
+	return s
+}
+
+// SetMoveListener registers a callback fired after a move (human or bot) is
+// applied. The Server uses it to push the resulting move event over the
+// WebSocket for bot-applied moves — human moves go through the HTTP handler
+// which already broadcasts.
+func (s *Store) SetMoveListener(fn func(gameID string, mv game.MoveResult)) {
+	s.onMove = fn
 }
 
 // SetStateListener registers a callback fired whenever the Store mutates a
@@ -121,6 +175,14 @@ func (s *Store) SetStateListener(fn func(gameID string)) { s.onState = fn }
 // players see the indicator update without a full state push.
 func (s *Store) SetPresenceListener(fn func(gameID string, seatIndex int, online bool)) {
 	s.onPresence = fn
+}
+
+// SetDrawOfferListener registers a callback fired whenever the pending draw
+// offer state changes (a player opens or closes one). offeredBy is the
+// offering seat index, or -1 when the offer is cleared (declined, withdrawn,
+// or auto-cancelled by a move).
+func (s *Store) SetDrawOfferListener(fn func(gameID string, offeredBy int)) {
+	s.onDrawOffer = fn
 }
 
 // Close stops every running clock + presence timer. Call on shutdown.
@@ -281,20 +343,55 @@ func (s *Store) handleFlag(gameID string) {
 	}
 }
 
-// Create initializes a game, persists it, and caches it in memory.
-func (s *Store) Create(ctx context.Context, numPlayers int) (*GameRecord, error) {
+// Create initializes a game, persists it, and caches it in memory. Visibility
+// controls whether the game is discoverable through the public lobby; passing
+// the zero value defaults to private. `numBots` claims the highest-indexed
+// seats with internal bot tokens — the game then transitions to playing
+// straight away if every other seat is filled by a human (or if numBots ==
+// numPlayers).
+func (s *Store) Create(ctx context.Context, numPlayers, numBots int, vis Visibility) (*GameRecord, error) {
+	if vis == "" {
+		vis = VisibilityPrivate
+	}
+	if vis != VisibilityPrivate && vis != VisibilityPublic {
+		return nil, ErrBadVisibility
+	}
+	if numBots < 0 || numBots > numPlayers {
+		return nil, ErrBadBotCount
+	}
 	colors := make([]game.Color, numPlayers)
 	seats := make([]Seat, numPlayers)
 	for i := 0; i < numPlayers; i++ {
 		colors[i] = game.Color(i + 1)
 		seats[i] = Seat{Index: i, Color: colors[i]}
 	}
+	// Bots take the highest-numbered seats so seat 0 is the natural pick
+	// for the first human in a solo-vs-bot game. The tokens are random but
+	// never returned to any HTTP caller — they live only in this Store.
+	for i := numPlayers - numBots; i < numPlayers; i++ {
+		token := newToken()
+		seats[i].Name = botName(i)
+		seats[i].TokenHash = hashToken(token)
+		seats[i].Occupied = true
+		seats[i].IsBot = true
+	}
+	allSeated := numBots == numPlayers
+	status := StatusWaiting
+	if allSeated {
+		status = StatusPlaying
+	}
+	gs := game.NewGame(colors, game.DefaultConfig(numPlayers))
 	rec := &GameRecord{
-		ID:        newID(),
-		State:     game.NewGame(colors, game.DefaultConfig(numPlayers)),
-		Seats:     seats,
-		Status:    StatusWaiting,
-		CreatedAt: time.Now(),
+		ID:          newID(),
+		State:       gs,
+		Seats:       seats,
+		Status:      status,
+		Visibility:  vis,
+		CreatedAt:   time.Now(),
+		DrawOfferBy: -1,
+	}
+	if allSeated {
+		rec.State.StartClock(time.Now())
 	}
 	if err := s.repo.SaveNewGame(ctx, rec); err != nil {
 		return nil, err
@@ -302,6 +399,191 @@ func (s *Store) Create(ctx context.Context, numPlayers int) (*GameRecord, error)
 	s.mu.Lock()
 	s.games[rec.ID] = rec
 	s.mu.Unlock()
+	if allSeated {
+		// All seats are bots: arm the clock and schedule the first move
+		// since no human Join will trigger it.
+		rec.Lock()
+		s.armClock(rec)
+		rec.Unlock()
+		s.maybeScheduleBot(rec)
+	}
+	return rec, nil
+}
+
+func botName(seatIndex int) string {
+	switch seatIndex {
+	case 0:
+		return "Bot Rouge"
+	case 1:
+		return "Bot Bleu"
+	case 2:
+		return "Bot Vert"
+	case 3:
+		return "Bot Jaune"
+	case 4:
+		return "Bot Violet"
+	default:
+		return "Bot"
+	}
+}
+
+// LobbyEntry is a slimmed-down view of a public waiting game, returned by the
+// lobby endpoint. We deliberately don't include seat tokens or chat history —
+// the lobby is open data.
+type LobbyEntry struct {
+	GameID    string    `json:"gameId"`
+	Players   int       `json:"players"`
+	Seated    int       `json:"seated"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// ListLobby returns the most recently created public waiting games, capped at
+// limit. The repo (when DB-backed) is the source of truth and returns an
+// empty-but-non-nil slice for "no public waiting games"; a nil return signals
+// "no persistence wired up at all" (noopRepo) — in that case we fall back to
+// scanning the in-memory cache so single-process hermetic runs still work.
+func (s *Store) ListLobby(ctx context.Context, limit int) ([]LobbyEntry, error) {
+	entries, err := s.repo.LobbyGames(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	if entries != nil {
+		return entries, nil
+	}
+	return s.scanLobbyCache(limit), nil
+}
+
+func (s *Store) scanLobbyCache(limit int) []LobbyEntry {
+	s.mu.Lock()
+	candidates := make([]*GameRecord, 0, len(s.games))
+	for _, rec := range s.games {
+		candidates = append(candidates, rec)
+	}
+	s.mu.Unlock()
+
+	out := make([]LobbyEntry, 0)
+	for _, rec := range candidates {
+		rec.Lock()
+		if rec.Status == StatusWaiting && rec.Visibility == VisibilityPublic {
+			seated := 0
+			for _, st := range rec.Seats {
+				if st.Occupied {
+					seated++
+				}
+			}
+			out = append(out, LobbyEntry{
+				GameID:    rec.ID,
+				Players:   len(rec.Seats),
+				Seated:    seated,
+				CreatedAt: rec.CreatedAt,
+			})
+		}
+		rec.Unlock()
+	}
+	// Most recent first — same ordering as the repo path.
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// Rematch creates a fresh game with the same player count, config and
+// visibility as `originalID`, and links the two via rematch_game_id. The
+// operation is idempotent: a second caller after the link is set is sent to
+// the same rematch game. The original game must be finished.
+func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, error) {
+	orig, ok, err := s.Get(ctx, originalID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	orig.Lock()
+	if orig.Status != StatusFinished {
+		orig.Unlock()
+		return nil, ErrNotFinished
+	}
+	if linked := orig.RematchGameID; linked != "" {
+		orig.Unlock()
+		// Another caller already created the rematch — fetch and return it.
+		rec, ok, err := s.Get(ctx, linked)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			// The link points to a game that no longer exists (rare —
+			// ON DELETE SET NULL handles the FK at the DB layer, but the
+			// in-memory copy could still hold a stale ID). Treat as
+			// "no rematch yet" and create a new one.
+		} else {
+			return rec, nil
+		}
+	}
+	numPlayers := len(orig.Seats)
+	vis := orig.Visibility
+	orig.Unlock()
+
+	// Build the new game using the same shape as Create. We don't call Create
+	// directly because we want to atomically write the rematch_game_id link on
+	// the original game alongside the new game's row.
+	colors := make([]game.Color, numPlayers)
+	seats := make([]Seat, numPlayers)
+	for i := 0; i < numPlayers; i++ {
+		colors[i] = game.Color(i + 1)
+		seats[i] = Seat{Index: i, Color: colors[i]}
+	}
+	rec := &GameRecord{
+		ID:          newID(),
+		State:       game.NewGame(colors, game.DefaultConfig(numPlayers)),
+		Seats:       seats,
+		Status:      StatusWaiting,
+		Visibility:  vis,
+		CreatedAt:   time.Now(),
+		DrawOfferBy: -1,
+	}
+	if err := s.repo.SaveNewGame(ctx, rec); err != nil {
+		return nil, err
+	}
+
+	// Link original → new. If two goroutines raced past the early-out above,
+	// the repo's SetRematchLink resolves the race: the loser observes that the
+	// link is already set and returns the winner's game ID.
+	winnerID, err := s.repo.SetRematchLink(ctx, originalID, rec.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if existing, found := s.games[winnerID]; found && winnerID != rec.ID {
+		// Lost the race — discard the freshly-built record and return the
+		// winner's. The orphaned `rec` row remains in the DB but is unlinked;
+		// it'll age out via normal cleanup paths.
+		s.mu.Unlock()
+		orig.Lock()
+		orig.RematchGameID = winnerID
+		orig.Unlock()
+		return existing, nil
+	}
+	if winnerID == rec.ID {
+		s.games[rec.ID] = rec
+	}
+	s.mu.Unlock()
+
+	orig.Lock()
+	orig.RematchGameID = winnerID
+	orig.Unlock()
+
+	if winnerID != rec.ID {
+		// Race lost but the cache didn't have the winner — fetch through Get.
+		winner, _, err := s.Get(ctx, winnerID)
+		if err != nil {
+			return nil, err
+		}
+		return winner, nil
+	}
 	return rec, nil
 }
 
@@ -398,6 +680,12 @@ func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx i
 	if startedPlaying {
 		s.armClock(rec)
 	}
+	// Whether we just started or the human just joined an already-started
+	// game (impossible today but cheap to handle), the active player might
+	// be a bot — kick them now.
+	if startedPlaying {
+		go s.maybeScheduleBot(rec)
+	}
 	return &rec.Seats[idx], token, nil
 }
 
@@ -432,6 +720,13 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 	if rec.State.IsOver() {
 		rec.Status = StatusFinished
 	}
+	// A move from either player automatically rescinds any pending draw
+	// offer — you can't both ask for a draw and keep playing. The subsequent
+	// move broadcast carries the new game DTO (DrawOfferBy=-1) to clients,
+	// so we don't fire the draw-offer listener here — doing so under the
+	// rec.Lock held by the deferred Unlock would deadlock anyway when the
+	// listener tries to re-enter through store.Get.
+	rec.DrawOfferBy = -1
 
 	if perr := s.repo.AppendMove(ctx, gameID, ordinal, move, rec.State.Winner, rec.State.WinKind, rec.Status); perr != nil {
 		// We've already mutated in-memory state; returning the persist error
@@ -443,7 +738,278 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 	// Re-arm or cancel the chess clock for the next player. Called while
 	// rec is still locked — armClock doesn't take the rec lock itself.
 	s.armClock(rec)
+	// If the next active player is a bot and the game is still in play,
+	// schedule its move. We can't trigger it synchronously here: the bot's
+	// PlayMove takes rec.Lock(), which is held by the deferred Unlock above.
+	defer s.maybeScheduleBot(rec)
 	return res, rec, nil
+}
+
+// Resign ends a game in progress by recording that the seat behind `token`
+// gave up. The win-kind is WinResign; the survivor (in 2-player mode) is the
+// winner. Persists the new outcome and notifies state listeners so the WS
+// hub broadcasts the final snapshot.
+func (s *Store) Resign(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.Status != StatusPlaying {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	rec.State.Resign(seat.Color)
+	rec.Status = StatusFinished
+	winner := rec.State.Winner
+	winKind := rec.State.WinKind
+	// Any pending draw offer is cleared along with the game ending.
+	hadOffer := rec.DrawOfferBy >= 0
+	rec.DrawOfferBy = -1
+	rec.Unlock()
+
+	s.clocks.Cancel(gameID)
+	s.presence.CancelGame(gameID)
+	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
+		// In-memory truth wins (same policy as handleFlag) — log the persist
+		// failure but don't roll the engine back.
+		_ = err
+	}
+	if hadOffer && s.onDrawOffer != nil {
+		s.onDrawOffer(gameID, -1)
+	}
+	if s.onState != nil {
+		s.onState(gameID)
+	}
+	return rec, nil
+}
+
+// OfferDraw records that the seat behind `token` would accept a draw if the
+// opponent agrees. Restricted to 2-player games per the design call. The
+// offer auto-cancels on any subsequent move (see PlayMove). Re-offering with
+// an already-pending offer is rejected so the UI surfaces "already pending"
+// cleanly rather than silently overwriting.
+func (s *Store) OfferDraw(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	if len(rec.Seats) != 2 {
+		rec.Unlock()
+		return rec, ErrDrawUnsupported
+	}
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.Status != StatusPlaying {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.DrawOfferBy >= 0 {
+		if rec.DrawOfferBy == seat.Index {
+			// Re-offering by the same player is a no-op — return success so
+			// the UI's optimistic state matches the server.
+			rec.Unlock()
+			return rec, nil
+		}
+		// The opponent is already offering; the right action is "accept",
+		// not "offer". Surface this distinction to the caller.
+		rec.Unlock()
+		return rec, ErrDrawAlreadyOffered
+	}
+	rec.DrawOfferBy = seat.Index
+	offeredBy := seat.Index
+	rec.Unlock()
+
+	// Listener may need to re-enter the record (via store.Get → toGameDTO),
+	// so we MUST release rec.Lock before firing it. Same pattern as Resign.
+	if s.onDrawOffer != nil {
+		s.onDrawOffer(gameID, offeredBy)
+	}
+	return rec, nil
+}
+
+// AcceptDraw ends the game in a draw if the *opponent* has an offer pending.
+// Self-acceptance is rejected. 2-player only.
+func (s *Store) AcceptDraw(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.Status != StatusPlaying {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.DrawOfferBy < 0 {
+		rec.Unlock()
+		return rec, ErrDrawNotOffered
+	}
+	if rec.DrawOfferBy == seat.Index {
+		rec.Unlock()
+		return rec, ErrCannotAcceptOwnDrawOffer
+	}
+	rec.State.AgreeDraw()
+	rec.Status = StatusFinished
+	rec.DrawOfferBy = -1
+	winner := rec.State.Winner
+	winKind := rec.State.WinKind
+	rec.Unlock()
+
+	s.clocks.Cancel(gameID)
+	s.presence.CancelGame(gameID)
+	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
+		_ = err
+	}
+	if s.onDrawOffer != nil {
+		s.onDrawOffer(gameID, -1)
+	}
+	if s.onState != nil {
+		s.onState(gameID)
+	}
+	return rec, nil
+}
+
+// DeclineDraw clears a pending draw offer. Either the opponent (refusing the
+// offer) or the offering player (withdrawing it) may call this — we don't
+// distinguish them at the wire level.
+func (s *Store) DeclineDraw(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	_, ok = rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.Status != StatusPlaying {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.DrawOfferBy < 0 {
+		rec.Unlock()
+		return rec, ErrDrawNotOffered
+	}
+	rec.DrawOfferBy = -1
+	rec.Unlock()
+
+	if s.onDrawOffer != nil {
+		s.onDrawOffer(gameID, -1)
+	}
+	return rec, nil
+}
+
+// maybeScheduleBot inspects the current state of `rec` and, if it is a bot's
+// turn, kicks off a goroutine that will play one move after `s.botDelay`.
+// Safe to call whether or not the caller holds rec.Lock — the goroutine does
+// its own locking.
+func (s *Store) maybeScheduleBot(rec *GameRecord) {
+	if rec == nil {
+		return
+	}
+	go func() {
+		if s.botDelay > 0 {
+			time.Sleep(s.botDelay)
+		}
+		s.playBotTurnIfNeeded(rec)
+	}()
+}
+
+// playBotTurnIfNeeded plays exactly one move on behalf of the active bot, if
+// the game is still in progress and the active player is a bot. After the
+// move it recursively schedules the next turn — which means bot-vs-bot games
+// progress automatically without external prodding.
+func (s *Store) playBotTurnIfNeeded(rec *GameRecord) {
+	rec.Lock()
+	if rec.Status != StatusPlaying || rec.State.IsOver() {
+		rec.Unlock()
+		return
+	}
+	seatIdx := rec.State.Turn
+	if seatIdx < 0 || seatIdx >= len(rec.Seats) {
+		rec.Unlock()
+		return
+	}
+	seat := &rec.Seats[seatIdx]
+	if !seat.IsBot {
+		rec.Unlock()
+		return
+	}
+	color := seat.Color
+	pos, ok := s.botEngine.BestMove(rec.State, color)
+	if !ok {
+		rec.Unlock()
+		return
+	}
+
+	ordinal := len(rec.State.History)
+	move := game.Move{Player: color, Pos: pos}
+	res, err := rec.State.ApplyMove(move, time.Now())
+	if err != nil {
+		// BestMove returned an illegal position (shouldn't happen — we only
+		// consider Empty in-bounds cells), or the engine rejected for some
+		// other reason. Skip rather than crash: a human player can still
+		// resign or wait for a flag.
+		rec.Unlock()
+		return
+	}
+	if rec.State.IsOver() {
+		rec.Status = StatusFinished
+	}
+	rec.DrawOfferBy = -1 // any draw offer is auto-rescinded by a move
+
+	winner := rec.State.Winner
+	winKind := rec.State.WinKind
+	status := rec.Status
+	gameID := rec.ID
+	s.armClock(rec)
+	rec.Unlock()
+
+	// Persist with the same shape PlayMove uses — through AppendMove for
+	// the move log + status update. We don't have a request context here
+	// since this is server-driven; Background is fine.
+	if err := s.repo.AppendMove(context.Background(), gameID, ordinal, move, winner, winKind, status); err != nil {
+		// In-memory truth wins (same policy as the human path).
+		_ = err
+	}
+
+	if s.onMove != nil {
+		s.onMove(gameID, res)
+	}
+	// Continue the chain — if the next active player is also a bot, this
+	// schedules another move; if it's a human's turn, this is a no-op.
+	s.maybeScheduleBot(rec)
 }
 
 func firstFreeSeat(seats []Seat) int {

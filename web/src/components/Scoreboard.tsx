@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Game } from "../api/types";
-import { gemColor, gemName } from "../lib/colors";
+import { gemColor } from "../lib/colors";
 import { PlayerClock } from "./PlayerClock";
 
 interface ScoreboardProps {
@@ -8,14 +8,24 @@ interface ScoreboardProps {
   mySeatIndex: number | null;
   /** Per-seat presence flags pushed by the server (key = seatIndex). */
   presence?: Record<number, boolean>;
+  /** Invoked when the user clicks the "+ Bot" button on an empty seat.
+   *  Only surfaced for private games in waiting state — set to undefined
+   *  for any other context (public games, playing, finished). */
+  onAddBot?: (seatIndex: number) => void;
 }
 
 const DISCONNECT_GRACE_MS = 60_000;
 
-export function Scoreboard({ game, mySeatIndex, presence = {} }: ScoreboardProps) {
+// Scoreboard renders one row per seat. The same component drives the
+// waiting-room layout (showing "Siège vide" + "+ Bot" controls) and the
+// in-play scoreboard (showing colour, name, clock, paires/gemmes). This
+// keeps the seat metadata in a single place so the user doesn't see a
+// duplicated list before play starts.
+export function Scoreboard({ game, mySeatIndex, presence = {}, onAddBot }: ScoreboardProps) {
   const t = game.thresholds;
   const clockEnabled = t.initialTimeMs > 0;
   const gameOver = game.status === "finished";
+  const waiting = game.status === "waiting";
   return (
     <ul className="grid grid-cols-2 gap-2 lg:flex lg:flex-col">
       {game.players.map((p, i) => {
@@ -23,8 +33,6 @@ export function Scoreboard({ game, mySeatIndex, presence = {} }: ScoreboardProps
         const isTurn = game.turn === i && game.status === "playing";
         const isYou = mySeatIndex === i;
         const online = presence[i];
-        // Only show offline state for seats that are actually claimed and
-        // when the game is in play (not waiting / finished).
         const showOffline =
           seat.occupied && game.status === "playing" && online === false;
         return (
@@ -33,24 +41,40 @@ export function Scoreboard({ game, mySeatIndex, presence = {} }: ScoreboardProps
             className={`rounded-lg border p-3 transition-colors ${
               isTurn
                 ? "border-amber-400/60 bg-amber-400/5 shadow-[inset_3px_0_0_0_rgba(251,191,36,0.9)]"
-                : "border-zinc-800 bg-zinc-900/50"
+                : seat.occupied
+                  ? "border-zinc-800 bg-zinc-900/50"
+                  : "border-dashed border-zinc-800 bg-zinc-900/30"
             }`}
           >
             <div className="flex items-center gap-3">
               <span
                 aria-hidden
                 className="inline-block h-5 w-5 rounded-full border border-black/40"
-                style={{ background: gemColor(p.color) ?? "#27272a" }}
+                style={{
+                  background: seat.occupied
+                    ? (gemColor(p.color) ?? "#27272a")
+                    : "transparent",
+                  borderColor: seat.occupied ? undefined : "#3f3f46",
+                }}
               />
               <div className="flex-1 min-w-0">
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="truncate font-medium text-zinc-100">
-                    {seat.name || gemName(p.color)}
+                  <span className="truncate font-medium">
+                    {seat.occupied ? (
+                      <span className="text-zinc-100">{seat.name}</span>
+                    ) : (
+                      <span className="text-zinc-500">Siège vide</span>
+                    )}
+                    {seat.isBot && (
+                      <span className="ml-2 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-400">
+                        Bot
+                      </span>
+                    )}
                     {isYou && (
-                      <span className="ml-2 text-xs text-zinc-400">(toi)</span>
+                      <span className="ml-2 text-xs text-amber-300">(toi)</span>
                     )}
                   </span>
-                  {clockEnabled && (
+                  {clockEnabled && seat.occupied && !waiting && (
                     <PlayerClock
                       remainingMs={p.timeRemainingMs}
                       turnStartedAt={game.turnStartedAt}
@@ -65,13 +89,26 @@ export function Scoreboard({ game, mySeatIndex, presence = {} }: ScoreboardProps
                   )}
                   {showOffline && <DisconnectBadge />}
                 </div>
-                <div className="mt-1 grid grid-cols-2 gap-1 text-xs text-zinc-400">
-                  <Stat
-                    label="Paires"
-                    value={`${p.capturedPairs}/${t.capturePairsWin}`}
-                  />
-                  <Stat label="Gemmes" value={`${p.gemsRemaining}`} />
-                </div>
+                {!waiting && seat.occupied && (
+                  <div className="mt-1 grid grid-cols-2 gap-1 text-xs text-zinc-400">
+                    <Stat
+                      label="Paires"
+                      value={`${p.capturedPairs}/${t.capturePairsWin}`}
+                    />
+                    <Stat label="Gemmes" value={`${p.gemsRemaining}`} />
+                  </div>
+                )}
+                {waiting && !seat.occupied && onAddBot && (
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      onClick={() => onAddBot(seat.index)}
+                      className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 transition hover:border-amber-400 hover:text-amber-100"
+                    >
+                      + Bot
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </li>

@@ -17,7 +17,7 @@ import { ReplayControls } from "../components/ReplayControls";
 import { Scoreboard } from "../components/Scoreboard";
 import { UserNav } from "../components/UserNav";
 import { clearCredentials, loadCredentials, saveCredentials } from "../lib/auth";
-import { gemColor, gemName } from "../lib/colors";
+import { gemName } from "../lib/colors";
 import { cellsAtStep, lastMoveAt } from "../lib/replay";
 
 export function GamePage() {
@@ -330,6 +330,20 @@ export function GamePage() {
           game={game}
           mySeatIndex={creds?.seatIndex ?? null}
           presence={presence}
+          onAddBot={
+            game.status === "waiting" &&
+            game.visibility === "private" &&
+            !!creds
+              ? async (seatIndex) => {
+                  try {
+                    const g = await api.addBot(id, seatIndex);
+                    setLocalGame(g);
+                  } catch (err) {
+                    setError(err instanceof ApiError ? err.message : "Erreur bot");
+                  }
+                }
+              : undefined
+          }
         />
 
         <main className="lg:col-start-2 lg:row-span-2">
@@ -356,22 +370,6 @@ export function GamePage() {
               onJoin={(asName) => handleJoin(asName)}
               disabled={joining}
               seatsFree={seatsFree}
-            />
-          )}
-
-          {game.status === "waiting" && game.visibility === "private" && (
-            <SeatList
-              game={game}
-              mySeatIndex={creds?.seatIndex ?? null}
-              canAddBot={!!creds}
-              onAddBot={async (seatIndex) => {
-                try {
-                  const g = await api.addBot(id, seatIndex);
-                  setLocalGame(g);
-                } catch (err) {
-                  setError(err instanceof ApiError ? err.message : "Erreur bot");
-                }
-              }}
             />
           )}
 
@@ -663,76 +661,6 @@ function Banner({ children }: { children: React.ReactNode }) {
   );
 }
 
-// SeatList shows every seat slot — filled or empty — during a private
-// game's waiting state. Empty seats get an inline "+ Bot" button so the
-// host can fill them on the fly; the host's own seat gets a "(toi)"
-// marker. The display makes the seat layout obvious, replacing the
-// abstract "Rouge / Bleu" labels of the Scoreboard during waiting.
-function SeatList({
-  game,
-  mySeatIndex,
-  canAddBot,
-  onAddBot,
-}: {
-  game: Game;
-  mySeatIndex: number | null;
-  canAddBot: boolean;
-  onAddBot: (seatIndex: number) => Promise<void>;
-}) {
-  return (
-    <div className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-900/40 p-3 text-sm">
-      <div className="text-zinc-300">Sièges</div>
-      <ul className="space-y-1.5">
-        {game.seats.map((seat) => {
-          const isMine = seat.index === mySeatIndex;
-          return (
-            <li
-              key={seat.index}
-              className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2"
-            >
-              <div className="flex min-w-0 items-center gap-2.5">
-                <span
-                  aria-hidden
-                  className="inline-block h-4 w-4 rounded-full border border-black/40"
-                  style={{ background: gemColor(seat.color) ?? "#27272a" }}
-                />
-                {seat.occupied ? (
-                  <>
-                    <span className="truncate text-zinc-100">{seat.name}</span>
-                    {seat.isBot && (
-                      <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-400">
-                        Bot
-                      </span>
-                    )}
-                    {isMine && (
-                      <span className="text-[11px] text-amber-300">(toi)</span>
-                    )}
-                  </>
-                ) : (
-                  <span className="text-zinc-500">Siège vide</span>
-                )}
-              </div>
-              {!seat.occupied && canAddBot && (
-                <button
-                  onClick={() => onAddBot(seat.index)}
-                  className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 transition hover:border-amber-400 hover:text-amber-100"
-                >
-                  + Bot
-                </button>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-    </div>
-  );
-}
-
-// StartButton lives at the bottom of the seat list on private waiting games.
-// Disabled (not hidden) when fewer than 2 seats are occupied — the host
-// sees their action exists, just isn't ready yet. Empty seats stay empty
-// when Start fires; the server trims them and the game begins with the
-// occupied seats only.
 function StartButton({ game, onStart }: { game: Game; onStart: () => void }) {
   const occupied = game.seats.filter((s) => s.occupied).length;
   const ready = occupied >= 2;

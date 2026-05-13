@@ -561,6 +561,25 @@ func (r *PostgresRepo) Leaderboard(ctx context.Context, limit int) ([]Leaderboar
 	return out, rows.Err()
 }
 
+func (r *PostgresRepo) FinalizeStart(ctx context.Context, gameID string, status Status) error {
+	tx, err := r.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM seats WHERE game_id = $1 AND occupied = FALSE
+	`, gameID); err != nil {
+		return fmt.Errorf("trim seats: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE games SET status = $1, updated_at = NOW() WHERE id = $2
+	`, status, gameID); err != nil {
+		return fmt.Errorf("update status: %w", err)
+	}
+	return tx.Commit()
+}
+
 func deriveOutcome(status Status, mine, winner game.Color) string {
 	if status != StatusFinished {
 		return "ongoing"

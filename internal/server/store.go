@@ -46,8 +46,9 @@ var (
 	ErrCannotAcceptOwnDrawOffer = errors.New("the offering player cannot accept their own draw offer")
 	ErrDrawAlreadyOffered = errors.New("a draw is already being offered")
 	ErrDrawUnsupported  = errors.New("draw is only supported in 2-player games")
-	ErrBotsOnPublic     = errors.New("bots cannot be added to public games")
-	ErrBadSeatIndex     = errors.New("seat index out of range")
+	ErrBotsOnPublic      = errors.New("bots cannot be added to public games")
+	ErrAnonymousOnPublic = errors.New("public games require authentication to join")
+	ErrBadSeatIndex      = errors.New("seat index out of range")
 )
 
 // Seat is a play slot in a game. Once claimed, only the SHA-256 of the
@@ -605,6 +606,12 @@ func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx i
 
 	if rec.Status != StatusWaiting {
 		return nil, "", ErrNotPlaying
+	}
+	// Public games are matchmaking-only. Anonymous joiners would never have
+	// a stable identity to rate against, so we reject them here rather than
+	// silently producing an unrated game from a public slot.
+	if rec.Visibility == VisibilityPublic && userID == "" {
+		return nil, "", ErrAnonymousOnPublic
 	}
 
 	idx := seatIdx

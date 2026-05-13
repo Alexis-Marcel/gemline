@@ -84,7 +84,11 @@ func TestRematchRequiresFinishedGame(t *testing.T) {
 func TestRematchIsIdempotent(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := createGameWithBody(t, ts, `{"players":2,"visibility":"public"}`, http.StatusCreated)
+	// Use a private game so we can still anonymous-join; public games now
+	// require auth, which would force this test to go through the X-Test-
+	// User-ID back door for both players. The behaviour we care about
+	// here (rematch idempotency + visibility preservation) is the same.
+	g := createGame(t, ts, 2)
 	j1 := joinGame(t, ts, g.ID, "Alice", nil)
 	j2 := joinGame(t, ts, g.ID, "Bob", nil)
 	finishGame(t, ts, g.ID, j1.Token, j2.Token)
@@ -498,6 +502,33 @@ func TestLeaveSeatFreesIt(t *testing.T) {
 	if cur.Seats[j.Seat.Index].Occupied {
 		t.Fatalf("seat should be empty after leave, got %+v", cur.Seats[j.Seat.Index])
 	}
+}
+
+func TestJoinPublicRejectsAnonymous(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	// A public game spawned via matchmake by Alice. The URL is technically
+	// reachable by anyone who knows the ID — anonymous join must be
+	// rejected so this surface can't bypass the matchmaking-only contract.
+	pub := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	body := bytes.NewBufferString(`{"name":"Bob"}`)
+	resp, err := http.Post(ts.URL+"/api/games/"+pub.Game.ID+"/join", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("want 401 on anonymous join to public game, got %d", resp.StatusCode)
+	}
+}
+
+func TestJoinPrivateStillAllowsAnonymous(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	// createGame defaults to private — anonymous join must keep working
+	// so URL-sharing for casual play isn't broken.
+	g := createGame(t, ts, 2)
+	_ = joinGame(t, ts, g.ID, "Anon", nil)
 }
 
 func TestLeaveSeatRejectedAfterStart(t *testing.T) {

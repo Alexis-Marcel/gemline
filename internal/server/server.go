@@ -515,6 +515,8 @@ func statusForJoinError(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, ErrNotPlaying):
 		return http.StatusConflict
+	case errors.Is(err, ErrAnonymousOnPublic):
+		return http.StatusUnauthorized
 	default:
 		return http.StatusBadRequest
 	}

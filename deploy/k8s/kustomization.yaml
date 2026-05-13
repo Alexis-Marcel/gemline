@@ -21,7 +21,7 @@ resources:
 images:
 - name: ghcr.io/alexis-marcel/gemline-server
   newName: ghcr.io/alexis-marcel/gemline-server
-  newTag: 0d5103d4ac57be354f6b1a04bdcfea3a3db94f5f
+  newTag: e736c40b50e08083feef77b4223b7e14e5105804
 - name: ghcr.io/alexis-marcel/gemline-web
   newName: ghcr.io/alexis-marcel/gemline-web
-  newTag: 0d5103d4ac57be354f6b1a04bdcfea3a3db94f5f
+  newTag: e736c40b50e08083feef77b4223b7e14e5105804

@@ -54,6 +54,29 @@ type Repository interface {
 	// already there on a lost race). This is the source of truth used by
 	// Store.Rematch to resolve concurrent rematch calls.
 	SetRematchLink(ctx context.Context, originalID, newID string) (string, error)
+
+	// RatingFor returns the rating row for userID, or a zero-value Rating
+	// when no row exists yet. Callers must apply elo.DefaultRating
+	// themselves when Rating.Games == 0.
+	RatingFor(ctx context.Context, userID string) (Rating, error)
+
+	// RatingsFor returns rating rows for `userIDs` in the same order; missing
+	// rows are returned as zero-value Rating entries.
+	RatingsFor(ctx context.Context, userIDs []string) ([]Rating, error)
+
+	// ApplyRatedGame atomically marks `gameID` as rated (via
+	// `UPDATE games SET rated_at = NOW() WHERE rated_at IS NULL RETURNING`)
+	// and persists the two upserted rating rows. Returns true if this call
+	// won the race and applied the rating; false if the game was already
+	// rated (no-op). Both updates and the games row run in a single
+	// transaction so a crash mid-write can't leave one rating bumped and
+	// the other untouched.
+	ApplyRatedGame(ctx context.Context, gameID string, updates []RatingUpdate) (bool, error)
+
+	// Leaderboard returns the top-`limit` rated users (rating DESC), joined
+	// with their display name. Users with no profile row are omitted —
+	// they're not visible enough to surface on a board.
+	Leaderboard(ctx context.Context, limit int) ([]LeaderboardEntry, error)
 }
 
 // Profile is the user-controlled profile row.
@@ -81,6 +104,40 @@ type UserStats struct {
 	Won     int `json:"won"`
 	Lost    int `json:"lost"`
 	Ongoing int `json:"ongoing"`
+	// Rating is the current Elo. Defaults to elo.DefaultRating when the
+	// user has no row in the ratings table yet (never played a rated game).
+	Rating int `json:"rating"`
+}
+
+// Rating is one user's current Elo + per-result aggregate counts.
+type Rating struct {
+	UserID    string
+	Rating    int
+	Games     int
+	Wins      int
+	Losses    int
+	Draws     int
+	UpdatedAt string // RFC 3339; empty when no row exists yet
+}
+
+// RatingUpdate is what ApplyRatedGame persists per user. Result drives the
+// wins/losses/draws counter columns; NewRating overrides the rating column.
+type RatingUpdate struct {
+	UserID    string
+	NewRating int
+	Result    rune // 'W' | 'L' | 'D'
+}
+
+// LeaderboardEntry surfaces a single ranked player on the public board.
+// DisplayName is the user's chosen handle (from the profiles table).
+type LeaderboardEntry struct {
+	UserID      string `json:"userId"`
+	DisplayName string `json:"displayName"`
+	Rating      int    `json:"rating"`
+	Games       int    `json:"games"`
+	Wins        int    `json:"wins"`
+	Losses      int    `json:"losses"`
+	Draws       int    `json:"draws"`
 }
 
 // Message is a chat line posted in a game. AuthorColor/AuthorName are
@@ -130,4 +187,23 @@ func (noopRepo) SetRematchLink(_ context.Context, _, newID string) (string, erro
 	// No DB → no link tracking. Returning newID keeps Store.Rematch's
 	// idempotency contract intact for single-process, in-memory runs.
 	return newID, nil
+}
+func (noopRepo) RatingFor(context.Context, string) (Rating, error) {
+	return Rating{}, nil
+}
+func (noopRepo) RatingsFor(_ context.Context, userIDs []string) ([]Rating, error) {
+	out := make([]Rating, len(userIDs))
+	for i, id := range userIDs {
+		out[i].UserID = id
+	}
+	return out, nil
+}
+func (noopRepo) ApplyRatedGame(context.Context, string, []RatingUpdate) (bool, error) {
+	// Without DB-backed atomicity we can't guarantee single-application.
+	// Return false ("already rated") so Store.maybeApplyRating doesn't
+	// double-credit Elo across hermetic tests.
+	return false, nil
+}
+func (noopRepo) Leaderboard(context.Context, int) ([]LeaderboardEntry, error) {
+	return nil, nil
 }

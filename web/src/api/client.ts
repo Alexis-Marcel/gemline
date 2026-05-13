@@ -59,19 +59,43 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
-  // createGame always creates a private game from the frontend; public games
-  // are spawned implicitly by matchmake() when no candidate exists.
-  createGame(players: number) {
-    return request<Game>("/api/games", {
+  // createGame creates a private game and auto-joins the caller. Public
+  // games are spawned implicitly by matchmake() — this endpoint is now
+  // private-only on the server. `name` is required for anonymous callers;
+  // authenticated users may leave it undefined (server uses profile name).
+  createGame(players: number, name?: string) {
+    const body: Record<string, unknown> = { players, visibility: "private" };
+    if (name) body.name = name;
+    return request<JoinResponse>("/api/games", {
       method: "POST",
-      body: JSON.stringify({ players, visibility: "private" }),
+      body: JSON.stringify(body),
     });
   },
 
+  startGame(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/start`, {
+      method: "POST",
+      playerToken,
+    });
+  },
+
+  // matchmake requires a signed-in user — the server 401s otherwise.
+  // Atomic: the caller is auto-joined into the matched game, so the client
+  // gets back the seat token and can navigate straight in without a
+  // follow-up /join call.
   matchmake(players: number) {
-    return request<Game>("/api/games/matchmake", {
+    return request<JoinResponse>("/api/games/matchmake", {
       method: "POST",
       body: JSON.stringify({ players }),
+    });
+  },
+
+  // leaveSeat frees the caller's seat in a still-waiting game (cancel
+  // matchmaking, or back out of a private invite before play starts).
+  leaveSeat(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/leave`, {
+      method: "POST",
+      playerToken,
     });
   },
 
@@ -119,10 +143,15 @@ export const api = {
     return request<Game>(`/api/games/${id}`);
   },
 
-  joinGame(id: string, name: string, seat?: number) {
+  // joinGame: pass `name` only for anonymous users — authenticated users
+  // let the server fill it from their profile display name.
+  joinGame(id: string, name?: string, seat?: number) {
+    const body: Record<string, unknown> = {};
+    if (name) body.name = name;
+    if (seat !== undefined) body.seat = seat;
     return request<JoinResponse>(`/api/games/${id}/join`, {
       method: "POST",
-      body: JSON.stringify(seat === undefined ? { name } : { name, seat }),
+      body: JSON.stringify(body),
     });
   },
 

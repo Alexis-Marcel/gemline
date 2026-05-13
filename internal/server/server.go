@@ -118,6 +118,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/profile", s.putProfile)
 	mux.HandleFunc("GET /api/users/me/games", s.getMyGames)
 	mux.HandleFunc("GET /api/users/me/stats", s.getMyStats)
+	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
 	return loggingMiddleware(s.log, corsMiddleware(jwtMiddleware(s.verifier, mux)))
 }

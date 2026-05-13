@@ -121,9 +121,18 @@ export function ProfilePage() {
       </section>
 
       <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
-        <h2 className="mb-3 font-medium text-zinc-200">Statistiques</h2>
+        <div className="mb-3 flex items-baseline justify-between">
+          <h2 className="font-medium text-zinc-200">Statistiques</h2>
+          <Link
+            to="/leaderboard"
+            className="text-xs text-zinc-400 transition hover:text-amber-300"
+          >
+            Classement →
+          </Link>
+        </div>
         {stats ? (
-          <dl className="grid grid-cols-4 gap-3">
+          <dl className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            <Stat label="Elo" value={stats.rating} accent="text-amber-300" />
             <Stat label="Total" value={stats.total} />
             <Stat label="Victoires" value={stats.won} accent="text-emerald-400" />
             <Stat label="Défaites" value={stats.lost} accent="text-red-400" />

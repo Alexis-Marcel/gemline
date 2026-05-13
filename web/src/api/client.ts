@@ -2,6 +2,7 @@ import { supabase } from "./supabase";
 import type {
   Game,
   JoinResponse,
+  LeaderboardEntry,
   Message,
   MoveResponse,
   Profile,
@@ -167,6 +168,12 @@ export const api = {
 
   getMyStats() {
     return request<UserStats>("/api/users/me/stats");
+  },
+
+  getLeaderboard(limit = 50) {
+    return request<LeaderboardEntry[]>(`/api/leaderboard?limit=${limit}`, {
+      skipAuth: true,
+    });
   },
 };
 

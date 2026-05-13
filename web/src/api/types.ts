@@ -123,6 +123,18 @@ export interface UserStats {
   won: number;
   lost: number;
   ongoing: number;
+  /** Current Elo. 1200 is the default for a user who's never played a rated game. */
+  rating: number;
+}
+
+export interface LeaderboardEntry {
+  userId: string;
+  displayName: string;
+  rating: number;
+  games: number;
+  wins: number;
+  losses: number;
+  draws: number;
 }
 
 export interface ReplayStep {

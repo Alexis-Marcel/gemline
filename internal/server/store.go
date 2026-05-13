@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -138,6 +139,10 @@ type Store struct {
 	// botDelay is the artificial pause before a bot plays, so games don't
 	// feel uncannily fast. Tests set it to 0 via WithBotDelay for speed.
 	botDelay time.Duration
+
+	// promoterStop signals the multi-room auto-promotion goroutine to halt.
+	// nil while the promoter hasn't been started.
+	promoterStop chan struct{}
 }
 
 func NewStore(repo Repository) *Store {
@@ -190,10 +195,133 @@ func (s *Store) SetDrawOfferListener(fn func(gameID string, offeredBy int)) {
 	s.onDrawOffer = fn
 }
 
-// Close stops every running clock + presence timer. Call on shutdown.
+// Close stops every running clock + presence timer + the multi promoter.
+// Call on shutdown.
 func (s *Store) Close() {
 	s.clocks.CancelAll()
 	s.presence.CancelAll()
+	if s.promoterStop != nil {
+		close(s.promoterStop)
+		s.promoterStop = nil
+	}
+}
+
+// StartMultiPromoter spins up the background goroutine that promotes
+// public multi-player rooms to `playing` once enough seats are occupied
+// and the room has waited long enough. Idempotent — calling twice does
+// nothing. Tests skip this entirely (deterministic via Store.Start
+// calls instead).
+func (s *Store) StartMultiPromoter() {
+	if s.promoterStop != nil {
+		return
+	}
+	s.promoterStop = make(chan struct{})
+	stop := s.promoterStop
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				s.checkMultiPromotions()
+			}
+		}
+	}()
+}
+
+func (s *Store) checkMultiPromotions() {
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.games))
+	for id := range s.games {
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+	for _, id := range ids {
+		rec, ok, err := s.Get(context.Background(), id)
+		if err != nil || !ok {
+			continue
+		}
+		s.promoteMultiIfReady(rec)
+	}
+}
+
+// promoteMultiIfReady starts a public multi-player game when the room has
+// at least 3 occupied seats and has waited the threshold for its current
+// occupancy. Idempotent + safe under concurrent Joins — the actual
+// promotion goes through Store.startInternal which re-acquires rec.Lock
+// and re-validates state.
+func (s *Store) promoteMultiIfReady(rec *GameRecord) {
+	rec.Lock()
+	if rec.Status != StatusWaiting || rec.Visibility != VisibilityPublic {
+		rec.Unlock()
+		return
+	}
+	if len(rec.Seats) < 3 {
+		rec.Unlock()
+		return
+	}
+	occupied := 0
+	for _, st := range rec.Seats {
+		if st.Occupied {
+			occupied++
+		}
+	}
+	age := time.Since(rec.CreatedAt)
+	rec.Unlock()
+	if occupied < 3 {
+		return
+	}
+	if age < multiPromotionThreshold(occupied) {
+		return
+	}
+	_ = s.startInternal(rec)
+}
+
+// startInternal is the auth-less common path for transitioning a waiting
+// game to playing. Trims unoccupied seats, rebuilds the engine for the
+// remaining colours, persists, and schedules the first bot move if
+// applicable. Used by both Store.Start (private, token-auth) and the
+// auto-promoter (public multi).
+func (s *Store) startInternal(rec *GameRecord) error {
+	rec.Lock()
+	if rec.Status != StatusWaiting {
+		rec.Unlock()
+		return ErrNotPlaying
+	}
+	occupied := make([]Seat, 0, len(rec.Seats))
+	for _, st := range rec.Seats {
+		if st.Occupied {
+			occupied = append(occupied, st)
+		}
+	}
+	if len(occupied) < 2 {
+		rec.Unlock()
+		return ErrTooFewToStart
+	}
+	colors := make([]game.Color, len(occupied))
+	for i := range occupied {
+		occupied[i].Index = i
+		colors[i] = occupied[i].Color
+	}
+	rec.Seats = occupied
+	rec.State = game.NewGame(colors, rec.State.Config)
+	rec.Status = StatusPlaying
+	rec.State.StartClock(time.Now())
+	s.armClock(rec)
+	status := rec.Status
+	gameID := rec.ID
+	rec.Unlock()
+
+	if err := s.repo.FinalizeStart(context.Background(), gameID, status); err != nil {
+		_ = err
+	}
+	if s.onState != nil {
+		s.onState(gameID)
+	}
+	s.maybeScheduleBot(rec)
+	return nil
 }
 
 // armClock schedules (or cancels) the timeout for the active player of
@@ -746,6 +874,9 @@ func (s *Store) Start(ctx context.Context, gameID, token string) (*GameRecord, e
 		return nil, ErrGameNotFound
 	}
 
+	// Auth & visibility checks live here (the HTTP-facing path); the
+	// trimming + persistence logic is shared with the auto-promoter
+	// in startInternal.
 	rec.Lock()
 	if rec.Visibility != VisibilityPrivate {
 		rec.Unlock()
@@ -759,40 +890,10 @@ func (s *Store) Start(ctx context.Context, gameID, token string) (*GameRecord, e
 		rec.Unlock()
 		return rec, ErrBadToken
 	}
-	occupied := make([]Seat, 0, len(rec.Seats))
-	for _, st := range rec.Seats {
-		if st.Occupied {
-			occupied = append(occupied, st)
-		}
-	}
-	if len(occupied) < 2 {
-		rec.Unlock()
-		return rec, ErrTooFewToStart
-	}
-
-	// Trim: the new seats array is just the previously-occupied seats, with
-	// fresh contiguous indices 0..N-1. We keep each seat's original colour
-	// so clients that remembered "I'm Bleu" still find themselves.
-	colors := make([]game.Color, len(occupied))
-	for i := range occupied {
-		occupied[i].Index = i
-		colors[i] = occupied[i].Color
-	}
-	rec.Seats = occupied
-	// Rebuild the engine for the new player count. Safe because the game
-	// has no moves yet (we just enforced Status == Waiting).
-	rec.State = game.NewGame(colors, rec.State.Config)
-	rec.Status = StatusPlaying
-	rec.State.StartClock(time.Now())
-	s.armClock(rec)
-	status := rec.Status
 	rec.Unlock()
-
-	if err := s.repo.FinalizeStart(ctx, gameID, status); err != nil {
-		// In-memory truth wins (same policy as other finalize paths).
-		_ = err
+	if err := s.startInternal(rec); err != nil {
+		return rec, err
 	}
-	s.maybeScheduleBot(rec)
 	return rec, nil
 }
 
@@ -854,26 +955,35 @@ func (s *Store) AddBot(ctx context.Context, gameID string, seatIdx int) (*GameRe
 
 // Matchmake returns a public waiting game of the requested player count
 // with at least one free seat that `excludeUserID` is *not* already seated
-// in. The oldest matching game wins — newer candidates wait their turn so
-// solo joiners don't starve. If no candidate matches, a fresh public game
-// is created.
+// in. For 2-player (1v1) games we score candidates by Elo proximity: the
+// closest-rated candidate that falls within the room's age-widened
+// tolerance band wins. For 3+ player (multi) we keep the simpler "join the
+// most-filled room" model — the auto-promoter starts those when enough
+// players have accumulated, so rating-pairing within a multi room would
+// only delay the start without changing who plays.
+//
+// If no candidate matches, a fresh public game is created and the caller
+// becomes its first seat-holder.
 func (s *Store) Matchmake(ctx context.Context, players int, excludeUserID string) (*GameRecord, error) {
-	// Pull a generous slice of candidates and filter Go-side. The repo path
-	// returns most-recent first; we iterate in reverse to favour the oldest.
 	candidates, err := s.repo.LobbyGames(ctx, 50)
 	if err != nil {
 		return nil, err
 	}
 	if candidates == nil {
-		// noopRepo — fall back to the in-memory cache.
 		candidates = s.scanLobbyCache(50)
 	}
-	for i := len(candidates) - 1; i >= 0; i-- {
-		c := candidates[i]
-		if c.Players != players {
-			continue
-		}
-		if c.Seated >= c.Players {
+	callerRating := s.fetchCallerRating(ctx, excludeUserID)
+
+	type scored struct {
+		rec   *GameRecord
+		delta float64
+		age   time.Duration
+		seated int
+	}
+	var picks []scored
+	now := time.Now()
+	for _, c := range candidates {
+		if c.Players != players || c.Seated >= c.Players {
 			continue
 		}
 		rec, ok, err := s.Get(ctx, c.GameID)
@@ -881,14 +991,8 @@ func (s *Store) Matchmake(ctx context.Context, players int, excludeUserID string
 			return nil, err
 		}
 		if !ok {
-			// Stale entry (cache eviction race). Skip and try the next.
 			continue
 		}
-		// Re-check status under the lock: another join may have filled the
-		// last seat between the candidate snapshot and us reaching it. Also
-		// skip games where the requester is already seated — re-clicking
-		// "Find match" should land us somewhere new, not in the game we're
-		// already waiting in.
 		rec.Lock()
 		joinable := rec.Status == StatusWaiting && !rec.AllSeated()
 		if joinable && excludeUserID != "" {
@@ -899,12 +1003,98 @@ func (s *Store) Matchmake(ctx context.Context, players int, excludeUserID string
 				}
 			}
 		}
-		rec.Unlock()
+		var occupantUserIDs []string
+		seated := 0
 		if joinable {
-			return rec, nil
+			for _, seat := range rec.Seats {
+				if seat.Occupied {
+					seated++
+					if seat.UserID != "" {
+						occupantUserIDs = append(occupantUserIDs, seat.UserID)
+					}
+				}
+			}
 		}
+		rec.Unlock()
+		if !joinable {
+			continue
+		}
+
+		age := now.Sub(c.CreatedAt)
+		avg := s.averageRating(ctx, occupantUserIDs)
+		delta := math.Abs(float64(callerRating) - float64(avg))
+
+		if players == 2 && !withinBand(callerRating, avg, age) {
+			// Outside this candidate's tolerance — skip for now. The
+			// caller will create their own room (or land on a more
+			// permissive existing one).
+			continue
+		}
+		picks = append(picks, scored{rec: rec, delta: delta, age: age, seated: seated})
+	}
+	if len(picks) > 0 {
+		var best scored
+		bestIdx := -1
+		for i, p := range picks {
+			if bestIdx == -1 {
+				best, bestIdx = p, i
+				continue
+			}
+			// 1v1: smallest rating delta wins. Multi: most-filled, with
+			// age as the tiebreaker so older rooms drain first.
+			better := false
+			if players == 2 {
+				better = p.delta < best.delta
+			} else {
+				if p.seated != best.seated {
+					better = p.seated > best.seated
+				} else {
+					better = p.age > best.age
+				}
+			}
+			if better {
+				best, bestIdx = p, i
+			}
+		}
+		_ = bestIdx
+		return best.rec, nil
 	}
 	return s.Create(ctx, players, VisibilityPublic)
+}
+
+// fetchCallerRating resolves a user's current Elo, falling back to the
+// default when they have no rated games yet (or no user, for anonymous —
+// not reachable for matchmake but cheap to guard).
+func (s *Store) fetchCallerRating(ctx context.Context, userID string) int {
+	if userID == "" {
+		return elo.DefaultRating
+	}
+	r, err := s.repo.RatingFor(ctx, userID)
+	if err != nil || r.Games == 0 {
+		return elo.DefaultRating
+	}
+	return r.Rating
+}
+
+// averageRating returns the mean Elo of the supplied users, with unrated
+// users taking the default. Empty list → default rating.
+func (s *Store) averageRating(ctx context.Context, userIDs []string) int {
+	if len(userIDs) == 0 {
+		return elo.DefaultRating
+	}
+	ratings, err := s.repo.RatingsFor(ctx, userIDs)
+	if err != nil {
+		return elo.DefaultRating
+	}
+	sum := 0
+	for _, r := range ratings {
+		if r.Games == 0 {
+			sum += elo.DefaultRating
+		} else {
+			sum += r.Rating
+		}
+	}
+	return sum / len(ratings)
 }
 
 // LeaveSeat frees the seat behind `token` and broadcasts the new state.

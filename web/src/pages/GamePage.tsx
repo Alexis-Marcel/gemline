@@ -269,19 +269,23 @@ export function GamePage() {
   const seatsFree = game.seats.filter((s) => !s.occupied).length;
   const seatsOccupied = game.seats.length - seatsFree;
 
-  // "Recherche d'un adversaire" — the matchmaking-style screen. Triggered
-  // when you've been auto-seated into a fresh public game and nobody else
-  // is here yet. We render it instead of the full game UI so it feels like
-  // a real queue rather than "you got dumped onto a board".
+  // "Recherche d'adversaire" / "Salle d'attente multijoueur" — the
+  // matchmaking-style screen. Renders whenever the caller is seated in a
+  // public game still in waiting state. For 1v1, the second player's
+  // arrival flips status to playing immediately (AllSeated path), so this
+  // only ever shows briefly with 1/2 occupied. For multi, the room stays
+  // waiting until the auto-promoter has at least 3 occupants AND the
+  // threshold time for that occupancy has elapsed, so the user sees a
+  // populated queue ("3/6 joueurs en attente") before play starts.
   const isSearching =
     game.status === "waiting" &&
     !!creds &&
-    game.visibility === "public" &&
-    seatsOccupied === 1;
+    game.visibility === "public";
   if (isSearching) {
     return (
       <SearchingForOpponent
-        players={game.seats.length}
+        maxPlayers={game.seats.length}
+        seatsOccupied={seatsOccupied}
         onCancel={handleCancelMatchmaking}
       />
     );
@@ -585,14 +589,18 @@ function JoinPanel({
 
 // SearchingForOpponent is the chess.com-style waiting room for matchmade
 // games. Renders before the game layout so the user sees a clean "queue"
-// state instead of an empty board.
+// state instead of an empty board. For 1v1 it just spins; for multi it
+// shows live progress (3/6 joueurs) so the user knows others are arriving.
 function SearchingForOpponent({
-  players,
+  maxPlayers,
+  seatsOccupied,
   onCancel,
 }: {
-  players: number;
+  maxPlayers: number;
+  seatsOccupied: number;
   onCancel: () => void;
 }) {
+  const isMulti = maxPlayers > 2;
   return (
     <div className="flex h-screen items-center justify-center bg-zinc-950 p-6">
       <div className="w-full max-w-sm space-y-6 rounded-xl border border-zinc-800 bg-zinc-900/60 p-6 text-center">
@@ -602,11 +610,23 @@ function SearchingForOpponent({
         />
         <div className="space-y-1">
           <h1 className="text-lg font-medium text-zinc-100">
-            Recherche d'un adversaire…
+            {isMulti
+              ? "Salle d'attente multijoueur"
+              : "Recherche d'un adversaire…"}
           </h1>
-          <p className="text-sm text-zinc-400">
-            Partie {players === 2 ? "1 contre 1" : `à ${players} joueurs`}.
-          </p>
+          {isMulti ? (
+            <>
+              <p className="text-2xl font-semibold text-amber-300">
+                {seatsOccupied}/{maxPlayers}
+              </p>
+              <p className="text-sm text-zinc-400">
+                La partie démarre dès que 3 joueurs ou plus sont là (plus tu
+                attends, plus le seuil descend).
+              </p>
+            </>
+          ) : (
+            <p className="text-sm text-zinc-400">Partie 1 contre 1.</p>
+          )}
         </div>
         <button
           type="button"

@@ -6,7 +6,10 @@ import { Button } from "../components/Button";
 import { UserNav } from "../components/UserNav";
 import { saveCredentials } from "../lib/auth";
 
-const MULTIPLAYER_DEFAULT_PLAYERS = 4;
+// Multi rooms open with the engine's max so the server can promote them
+// at any size 3..6 depending on how many players accumulate. The actual
+// playing-time size is decided server-side by the multi auto-promoter.
+const MULTIPLAYER_MAX_SEATS = 6;
 const PRIVATE_SEATS = 6;
 
 type Mode = "menu" | "private-name";
@@ -117,8 +120,8 @@ export function HomePage() {
         />
         <BigAction
           label="Multijoueur"
-          sub={`Jusqu'à ${MULTIPLAYER_DEFAULT_PLAYERS} joueurs, première partie ouverte.`}
-          onClick={() => matchmake(MULTIPLAYER_DEFAULT_PLAYERS, "multi")}
+          sub="3 à 6 joueurs. La partie démarre dès qu'assez de monde est là."
+          onClick={() => matchmake(MULTIPLAYER_MAX_SEATS, "multi")}
           loading={busy === "multi"}
         />
       </section>

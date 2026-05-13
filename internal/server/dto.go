@@ -157,11 +157,17 @@ func toGameDTO(rec *GameRecord) gameDTO {
 	if vis == "" {
 		vis = VisibilityPrivate
 	}
+	// Defensive copy of the cells: the dto outlives the rec.Lock scope, so
+	// after the caller Unlocks any subsequent board mutation (e.g. a bot
+	// move) would race with json.Encoder iterating dto.Cells. Holding the
+	// slice header by value isn't enough — the backing array is shared.
+	cells := make([]game.Color, len(s.Board.Cells))
+	copy(cells, s.Board.Cells)
 	return gameDTO{
 		ID:            rec.ID,
 		Status:        rec.Status,
 		BoardSide:     s.Board.Side,
-		Cells:         s.Board.Cells,
+		Cells:         cells,
 		TurnStartedAt: turnStartedAt,
 		Players:       players,
 		Seats:         seats,

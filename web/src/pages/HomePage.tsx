@@ -10,15 +10,22 @@ export function HomePage() {
   const [creating, setCreating] = useState(false);
   const [joinId, setJoinId] = useState("");
   const [players, setPlayers] = useState(2);
+  const [bots, setBots] = useState(0);
   const [visibility, setVisibility] = useState<Visibility>("private");
   const [error, setError] = useState<string | null>(null);
+
+  // Clamp bots whenever the player count drops below the current bot count
+  // (e.g. user picks 6 players + 3 bots, then drops to 2 players — bots
+  // must shrink to ≤ 2). Without this the create call would 400.
+  const clampedBots = Math.min(bots, players);
+  if (clampedBots !== bots) setBots(clampedBots);
 
   async function handleCreate(e: FormEvent) {
     e.preventDefault();
     setCreating(true);
     setError(null);
     try {
-      const game = await api.createGame(players, visibility);
+      const game = await api.createGame(players, visibility, clampedBots);
       navigate(`/game/${game.id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Erreur inconnue");
@@ -54,20 +61,36 @@ export function HomePage() {
         className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
       >
         <h2 className="font-medium text-zinc-200">Nouvelle partie</h2>
-        <label className="block text-sm text-zinc-400">
-          Nombre de joueurs
-          <select
-            className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
-            value={players}
-            onChange={(e) => setPlayers(Number(e.target.value))}
-          >
-            {[2, 3, 4, 5, 6].map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block text-sm text-zinc-400">
+            Joueurs
+            <select
+              className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
+              value={players}
+              onChange={(e) => setPlayers(Number(e.target.value))}
+            >
+              {[2, 3, 4, 5, 6].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block text-sm text-zinc-400">
+            Dont bots
+            <select
+              className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
+              value={clampedBots}
+              onChange={(e) => setBots(Number(e.target.value))}
+            >
+              {Array.from({ length: players + 1 }, (_, i) => (
+                <option key={i} value={i}>
+                  {i}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
 
         <fieldset className="grid grid-cols-2 gap-2 text-xs">
           <legend className="sr-only">Visibilité</legend>

@@ -19,7 +19,9 @@ import (
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return httptest.NewServer(New(log, NewStore(nil), Config{}).Routes())
+	// Bots play instantly in tests so assertions don't have to sleep.
+	store := NewStore(nil).WithBotDelay(0)
+	return httptest.NewServer(New(log, store, Config{}).Routes())
 }
 
 func TestHealthz(t *testing.T) {
@@ -363,6 +365,77 @@ func TestDrawRejectedInMultiplayer(t *testing.T) {
 	postDrawRaw(t, ts, g.ID, "offer", j1.Token, http.StatusConflict)
 }
 
+func TestBotSeatsFillAtCreate(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGameWithBody(t, ts, `{"players":2,"bots":1}`, http.StatusCreated)
+	if len(g.Seats) != 2 {
+		t.Fatalf("want 2 seats, got %d", len(g.Seats))
+	}
+	if !g.Seats[1].IsBot || !g.Seats[1].Occupied {
+		t.Fatalf("seat 1 should be a bot and occupied; got %+v", g.Seats[1])
+	}
+	if g.Seats[0].IsBot || g.Seats[0].Occupied {
+		t.Fatalf("seat 0 should be human-reserved; got %+v", g.Seats[0])
+	}
+}
+
+func TestBotsRejectedAboveSeatCount(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	_ = createGameWithBody(t, ts, `{"players":2,"bots":3}`, http.StatusBadRequest)
+}
+
+func TestBotPlaysWhenItIsItsTurn(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGameWithBody(t, ts, `{"players":2,"bots":1}`, http.StatusCreated)
+	j := joinGame(t, ts, g.ID, "Alice", nil)
+
+	// The human (Alice, seat 0) plays first. The bot (seat 1) should reply
+	// automatically — the resulting game state must reach turn=0 again with
+	// moveCount=2 (or more if the bot hit a capture chain).
+	mr := postMove(t, ts, g.ID, j.Token, 0, 0, http.StatusOK)
+	if mr.Game.MoveCount != 1 {
+		t.Fatalf("right after human's move want moveCount=1, got %d", mr.Game.MoveCount)
+	}
+	// Wait for the bot's move to land via the GET endpoint (botDelay=0,
+	// so a short poll is enough). The bot driver runs in a goroutine.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		cur := getGameViaHTTP(t, ts, g.ID)
+		if cur.MoveCount >= 2 && cur.Turn == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bot never played; moveCount=%d turn=%d", cur.MoveCount, cur.Turn)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestBotVsBotGamePlaysToCompletion(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGameWithBody(t, ts, `{"players":2,"bots":2}`, http.StatusCreated)
+	if g.Status != StatusPlaying {
+		t.Fatalf("bot-vs-bot game should start in playing, got %s", g.Status)
+	}
+	// Don't wait forever — Gemline games can run long. We just need to see
+	// at least a handful of bot moves to know the chain is going.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cur := getGameViaHTTP(t, ts, g.ID)
+		if cur.MoveCount >= 4 || cur.Status == StatusFinished {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bot-vs-bot didn't progress; moveCount=%d", cur.MoveCount)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // ---- helpers ----
 
 func createGame(t *testing.T, ts *httptest.Server, players int) gameDTO {
@@ -563,6 +636,22 @@ func postDrawRaw(t *testing.T, ts *httptest.Server, gameID, op, token string, wa
 	return resp
 }
 
+func getGameViaHTTP(t *testing.T, ts *httptest.Server, gameID string) gameDTO {
+	t.Helper()
+	resp, err := http.Get(ts.URL + "/api/games/" + gameID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get game: %d", resp.StatusCode)
+	}
+	var g gameDTO
+	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
 
 func decodeGameDTO(t *testing.T, resp *http.Response) gameDTO {
 	t.Helper()

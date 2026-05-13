@@ -39,7 +39,7 @@ func TestPostgresRepo_CreateJoinPlay_RoundTrip(t *testing.T) {
 	// Two separate stores: the first plays a game; the second loads it
 	// fresh from the DB — simulating a server restart with a warm DB.
 	first := NewStore(repo)
-	rec, err := first.Create(ctx, 2, VisibilityPrivate)
+	rec, err := first.Create(ctx, 2, 0, VisibilityPrivate)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestPostgresRepo_CaptureSurvivesReload(t *testing.T) {
 	ctx := context.Background()
 
 	first := NewStore(repo)
-	rec, err := first.Create(ctx, 2, VisibilityPrivate)
+	rec, err := first.Create(ctx, 2, 0, VisibilityPrivate)
 	if err != nil {
 		t.Fatal(err)
 	}

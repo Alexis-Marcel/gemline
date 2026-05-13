@@ -8,6 +8,7 @@ import (
 
 type createGameRequest struct {
 	Players    int    `json:"players"`
+	Bots       int    `json:"bots,omitempty"`
 	Visibility string `json:"visibility,omitempty"` // "public" | "private" (default)
 }
 

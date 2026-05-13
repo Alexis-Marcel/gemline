@@ -76,6 +76,20 @@ func New(log *slog.Logger, store *Store, cfg Config) *Server {
 		rec.Unlock()
 		srv.hub.Broadcast(gameID, eventState(dto))
 	})
+	// Server-driven moves (bots) broadcast a move event with the same shape
+	// HTTP-driven moves use, so clients render captures + the new state
+	// identically whether the move came from a human or a bot.
+	store.SetMoveListener(func(gameID string, mv game.MoveResult) {
+		rec, ok, err := store.Get(context.Background(), gameID)
+		if err != nil || !ok {
+			return
+		}
+		rec.Lock()
+		dto := toGameDTO(rec)
+		rec.Unlock()
+		resp := moveResponse{Game: dto, Captures: toCaptureDTOs(mv.Captures)}
+		srv.hub.Broadcast(gameID, eventMove(resp))
+	})
 	return srv
 }
 
@@ -125,6 +139,10 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "players must be in [2, 6]")
 		return
 	}
+	if req.Bots < 0 || req.Bots > req.Players {
+		writeError(w, http.StatusBadRequest, "bots must be in [0, players]")
+		return
+	}
 	vis := Visibility(req.Visibility)
 	if vis == "" {
 		vis = VisibilityPrivate
@@ -133,7 +151,7 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "visibility must be 'public' or 'private'")
 		return
 	}
-	rec, err := s.store.Create(r.Context(), req.Players, vis)
+	rec, err := s.store.Create(r.Context(), req.Players, req.Bots, vis)
 	if err != nil {
 		s.log.Error("create game", "err", err)
 		writeError(w, http.StatusInternalServerError, "could not create game")

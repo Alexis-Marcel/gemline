@@ -60,10 +60,14 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
-  createGame(players: number, visibility: Visibility = "private") {
+  createGame(
+    players: number,
+    visibility: Visibility = "private",
+    bots: number = 0,
+  ) {
     return request<Game>("/api/games", {
       method: "POST",
-      body: JSON.stringify({ players, visibility }),
+      body: JSON.stringify({ players, visibility, bots }),
     });
   },
 

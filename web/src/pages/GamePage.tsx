@@ -327,6 +327,24 @@ export function GamePage() {
             </p>
           )}
 
+          {game.status === "waiting" &&
+            game.visibility === "private" &&
+            seatsFree > 0 && (
+              <EmptySeatBots
+                game={game}
+                onAddBot={async (seatIndex) => {
+                  try {
+                    const g = await api.addBot(id, seatIndex);
+                    setLocalGame(g);
+                  } catch (err) {
+                    setError(
+                      err instanceof ApiError ? err.message : "Erreur bot",
+                    );
+                  }
+                }}
+              />
+            )}
+
           {game.status === "playing" && creds && (
             <DrawOfferAndActions
               game={game}
@@ -516,6 +534,36 @@ function Banner({ children }: { children: React.ReactNode }) {
   return (
     <div className="rounded-xl border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-200">
       {children}
+    </div>
+  );
+}
+
+// EmptySeatBots renders one "+ Bot" button per empty seat on a private
+// waiting game. Filling the last seat transitions the game to playing — the
+// server side handles that, we just refresh from the response.
+function EmptySeatBots({
+  game,
+  onAddBot,
+}: {
+  game: Game;
+  onAddBot: (seatIndex: number) => Promise<void>;
+}) {
+  const empty = game.seats.filter((s) => !s.occupied);
+  if (empty.length === 0) return null;
+  return (
+    <div className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-900/40 p-3 text-sm">
+      <div className="text-zinc-300">Remplir un siège avec un bot :</div>
+      <div className="flex flex-wrap gap-2">
+        {empty.map((s) => (
+          <button
+            key={s.index}
+            onClick={() => onAddBot(s.index)}
+            className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-200 transition hover:border-amber-400 hover:text-amber-100"
+          >
+            + Bot — siège {s.index + 1} ({gemName(s.color)})
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

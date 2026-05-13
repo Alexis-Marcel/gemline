@@ -62,13 +62,6 @@ export interface Game {
   drawOfferBy: number;
 }
 
-export interface LobbyEntry {
-  gameId: string;
-  players: number;
-  seated: number;
-  createdAt: string;
-}
-
 export interface RematchResponse {
   gameId: string;
   game: Game;

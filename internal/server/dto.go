@@ -8,8 +8,14 @@ import (
 
 type createGameRequest struct {
 	Players    int    `json:"players"`
-	Bots       int    `json:"bots,omitempty"`
 	Visibility string `json:"visibility,omitempty"` // "public" | "private" (default)
+}
+
+// matchmakeRequest is the body of POST /api/games/matchmake. The frontend
+// exposes only the two semantic flavours (1v1 → players=2, multijoueur →
+// players=4) but the API stays open to any 2..6 value for future tweaking.
+type matchmakeRequest struct {
+	Players int `json:"players"`
 }
 
 type joinGameRequest struct {
@@ -66,15 +72,6 @@ type gameDTO struct {
 	// pending, or -1 when no offer is active. Only meaningful while
 	// status == "playing".
 	DrawOfferBy int `json:"drawOfferBy"`
-}
-
-// lobbyEntryDTO is the wire shape of a public-lobby entry. We keep the JSON
-// timestamp as RFC 3339 so the frontend can sort and format with Date directly.
-type lobbyEntryDTO struct {
-	GameID    string `json:"gameId"`
-	Players   int    `json:"players"`
-	Seated    int    `json:"seated"`
-	CreatedAt string `json:"createdAt"`
 }
 
 // rematchResponse is what POST /api/games/{id}/rematch returns: the new game's

@@ -67,39 +67,6 @@ func TestCreateGameRejectsBadVisibility(t *testing.T) {
 	_ = createGameWithBody(t, ts, `{"players":2,"visibility":"unicorn"}`, http.StatusBadRequest)
 }
 
-func TestLobbyListsPublicWaitingOnly(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	_ = createGame(t, ts, 2)                                                            // private
-	pub := createGameWithBody(t, ts, `{"players":2,"visibility":"public"}`, http.StatusCreated)
-
-	entries := listLobby(t, ts)
-	// Private game must not appear; the public one must.
-	for _, e := range entries {
-		if e.GameID == pub.ID {
-			if e.Players != 2 || e.Seated != 0 {
-				t.Fatalf("want public 0/2, got seated=%d players=%d", e.Seated, e.Players)
-			}
-			return
-		}
-	}
-	t.Fatalf("public game %s not found in lobby (entries=%+v)", pub.ID, entries)
-}
-
-func TestLobbyDropsGameOnceItStartsPlaying(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	pub := createGameWithBody(t, ts, `{"players":2,"visibility":"public"}`, http.StatusCreated)
-	_ = joinGame(t, ts, pub.ID, "Alice", nil)
-	_ = joinGame(t, ts, pub.ID, "Bob", nil) // game transitions to playing
-
-	for _, e := range listLobby(t, ts) {
-		if e.GameID == pub.ID {
-			t.Fatalf("playing game must not appear in lobby, got %+v", e)
-		}
-	}
-}
-
 func TestRematchRequiresFinishedGame(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -365,42 +332,58 @@ func TestDrawRejectedInMultiplayer(t *testing.T) {
 	postDrawRaw(t, ts, g.ID, "offer", j1.Token, http.StatusConflict)
 }
 
-func TestBotSeatsFillAtCreate(t *testing.T) {
+func TestAddBotFillsEmptySeat(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := createGameWithBody(t, ts, `{"players":2,"bots":1}`, http.StatusCreated)
-	if len(g.Seats) != 2 {
-		t.Fatalf("want 2 seats, got %d", len(g.Seats))
+	g := createGame(t, ts, 2) // private by default
+	out := postAddBot(t, ts, g.ID, 1, http.StatusOK)
+	if !out.Seats[1].IsBot || !out.Seats[1].Occupied {
+		t.Fatalf("seat 1 should be bot+occupied, got %+v", out.Seats[1])
 	}
-	if !g.Seats[1].IsBot || !g.Seats[1].Occupied {
-		t.Fatalf("seat 1 should be a bot and occupied; got %+v", g.Seats[1])
-	}
-	if g.Seats[0].IsBot || g.Seats[0].Occupied {
-		t.Fatalf("seat 0 should be human-reserved; got %+v", g.Seats[0])
+	if out.Seats[0].Occupied {
+		t.Fatalf("seat 0 must stay empty, got %+v", out.Seats[0])
 	}
 }
 
-func TestBotsRejectedAboveSeatCount(t *testing.T) {
+func TestAddBotRejectedOnPublicGame(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	_ = createGameWithBody(t, ts, `{"players":2,"bots":3}`, http.StatusBadRequest)
+	g := createGameWithBody(t, ts, `{"players":2,"visibility":"public"}`, http.StatusCreated)
+	postAddBotRaw(t, ts, g.ID, 1, http.StatusConflict)
+}
+
+func TestAddBotRejectedOnTakenSeat(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = joinGame(t, ts, g.ID, "Alice", nil)
+	postAddBotRaw(t, ts, g.ID, 0, http.StatusConflict)
+}
+
+func TestAddBotStartsGameWhenLastSeatFilled(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = joinGame(t, ts, g.ID, "Alice", nil)
+	out := postAddBot(t, ts, g.ID, 1, http.StatusOK)
+	if out.Status != StatusPlaying {
+		t.Fatalf("want status playing after bot fills last seat, got %s", out.Status)
+	}
+	// And the bot should eventually play if Alice (seat 0) doesn't move.
+	// We don't assert that here — covered by TestBotPlaysWhenItIsItsTurn.
 }
 
 func TestBotPlaysWhenItIsItsTurn(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := createGameWithBody(t, ts, `{"players":2,"bots":1}`, http.StatusCreated)
+	g := createGame(t, ts, 2)
 	j := joinGame(t, ts, g.ID, "Alice", nil)
+	_ = postAddBot(t, ts, g.ID, 1, http.StatusOK)
 
-	// The human (Alice, seat 0) plays first. The bot (seat 1) should reply
-	// automatically — the resulting game state must reach turn=0 again with
-	// moveCount=2 (or more if the bot hit a capture chain).
 	mr := postMove(t, ts, g.ID, j.Token, 0, 0, http.StatusOK)
 	if mr.Game.MoveCount != 1 {
 		t.Fatalf("right after human's move want moveCount=1, got %d", mr.Game.MoveCount)
 	}
-	// Wait for the bot's move to land via the GET endpoint (botDelay=0,
-	// so a short poll is enough). The bot driver runs in a goroutine.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		cur := getGameViaHTTP(t, ts, g.ID)
@@ -414,25 +397,54 @@ func TestBotPlaysWhenItIsItsTurn(t *testing.T) {
 	}
 }
 
-func TestBotVsBotGamePlaysToCompletion(t *testing.T) {
+func TestMatchmakeCreatesGameWhenNoneOpen(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := createGameWithBody(t, ts, `{"players":2,"bots":2}`, http.StatusCreated)
-	if g.Status != StatusPlaying {
-		t.Fatalf("bot-vs-bot game should start in playing, got %s", g.Status)
+	g := postMatchmake(t, ts, 2, http.StatusOK)
+	if g.Status != StatusWaiting {
+		t.Fatalf("want waiting, got %s", g.Status)
 	}
-	// Don't wait forever — Gemline games can run long. We just need to see
-	// at least a handful of bot moves to know the chain is going.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		cur := getGameViaHTTP(t, ts, g.ID)
-		if cur.MoveCount >= 4 || cur.Status == StatusFinished {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("bot-vs-bot didn't progress; moveCount=%d", cur.MoveCount)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if g.Visibility != VisibilityPublic {
+		t.Fatalf("matchmade games must be public, got %q", g.Visibility)
+	}
+	if len(g.Seats) != 2 {
+		t.Fatalf("want 2 seats, got %d", len(g.Seats))
+	}
+}
+
+func TestMatchmakeReturnsExistingMatchableGame(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	first := postMatchmake(t, ts, 2, http.StatusOK)  // creates a fresh public game
+	_ = joinGame(t, ts, first.ID, "Alice", nil)       // seat 0 taken, seat 1 free
+	second := postMatchmake(t, ts, 2, http.StatusOK)  // should reuse `first`
+	if second.ID != first.ID {
+		t.Fatalf("matchmake should reuse the partially-filled game; got %s vs %s", second.ID, first.ID)
+	}
+}
+
+func TestMatchmakeSkipsFullGames(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	full := postMatchmake(t, ts, 2, http.StatusOK)
+	_ = joinGame(t, ts, full.ID, "Alice", nil)
+	_ = joinGame(t, ts, full.ID, "Bob", nil) // now playing, can't be matched
+	fresh := postMatchmake(t, ts, 2, http.StatusOK)
+	if fresh.ID == full.ID {
+		t.Fatalf("matchmake should not return a full game")
+	}
+}
+
+func TestMatchmakeSeparatesPlayerCounts(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	two := postMatchmake(t, ts, 2, http.StatusOK)
+	four := postMatchmake(t, ts, 4, http.StatusOK)
+	if two.ID == four.ID {
+		t.Fatalf("2-player and 4-player matchmaking must return different games")
+	}
+	if len(two.Seats) != 2 || len(four.Seats) != 4 {
+		t.Fatalf("seat counts mismatched (2P=%d 4P=%d)", len(two.Seats), len(four.Seats))
 	}
 }
 
@@ -538,22 +550,43 @@ func createGameWithBody(t *testing.T, ts *httptest.Server, body string, wantStat
 	return g
 }
 
-func listLobby(t *testing.T, ts *httptest.Server) []lobbyEntryDTO {
+func postAddBot(t *testing.T, ts *httptest.Server, gameID string, seatIdx, wantStatus int) gameDTO {
 	t.Helper()
-	resp, err := http.Get(ts.URL + "/api/games/lobby")
+	return decodeGameDTO(t, postAddBotRaw(t, ts, gameID, seatIdx, wantStatus))
+}
+
+func postAddBotRaw(t *testing.T, ts *httptest.Server, gameID string, seatIdx, wantStatus int) *http.Response {
+	t.Helper()
+	url := ts.URL + "/api/games/" + gameID + "/seats/" + itoa(seatIdx) + "/bot"
+	resp, err := http.Post(url, "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != wantStatus {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("addBot: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
+	}
+	return resp
+}
+
+func postMatchmake(t *testing.T, ts *httptest.Server, players, wantStatus int) gameDTO {
+	t.Helper()
+	body := strings.NewReader(`{"players":` + itoa(players) + `}`)
+	resp, err := http.Post(ts.URL+"/api/games/matchmake", "application/json", body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != wantStatus {
 		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("lobby: status=%d body=%s", resp.StatusCode, b)
+		t.Fatalf("matchmake: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
 	}
-	var out []lobbyEntryDTO
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	var g gameDTO
+	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
 		t.Fatal(err)
 	}
-	return out
+	return g
 }
 
 func postRematch(t *testing.T, ts *httptest.Server, id string, wantStatus int) rematchResponse {

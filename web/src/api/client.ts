@@ -59,12 +59,23 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
-  // createGame always creates a private game from the frontend; public games
-  // are spawned implicitly by matchmake() when no candidate exists.
-  createGame(players: number) {
-    return request<Game>("/api/games", {
+  // createGame creates a private game and auto-joins the caller. Public
+  // games are spawned implicitly by matchmake() — this endpoint is now
+  // private-only on the server. `name` is required for anonymous callers;
+  // authenticated users may leave it undefined (server uses profile name).
+  createGame(players: number, name?: string) {
+    const body: Record<string, unknown> = { players, visibility: "private" };
+    if (name) body.name = name;
+    return request<JoinResponse>("/api/games", {
       method: "POST",
-      body: JSON.stringify({ players, visibility: "private" }),
+      body: JSON.stringify(body),
+    });
+  },
+
+  startGame(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/start`, {
+      method: "POST",
+      playerToken,
     });
   },
 

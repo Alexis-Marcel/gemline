@@ -7,8 +7,9 @@ import { UserNav } from "../components/UserNav";
 import { saveCredentials } from "../lib/auth";
 
 const MULTIPLAYER_DEFAULT_PLAYERS = 4;
+const PRIVATE_SEATS = 6;
 
-type Mode = "menu" | "private";
+type Mode = "menu" | "private-name";
 
 export function HomePage() {
   const navigate = useNavigate();
@@ -16,13 +17,11 @@ export function HomePage() {
   const [busy, setBusy] = useState<"" | "1v1" | "multi" | "private">("");
   const [joinId, setJoinId] = useState("");
   const [mode, setMode] = useState<Mode>("menu");
-  const [privatePlayers, setPrivatePlayers] = useState(2);
+  const [hostName, setHostName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   async function matchmake(players: number, key: "1v1" | "multi") {
     if (!user) {
-      // Matchmaking needs a stable identity (ratings, name). Send anonymous
-      // users to login with a return-to so they land back here after.
       navigate("/login?next=/");
       return;
     }
@@ -30,8 +29,6 @@ export function HomePage() {
     setError(null);
     try {
       const res = await api.matchmake(players);
-      // We're seated atomically — persist the seat token so the GamePage
-      // shows us as a player, not a spectator, on first render.
       saveCredentials(res.game.id, {
         token: res.token,
         seatIndex: res.seat.index,
@@ -49,18 +46,40 @@ export function HomePage() {
     }
   }
 
-  async function handleCreatePrivate(e: FormEvent) {
-    e.preventDefault();
+  async function createPrivate(name?: string) {
     setBusy("private");
     setError(null);
     try {
-      const game = await api.createGame(privatePlayers);
-      navigate(`/game/${game.id}`);
+      const res = await api.createGame(PRIVATE_SEATS, name);
+      saveCredentials(res.game.id, {
+        token: res.token,
+        seatIndex: res.seat.index,
+        name: res.seat.name,
+      });
+      navigate(`/game/${res.game.id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Erreur création");
     } finally {
       setBusy("");
     }
+  }
+
+  function handlePrivateClick() {
+    setError(null);
+    if (user) {
+      // Authenticated — the server pulls the display name from the profile.
+      createPrivate();
+      return;
+    }
+    // Anonymous — ask for a name once, here, so the GamePage never has to.
+    setMode("private-name");
+  }
+
+  function handlePrivateNameSubmit(e: FormEvent) {
+    e.preventDefault();
+    const name = hostName.trim();
+    if (!name) return;
+    createPrivate(name);
   }
 
   function handleJoin(e: FormEvent) {
@@ -108,45 +127,50 @@ export function HomePage() {
         <h2 className="text-sm font-medium uppercase tracking-wider text-zinc-500">
           Partie privée
         </h2>
-        {mode === "menu" ? (
-          <BigAction
-            label="Créer une partie privée"
-            sub="Tu partages l'URL avec tes invités. Tu peux ajouter des bots sur les sièges vides."
-            onClick={() => setMode("private")}
-          />
-        ) : (
+        {mode === "private-name" ? (
           <form
-            onSubmit={handleCreatePrivate}
+            onSubmit={handlePrivateNameSubmit}
             className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
           >
             <label className="block text-sm text-zinc-400">
-              Nombre de sièges
-              <select
+              Ton nom
+              <input
+                autoFocus
                 className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
-                value={privatePlayers}
-                onChange={(e) => setPrivatePlayers(Number(e.target.value))}
-              >
-                {[2, 3, 4, 5, 6].map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
+                placeholder="Alice"
+                value={hostName}
+                onChange={(e) => setHostName(e.target.value)}
+                required
+              />
             </label>
             <div className="flex gap-2">
-              <Button type="submit" disabled={busy === "private"} className="flex-1">
+              <Button
+                type="submit"
+                disabled={busy === "private" || !hostName.trim()}
+                className="flex-1"
+              >
                 {busy === "private" ? "Création…" : "Créer"}
               </Button>
               <Button
                 type="button"
                 variant="secondary"
-                onClick={() => setMode("menu")}
+                onClick={() => {
+                  setMode("menu");
+                  setHostName("");
+                }}
                 className="flex-1"
               >
                 Annuler
               </Button>
             </div>
           </form>
+        ) : (
+          <BigAction
+            label="Créer une partie privée"
+            sub="Tu joues d'abord, puis tu partages l'URL et lances quand tu veux."
+            onClick={handlePrivateClick}
+            loading={busy === "private"}
+          />
         )}
       </section>
 

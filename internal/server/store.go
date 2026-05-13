@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alexis/gemline/internal/ai"
+	"github.com/alexis/gemline/internal/elo"
 	"github.com/alexis/gemline/internal/game"
 )
 
@@ -298,6 +299,7 @@ func (s *Store) handleDisconnectTimeout(gameID string, seatIndex int) {
 	s.clocks.Cancel(gameID)
 	s.presence.CancelGame(gameID)
 	_ = s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind)
+	s.maybeApplyRating(rec)
 	if s.onState != nil {
 		s.onState(gameID)
 	}
@@ -339,6 +341,7 @@ func (s *Store) handleFlag(gameID string) {
 		// Persistence failed but the in-memory state is the truth.
 		// We do not retry; an admin can inspect the row if needed.
 	}
+	s.maybeApplyRating(rec)
 	if s.onState != nil {
 		s.onState(gameID)
 	}
@@ -700,6 +703,12 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 	// schedule its move. We can't trigger it synchronously here: the bot's
 	// PlayMove takes rec.Lock(), which is held by the deferred Unlock above.
 	defer s.maybeScheduleBot(rec)
+	// If this move ended the game, kick off the rating update. Goroutine
+	// rather than defer because the defer LIFO order would run it BEFORE
+	// the rec.Unlock — and maybeApplyRating itself re-acquires rec.Lock.
+	if rec.State.IsOver() {
+		go s.maybeApplyRating(rec)
+	}
 	return res, rec, nil
 }
 
@@ -849,6 +858,7 @@ func (s *Store) Resign(ctx context.Context, gameID, token string) (*GameRecord, 
 	if hadOffer && s.onDrawOffer != nil {
 		s.onDrawOffer(gameID, -1)
 	}
+	s.maybeApplyRating(rec)
 	if s.onState != nil {
 		s.onState(gameID)
 	}
@@ -951,6 +961,7 @@ func (s *Store) AcceptDraw(ctx context.Context, gameID, token string) (*GameReco
 	if s.onDrawOffer != nil {
 		s.onDrawOffer(gameID, -1)
 	}
+	s.maybeApplyRating(rec)
 	if s.onState != nil {
 		s.onState(gameID)
 	}
@@ -1072,6 +1083,80 @@ func (s *Store) playBotTurnIfNeeded(rec *GameRecord) {
 	// Continue the chain — if the next active player is also a bot, this
 	// schedules another move; if it's a human's turn, this is a no-op.
 	s.maybeScheduleBot(rec)
+}
+
+// maybeApplyRating is called every time a game's Status flips to Finished.
+// It runs the Elo update asynchronously: eligibility is checked under the
+// rec.Lock, then the persistence happens in its own goroutine because
+// ApplyRatedGame opens a DB transaction we don't want serialised behind the
+// game lock. Idempotency lives in the repo (UPDATE … WHERE rated_at IS NULL),
+// so calling this twice from different code paths is safe.
+//
+// Eligible games: visibility=public AND exactly 2 seats AND neither seat is
+// a bot AND both seats have a user_id. Anything else (private games, bot
+// games, multijoueur, anonymous play) is ignored.
+func (s *Store) maybeApplyRating(rec *GameRecord) {
+	rec.Lock()
+	if rec.Status != StatusFinished {
+		rec.Unlock()
+		return
+	}
+	if rec.Visibility != VisibilityPublic || len(rec.Seats) != 2 {
+		rec.Unlock()
+		return
+	}
+	a, b := rec.Seats[0], rec.Seats[1]
+	if a.IsBot || b.IsBot || a.UserID == "" || b.UserID == "" {
+		rec.Unlock()
+		return
+	}
+	winnerColor := rec.State.Winner
+	gameID := rec.ID
+	rec.Unlock()
+
+	go func() {
+		ctx := context.Background()
+		ratings, err := s.repo.RatingsFor(ctx, []string{a.UserID, b.UserID})
+		if err != nil || len(ratings) != 2 {
+			return
+		}
+		ratingA := ratings[0].Rating
+		if ratings[0].Games == 0 {
+			ratingA = elo.DefaultRating
+		}
+		ratingB := ratings[1].Rating
+		if ratings[1].Games == 0 {
+			ratingB = elo.DefaultRating
+		}
+
+		var outcomeA, outcomeB elo.Outcome
+		var resultA, resultB rune
+		switch winnerColor {
+		case a.Color:
+			outcomeA, outcomeB = elo.Win, elo.Loss
+			resultA, resultB = 'W', 'L'
+		case b.Color:
+			outcomeA, outcomeB = elo.Loss, elo.Win
+			resultA, resultB = 'L', 'W'
+		default:
+			outcomeA, outcomeB = elo.Draw, elo.Draw
+			resultA, resultB = 'D', 'D'
+		}
+
+		updates := []RatingUpdate{
+			{UserID: a.UserID, NewRating: elo.Update(ratingA, ratingB, outcomeA), Result: resultA},
+			{UserID: b.UserID, NewRating: elo.Update(ratingB, ratingA, outcomeB), Result: resultB},
+		}
+		_, _ = s.repo.ApplyRatedGame(ctx, gameID, updates)
+	}()
+}
+
+// Leaderboard surfaces the top-rated players, joined with their profile name.
+func (s *Store) Leaderboard(ctx context.Context, limit int) ([]LeaderboardEntry, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	return s.repo.Leaderboard(ctx, limit)
 }
 
 func firstFreeSeat(seats []Seat) int {

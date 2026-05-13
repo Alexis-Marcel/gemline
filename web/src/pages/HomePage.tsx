@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import { Button } from "../components/Button";
 import { UserNav } from "../components/UserNav";
@@ -152,6 +152,12 @@ export function HomePage() {
           {error}
         </p>
       )}
+
+      <footer className="pt-2 text-center text-xs text-zinc-500">
+        <Link to="/leaderboard" className="hover:text-amber-300">
+          Voir le classement →
+        </Link>
+      </footer>
     </div>
   );
 }

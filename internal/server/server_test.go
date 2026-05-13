@@ -448,6 +448,26 @@ func TestMatchmakeSeparatesPlayerCounts(t *testing.T) {
 	}
 }
 
+func TestLeaderboardEmptyByDefault(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/api/leaderboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var out []LeaderboardEntry
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("hermetic server has no DB → empty leaderboard, got %d entries", len(out))
+	}
+}
+
 // ---- helpers ----
 
 func createGame(t *testing.T, ts *httptest.Server, players int) gameDTO {

@@ -46,8 +46,11 @@ var (
 	ErrCannotAcceptOwnDrawOffer = errors.New("the offering player cannot accept their own draw offer")
 	ErrDrawAlreadyOffered = errors.New("a draw is already being offered")
 	ErrDrawUnsupported  = errors.New("draw is only supported in 2-player games")
-	ErrBotsOnPublic     = errors.New("bots cannot be added to public games")
-	ErrBadSeatIndex     = errors.New("seat index out of range")
+	ErrBotsOnPublic      = errors.New("bots cannot be added to public games")
+	ErrAnonymousOnPublic = errors.New("public games require authentication to join")
+	ErrBadSeatIndex      = errors.New("seat index out of range")
+	ErrPublicCannotStart = errors.New("public games start automatically; manual start is only for private games")
+	ErrTooFewToStart     = errors.New("at least 2 seats must be occupied to start")
 )
 
 // Seat is a play slot in a game. Once claimed, only the SHA-256 of the
@@ -606,6 +609,12 @@ func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx i
 	if rec.Status != StatusWaiting {
 		return nil, "", ErrNotPlaying
 	}
+	// Public games are matchmaking-only. Anonymous joiners would never have
+	// a stable identity to rate against, so we reject them here rather than
+	// silently producing an unrated game from a public slot.
+	if rec.Visibility == VisibilityPublic && userID == "" {
+		return nil, "", ErrAnonymousOnPublic
+	}
 
 	idx := seatIdx
 	if idx < 0 {
@@ -717,6 +726,76 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 // stuffed by whoever holds the URL. When the placement fills the last seat
 // the game transitions to playing and (if seat 0 is a bot) its first move
 // is scheduled.
+// Start finalises a private game in `waiting`: unoccupied seats are dropped
+// (they stay empty — no bot fillers, the host decides upfront whether to
+// add bots before clicking Start), the engine is rebuilt with the remaining
+// players' colours, status flips to `playing`, and the clock starts. The
+// caller's seat token authorises the start; the trust model is "you have
+// the private URL = you can decide to start".
+//
+// Disallowed:
+//   - Public games (matchmaking owns those — they auto-start once the
+//     opponent arrives).
+//   - Games with fewer than 2 occupied seats (no opponent to play against).
+func (s *Store) Start(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	if rec.Visibility != VisibilityPrivate {
+		rec.Unlock()
+		return rec, ErrPublicCannotStart
+	}
+	if rec.Status != StatusWaiting {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if _, ok := rec.SeatByToken(token); !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	occupied := make([]Seat, 0, len(rec.Seats))
+	for _, st := range rec.Seats {
+		if st.Occupied {
+			occupied = append(occupied, st)
+		}
+	}
+	if len(occupied) < 2 {
+		rec.Unlock()
+		return rec, ErrTooFewToStart
+	}
+
+	// Trim: the new seats array is just the previously-occupied seats, with
+	// fresh contiguous indices 0..N-1. We keep each seat's original colour
+	// so clients that remembered "I'm Bleu" still find themselves.
+	colors := make([]game.Color, len(occupied))
+	for i := range occupied {
+		occupied[i].Index = i
+		colors[i] = occupied[i].Color
+	}
+	rec.Seats = occupied
+	// Rebuild the engine for the new player count. Safe because the game
+	// has no moves yet (we just enforced Status == Waiting).
+	rec.State = game.NewGame(colors, rec.State.Config)
+	rec.Status = StatusPlaying
+	rec.State.StartClock(time.Now())
+	s.armClock(rec)
+	status := rec.Status
+	rec.Unlock()
+
+	if err := s.repo.FinalizeStart(ctx, gameID, status); err != nil {
+		// In-memory truth wins (same policy as other finalize paths).
+		_ = err
+	}
+	s.maybeScheduleBot(rec)
+	return rec, nil
+}
+
 func (s *Store) AddBot(ctx context.Context, gameID string, seatIdx int) (*GameRecord, error) {
 	rec, ok, err := s.Get(ctx, gameID)
 	if err != nil {
@@ -774,10 +853,11 @@ func (s *Store) AddBot(ctx context.Context, gameID string, seatIdx int) (*GameRe
 }
 
 // Matchmake returns a public waiting game of the requested player count
-// with at least one free seat, creating a fresh public game if no such
-// candidate exists. The oldest matching game wins — newer candidates wait
-// their turn so solo joiners don't starve.
-func (s *Store) Matchmake(ctx context.Context, players int) (*GameRecord, error) {
+// with at least one free seat that `excludeUserID` is *not* already seated
+// in. The oldest matching game wins — newer candidates wait their turn so
+// solo joiners don't starve. If no candidate matches, a fresh public game
+// is created.
+func (s *Store) Matchmake(ctx context.Context, players int, excludeUserID string) (*GameRecord, error) {
 	// Pull a generous slice of candidates and filter Go-side. The repo path
 	// returns most-recent first; we iterate in reverse to favour the oldest.
 	candidates, err := s.repo.LobbyGames(ctx, 50)
@@ -805,15 +885,61 @@ func (s *Store) Matchmake(ctx context.Context, players int) (*GameRecord, error)
 			continue
 		}
 		// Re-check status under the lock: another join may have filled the
-		// last seat between the candidate snapshot and us reaching it.
+		// last seat between the candidate snapshot and us reaching it. Also
+		// skip games where the requester is already seated — re-clicking
+		// "Find match" should land us somewhere new, not in the game we're
+		// already waiting in.
 		rec.Lock()
-		stillJoinable := rec.Status == StatusWaiting && !rec.AllSeated()
+		joinable := rec.Status == StatusWaiting && !rec.AllSeated()
+		if joinable && excludeUserID != "" {
+			for _, seat := range rec.Seats {
+				if seat.UserID == excludeUserID {
+					joinable = false
+					break
+				}
+			}
+		}
 		rec.Unlock()
-		if stillJoinable {
+		if joinable {
 			return rec, nil
 		}
 	}
 	return s.Create(ctx, players, VisibilityPublic)
+}
+
+// LeaveSeat frees the seat behind `token` and broadcasts the new state.
+// Only allowed while the game is still in `waiting`: leaving a game in play
+// is what Resign is for. The seat's name/user/bot/token are all cleared so a
+// fresh join can reuse the slot.
+func (s *Store) LeaveSeat(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+	rec.Lock()
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.Status != StatusWaiting {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	seatIdx := seat.Index
+	rec.Seats[seatIdx] = Seat{
+		Index: seatIdx,
+		Color: seat.Color,
+	}
+	if err := s.repo.UpdateSeat(ctx, gameID, &rec.Seats[seatIdx], rec.Status); err != nil {
+		rec.Unlock()
+		return rec, err
+	}
+	rec.Unlock()
+	return rec, nil
 }
 
 // Resign ends a game in progress by recording that the seat behind `token`

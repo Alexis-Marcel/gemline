@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import type { Color, Game, Replay, WinKind } from "../api/types";
 import {
@@ -21,6 +21,7 @@ import { cellsAtStep, lastMoveAt } from "../lib/replay";
 
 export function GamePage() {
   const { id = "" } = useParams();
+  const navigate = useNavigate();
   const {
     game: liveGame,
     status: wsStatus,
@@ -30,6 +31,7 @@ export function GamePage() {
   const [name, setName] = useState("");
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rematching, setRematching] = useState(false);
 
   const [replay, setReplay] = useState<Replay | null>(null);
   const [replayStep, setReplayStep] = useState(0);
@@ -141,6 +143,23 @@ export function GamePage() {
       setError(err instanceof ApiError ? err.message : "Erreur inconnue");
     } finally {
       setJoining(false);
+    }
+  }
+
+  // If a rematch was created for this game (either by us or someone else),
+  // the server exposes the linked ID on the snapshot. Offer a direct jump.
+  const rematchLink = game?.rematchGameId ?? null;
+
+  async function handleRematch() {
+    setRematching(true);
+    setError(null);
+    try {
+      const res = await api.rematch(id);
+      navigate(`/game/${res.gameId}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Erreur revanche");
+    } finally {
+      setRematching(false);
     }
   }
 
@@ -256,9 +275,22 @@ export function GamePage() {
           )}
 
           {game.status === "finished" && (
-            <Banner>
-              🏆 {gemName(game.winner)} gagne par {winKindLabel(game.winKind)}
-            </Banner>
+            <>
+              <Banner>
+                🏆 {gemName(game.winner)} gagne par {winKindLabel(game.winKind)}
+              </Banner>
+              <button
+                onClick={handleRematch}
+                disabled={rematching}
+                className="rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
+              >
+                {rematching
+                  ? "Création…"
+                  : rematchLink
+                    ? "Aller à la revanche"
+                    : "Revanche"}
+              </button>
+            </>
           )}
 
           {inReplay ? (
@@ -440,3 +472,4 @@ function winKindLabel(k: WinKind): string {
       return "?";
   }
 }
+

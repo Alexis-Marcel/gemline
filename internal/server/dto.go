@@ -7,7 +7,8 @@ import (
 )
 
 type createGameRequest struct {
-	Players int `json:"players"`
+	Players    int    `json:"players"`
+	Visibility string `json:"visibility,omitempty"` // "public" | "private" (default)
 }
 
 type joinGameRequest struct {
@@ -56,6 +57,26 @@ type gameDTO struct {
 	// against the active player's TimeRemainingMs. Empty for not-yet-started
 	// games (status = "waiting").
 	TurnStartedAt string `json:"turnStartedAt,omitempty"`
+
+	Visibility    Visibility `json:"visibility"`
+	RematchGameID string     `json:"rematchGameId,omitempty"`
+}
+
+// lobbyEntryDTO is the wire shape of a public-lobby entry. We keep the JSON
+// timestamp as RFC 3339 so the frontend can sort and format with Date directly.
+type lobbyEntryDTO struct {
+	GameID    string `json:"gameId"`
+	Players   int    `json:"players"`
+	Seated    int    `json:"seated"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// rematchResponse is what POST /api/games/{id}/rematch returns: the new game's
+// full state, plus the new ID broken out so the frontend can navigate without
+// needing to crack open the game payload.
+type rematchResponse struct {
+	GameID string  `json:"gameId"`
+	Game   gameDTO `json:"game"`
 }
 
 type thresholdsDTO struct {
@@ -126,18 +147,24 @@ func toGameDTO(rec *GameRecord) gameDTO {
 	if !s.TurnStartedAt.IsZero() {
 		turnStartedAt = s.TurnStartedAt.UTC().Format(time.RFC3339Nano)
 	}
+	vis := rec.Visibility
+	if vis == "" {
+		vis = VisibilityPrivate
+	}
 	return gameDTO{
 		ID:            rec.ID,
 		Status:        rec.Status,
 		BoardSide:     s.Board.Side,
 		Cells:         s.Board.Cells,
 		TurnStartedAt: turnStartedAt,
-		Players:   players,
-		Seats:     seats,
-		Turn:      s.Turn,
-		Winner:    s.Winner,
-		WinKind:   s.WinKind,
-		MoveCount: len(s.History),
+		Players:       players,
+		Seats:         seats,
+		Turn:          s.Turn,
+		Winner:        s.Winner,
+		WinKind:       s.WinKind,
+		MoveCount:     len(s.History),
+		Visibility:    vis,
+		RematchGameID: rec.RematchGameID,
 		Thresholds: thresholdsDTO{
 			CapturePairsWin: s.Config.CapturePairsWin,
 			Align4ToWin:     s.Config.Align4ToWin,

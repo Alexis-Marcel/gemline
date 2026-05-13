@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -21,12 +22,24 @@ const (
 	StatusFinished Status = "finished"
 )
 
+// Visibility decides whether a game shows up in the public lobby. Private
+// games are still joinable by anyone holding the URL — visibility is purely
+// about *discovery*, not access control.
+type Visibility string
+
+const (
+	VisibilityPrivate Visibility = "private"
+	VisibilityPublic  Visibility = "public"
+)
+
 var (
-	ErrGameNotFound = errors.New("game not found")
-	ErrSeatTaken    = errors.New("seat already taken")
-	ErrNoFreeSeat   = errors.New("no free seat")
-	ErrBadToken     = errors.New("invalid player token")
-	ErrNotPlaying   = errors.New("game is not in playing state")
+	ErrGameNotFound  = errors.New("game not found")
+	ErrSeatTaken     = errors.New("seat already taken")
+	ErrNoFreeSeat    = errors.New("no free seat")
+	ErrBadToken      = errors.New("invalid player token")
+	ErrNotPlaying    = errors.New("game is not in playing state")
+	ErrNotFinished   = errors.New("game is not finished")
+	ErrBadVisibility = errors.New("invalid visibility")
 )
 
 // Seat is a play slot in a game. Once claimed, only the SHA-256 of the
@@ -44,12 +57,14 @@ type Seat struct {
 }
 
 type GameRecord struct {
-	mu        sync.Mutex
-	ID        string
-	State     *game.GameState
-	Seats     []Seat
-	Status    Status
-	CreatedAt time.Time
+	mu            sync.Mutex
+	ID            string
+	State         *game.GameState
+	Seats         []Seat
+	Status        Status
+	Visibility    Visibility
+	RematchGameID string // ID of the rematch game spawned from this one, if any
+	CreatedAt     time.Time
 }
 
 func (r *GameRecord) Lock()   { r.mu.Lock() }
@@ -94,8 +109,8 @@ type Store struct {
 	presence *presenceManager
 	seatRefs map[string]map[int]int // gameID → seatIndex → live connections
 
-	onState    func(gameID string)                                // state changed (forfeit, etc.)
-	onPresence func(gameID string, seatIndex int, online bool)    // presence transition
+	onState    func(gameID string)                             // state changed (forfeit, etc.)
+	onPresence func(gameID string, seatIndex int, online bool) // presence transition
 }
 
 func NewStore(repo Repository) *Store {
@@ -281,8 +296,16 @@ func (s *Store) handleFlag(gameID string) {
 	}
 }
 
-// Create initializes a game, persists it, and caches it in memory.
-func (s *Store) Create(ctx context.Context, numPlayers int) (*GameRecord, error) {
+// Create initializes a game, persists it, and caches it in memory. Visibility
+// controls whether the game is discoverable through the public lobby; passing
+// the zero value defaults to private.
+func (s *Store) Create(ctx context.Context, numPlayers int, vis Visibility) (*GameRecord, error) {
+	if vis == "" {
+		vis = VisibilityPrivate
+	}
+	if vis != VisibilityPrivate && vis != VisibilityPublic {
+		return nil, ErrBadVisibility
+	}
 	colors := make([]game.Color, numPlayers)
 	seats := make([]Seat, numPlayers)
 	for i := 0; i < numPlayers; i++ {
@@ -290,11 +313,12 @@ func (s *Store) Create(ctx context.Context, numPlayers int) (*GameRecord, error)
 		seats[i] = Seat{Index: i, Color: colors[i]}
 	}
 	rec := &GameRecord{
-		ID:        newID(),
-		State:     game.NewGame(colors, game.DefaultConfig(numPlayers)),
-		Seats:     seats,
-		Status:    StatusWaiting,
-		CreatedAt: time.Now(),
+		ID:         newID(),
+		State:      game.NewGame(colors, game.DefaultConfig(numPlayers)),
+		Seats:      seats,
+		Status:     StatusWaiting,
+		Visibility: vis,
+		CreatedAt:  time.Now(),
 	}
 	if err := s.repo.SaveNewGame(ctx, rec); err != nil {
 		return nil, err
@@ -302,6 +326,165 @@ func (s *Store) Create(ctx context.Context, numPlayers int) (*GameRecord, error)
 	s.mu.Lock()
 	s.games[rec.ID] = rec
 	s.mu.Unlock()
+	return rec, nil
+}
+
+// LobbyEntry is a slimmed-down view of a public waiting game, returned by the
+// lobby endpoint. We deliberately don't include seat tokens or chat history —
+// the lobby is open data.
+type LobbyEntry struct {
+	GameID    string    `json:"gameId"`
+	Players   int       `json:"players"`
+	Seated    int       `json:"seated"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// ListLobby returns the most recently created public waiting games, capped at
+// limit. The repo (when DB-backed) is the source of truth and returns an
+// empty-but-non-nil slice for "no public waiting games"; a nil return signals
+// "no persistence wired up at all" (noopRepo) — in that case we fall back to
+// scanning the in-memory cache so single-process hermetic runs still work.
+func (s *Store) ListLobby(ctx context.Context, limit int) ([]LobbyEntry, error) {
+	entries, err := s.repo.LobbyGames(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	if entries != nil {
+		return entries, nil
+	}
+	return s.scanLobbyCache(limit), nil
+}
+
+func (s *Store) scanLobbyCache(limit int) []LobbyEntry {
+	s.mu.Lock()
+	candidates := make([]*GameRecord, 0, len(s.games))
+	for _, rec := range s.games {
+		candidates = append(candidates, rec)
+	}
+	s.mu.Unlock()
+
+	out := make([]LobbyEntry, 0)
+	for _, rec := range candidates {
+		rec.Lock()
+		if rec.Status == StatusWaiting && rec.Visibility == VisibilityPublic {
+			seated := 0
+			for _, st := range rec.Seats {
+				if st.Occupied {
+					seated++
+				}
+			}
+			out = append(out, LobbyEntry{
+				GameID:    rec.ID,
+				Players:   len(rec.Seats),
+				Seated:    seated,
+				CreatedAt: rec.CreatedAt,
+			})
+		}
+		rec.Unlock()
+	}
+	// Most recent first — same ordering as the repo path.
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// Rematch creates a fresh game with the same player count, config and
+// visibility as `originalID`, and links the two via rematch_game_id. The
+// operation is idempotent: a second caller after the link is set is sent to
+// the same rematch game. The original game must be finished.
+func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, error) {
+	orig, ok, err := s.Get(ctx, originalID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	orig.Lock()
+	if orig.Status != StatusFinished {
+		orig.Unlock()
+		return nil, ErrNotFinished
+	}
+	if linked := orig.RematchGameID; linked != "" {
+		orig.Unlock()
+		// Another caller already created the rematch — fetch and return it.
+		rec, ok, err := s.Get(ctx, linked)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			// The link points to a game that no longer exists (rare —
+			// ON DELETE SET NULL handles the FK at the DB layer, but the
+			// in-memory copy could still hold a stale ID). Treat as
+			// "no rematch yet" and create a new one.
+		} else {
+			return rec, nil
+		}
+	}
+	numPlayers := len(orig.Seats)
+	vis := orig.Visibility
+	orig.Unlock()
+
+	// Build the new game using the same shape as Create. We don't call Create
+	// directly because we want to atomically write the rematch_game_id link on
+	// the original game alongside the new game's row.
+	colors := make([]game.Color, numPlayers)
+	seats := make([]Seat, numPlayers)
+	for i := 0; i < numPlayers; i++ {
+		colors[i] = game.Color(i + 1)
+		seats[i] = Seat{Index: i, Color: colors[i]}
+	}
+	rec := &GameRecord{
+		ID:         newID(),
+		State:      game.NewGame(colors, game.DefaultConfig(numPlayers)),
+		Seats:      seats,
+		Status:     StatusWaiting,
+		Visibility: vis,
+		CreatedAt:  time.Now(),
+	}
+	if err := s.repo.SaveNewGame(ctx, rec); err != nil {
+		return nil, err
+	}
+
+	// Link original → new. If two goroutines raced past the early-out above,
+	// the repo's SetRematchLink resolves the race: the loser observes that the
+	// link is already set and returns the winner's game ID.
+	winnerID, err := s.repo.SetRematchLink(ctx, originalID, rec.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if existing, found := s.games[winnerID]; found && winnerID != rec.ID {
+		// Lost the race — discard the freshly-built record and return the
+		// winner's. The orphaned `rec` row remains in the DB but is unlinked;
+		// it'll age out via normal cleanup paths.
+		s.mu.Unlock()
+		orig.Lock()
+		orig.RematchGameID = winnerID
+		orig.Unlock()
+		return existing, nil
+	}
+	if winnerID == rec.ID {
+		s.games[rec.ID] = rec
+	}
+	s.mu.Unlock()
+
+	orig.Lock()
+	orig.RematchGameID = winnerID
+	orig.Unlock()
+
+	if winnerID != rec.ID {
+		// Race lost but the cache didn't have the winner — fetch through Get.
+		winner, _, err := s.Get(ctx, winnerID)
+		if err != nil {
+			return nil, err
+		}
+		return winner, nil
+	}
 	return rec, nil
 }
 

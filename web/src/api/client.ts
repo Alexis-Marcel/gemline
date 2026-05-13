@@ -2,12 +2,15 @@ import { supabase } from "./supabase";
 import type {
   Game,
   JoinResponse,
+  LobbyEntry,
   Message,
   MoveResponse,
   Profile,
+  RematchResponse,
   Replay,
   UserGame,
   UserStats,
+  Visibility,
 } from "./types";
 
 class ApiError extends Error {
@@ -57,10 +60,20 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
-  createGame(players: number) {
+  createGame(players: number, visibility: Visibility = "private") {
     return request<Game>("/api/games", {
       method: "POST",
-      body: JSON.stringify({ players }),
+      body: JSON.stringify({ players, visibility }),
+    });
+  },
+
+  listLobby() {
+    return request<LobbyEntry[]>("/api/games/lobby");
+  },
+
+  rematch(id: string) {
+    return request<RematchResponse>(`/api/games/${id}/rematch`, {
+      method: "POST",
     });
   },
 

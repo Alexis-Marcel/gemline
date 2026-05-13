@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
+import type { LobbyEntry, Visibility } from "../api/types";
 import { Button } from "../components/Button";
 import { UserNav } from "../components/UserNav";
 
@@ -9,6 +10,7 @@ export function HomePage() {
   const [creating, setCreating] = useState(false);
   const [joinId, setJoinId] = useState("");
   const [players, setPlayers] = useState(2);
+  const [visibility, setVisibility] = useState<Visibility>("private");
   const [error, setError] = useState<string | null>(null);
 
   async function handleCreate(e: FormEvent) {
@@ -16,7 +18,7 @@ export function HomePage() {
     setCreating(true);
     setError(null);
     try {
-      const game = await api.createGame(players);
+      const game = await api.createGame(players, visibility);
       navigate(`/game/${game.id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Erreur inconnue");
@@ -66,6 +68,25 @@ export function HomePage() {
             ))}
           </select>
         </label>
+
+        <fieldset className="grid grid-cols-2 gap-2 text-xs">
+          <legend className="sr-only">Visibilité</legend>
+          <VisibilityChoice
+            value="private"
+            current={visibility}
+            onChange={setVisibility}
+            label="Privée"
+            hint="Partage l'URL aux invités"
+          />
+          <VisibilityChoice
+            value="public"
+            current={visibility}
+            onChange={setVisibility}
+            label="Publique"
+            hint="Visible dans le lobby"
+          />
+        </fieldset>
+
         <Button type="submit" disabled={creating} className="w-full">
           {creating ? "Création…" : "Créer"}
         </Button>
@@ -90,11 +111,112 @@ export function HomePage() {
         </Button>
       </form>
 
+      <Lobby />
+
       {error && (
         <p className="rounded-md border border-red-900/50 bg-red-950/30 p-3 text-sm text-red-300">
           {error}
         </p>
       )}
     </div>
+  );
+}
+
+function VisibilityChoice({
+  value,
+  current,
+  onChange,
+  label,
+  hint,
+}: {
+  value: Visibility;
+  current: Visibility;
+  onChange: (v: Visibility) => void;
+  label: string;
+  hint: string;
+}) {
+  const active = current === value;
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(value)}
+      className={
+        "rounded-md border px-3 py-2 text-left transition " +
+        (active
+          ? "border-amber-400 bg-amber-400/10 text-amber-100"
+          : "border-zinc-700 bg-zinc-950 text-zinc-300 hover:border-zinc-500")
+      }
+      aria-pressed={active}
+    >
+      <div className="text-sm font-medium">{label}</div>
+      <div className="text-[11px] text-zinc-400">{hint}</div>
+    </button>
+  );
+}
+
+function Lobby() {
+  const navigate = useNavigate();
+  const [entries, setEntries] = useState<LobbyEntry[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const list = await api.listLobby();
+      setEntries(list);
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "Erreur lobby");
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    // Re-poll every 5s while the home page is mounted — cheap and the user
+    // expects fresh game lists. No WS for the lobby (yet).
+    const id = window.setInterval(refresh, 5000);
+    return () => window.clearInterval(id);
+  }, [refresh]);
+
+  return (
+    <section className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+      <div className="flex items-center justify-between">
+        <h2 className="font-medium text-zinc-200">Parties publiques</h2>
+        <button
+          type="button"
+          onClick={refresh}
+          className="text-xs text-zinc-400 transition hover:text-zinc-200"
+        >
+          Rafraîchir
+        </button>
+      </div>
+      {err && (
+        <p className="text-xs text-red-300">{err}</p>
+      )}
+      {entries === null ? (
+        <p className="text-xs text-zinc-500">Chargement…</p>
+      ) : entries.length === 0 ? (
+        <p className="text-xs text-zinc-500">
+          Aucune partie publique ouverte. Crée la première !
+        </p>
+      ) : (
+        <ul className="space-y-1.5">
+          {entries.map((e) => (
+            <li key={e.gameId}>
+              <button
+                onClick={() => navigate(`/game/${e.gameId}`)}
+                className="flex w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-left transition hover:border-amber-400/60"
+              >
+                <span className="font-mono text-[11px] text-zinc-400">
+                  {e.gameId.slice(0, 8)}…
+                </span>
+                <span className="text-xs text-zinc-300">
+                  {e.seated}/{e.players} joueurs
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }

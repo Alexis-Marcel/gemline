@@ -44,6 +44,98 @@ func TestCreateGameStartsWaiting(t *testing.T) {
 	if len(g.Seats) != 2 {
 		t.Fatalf("want 2 seats, got %d", len(g.Seats))
 	}
+	if g.Visibility != VisibilityPrivate {
+		t.Fatalf("want default visibility private, got %q", g.Visibility)
+	}
+}
+
+func TestCreateGameWithPublicVisibility(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGameWithBody(t, ts, `{"players":2,"visibility":"public"}`, http.StatusCreated)
+	if g.Visibility != VisibilityPublic {
+		t.Fatalf("want public, got %q", g.Visibility)
+	}
+}
+
+func TestCreateGameRejectsBadVisibility(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	_ = createGameWithBody(t, ts, `{"players":2,"visibility":"unicorn"}`, http.StatusBadRequest)
+}
+
+func TestLobbyListsPublicWaitingOnly(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	_ = createGame(t, ts, 2)                                                            // private
+	pub := createGameWithBody(t, ts, `{"players":2,"visibility":"public"}`, http.StatusCreated)
+
+	entries := listLobby(t, ts)
+	// Private game must not appear; the public one must.
+	for _, e := range entries {
+		if e.GameID == pub.ID {
+			if e.Players != 2 || e.Seated != 0 {
+				t.Fatalf("want public 0/2, got seated=%d players=%d", e.Seated, e.Players)
+			}
+			return
+		}
+	}
+	t.Fatalf("public game %s not found in lobby (entries=%+v)", pub.ID, entries)
+}
+
+func TestLobbyDropsGameOnceItStartsPlaying(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	pub := createGameWithBody(t, ts, `{"players":2,"visibility":"public"}`, http.StatusCreated)
+	_ = joinGame(t, ts, pub.ID, "Alice", nil)
+	_ = joinGame(t, ts, pub.ID, "Bob", nil) // game transitions to playing
+
+	for _, e := range listLobby(t, ts) {
+		if e.GameID == pub.ID {
+			t.Fatalf("playing game must not appear in lobby, got %+v", e)
+		}
+	}
+}
+
+func TestRematchRequiresFinishedGame(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	resp, err := http.Post(ts.URL+"/api/games/"+g.ID+"/rematch", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("want 409 on rematch of waiting game, got %d", resp.StatusCode)
+	}
+}
+
+func TestRematchIsIdempotent(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGameWithBody(t, ts, `{"players":2,"visibility":"public"}`, http.StatusCreated)
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	j2 := joinGame(t, ts, g.ID, "Bob", nil)
+	finishGame(t, ts, g.ID, j1.Token, j2.Token)
+
+	r1 := postRematch(t, ts, g.ID, http.StatusCreated)
+	r2 := postRematch(t, ts, g.ID, http.StatusCreated)
+	if r1.GameID != r2.GameID {
+		t.Fatalf("rematch must be idempotent; got %s then %s", r1.GameID, r2.GameID)
+	}
+	if r1.Game.Status != StatusWaiting {
+		t.Fatalf("rematch should start in waiting, got %s", r1.Game.Status)
+	}
+	if len(r1.Game.Seats) != len(g.Seats) {
+		t.Fatalf("rematch player count must match original")
+	}
+	if r1.Game.Visibility != g.Visibility {
+		t.Fatalf("rematch visibility must match original (got %q vs %q)", r1.Game.Visibility, g.Visibility)
+	}
+	if r1.GameID == g.ID {
+		t.Fatalf("rematch must spawn a *new* game, got the original ID back")
+	}
 }
 
 func TestJoinAndMove(t *testing.T) {
@@ -230,6 +322,83 @@ func readEvent(t *testing.T, ctx context.Context, conn *websocket.Conn) Event {
 		t.Fatal(err)
 	}
 	return ev
+}
+
+func createGameWithBody(t *testing.T, ts *httptest.Server, body string, wantStatus int) gameDTO {
+	t.Helper()
+	resp, err := http.Post(ts.URL+"/api/games", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create: want status=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
+	}
+	if wantStatus != http.StatusCreated {
+		return gameDTO{}
+	}
+	var g gameDTO
+	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+func listLobby(t *testing.T, ts *httptest.Server) []lobbyEntryDTO {
+	t.Helper()
+	resp, err := http.Get(ts.URL + "/api/games/lobby")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("lobby: status=%d body=%s", resp.StatusCode, b)
+	}
+	var out []lobbyEntryDTO
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func postRematch(t *testing.T, ts *httptest.Server, id string, wantStatus int) rematchResponse {
+	t.Helper()
+	resp, err := http.Post(ts.URL+"/api/games/"+id+"/rematch", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("rematch: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
+	}
+	if wantStatus != http.StatusCreated {
+		return rematchResponse{}
+	}
+	var r rematchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// finishGame plays an 11-move sequence in `gameID` that lands a 6-alignment
+// for Alice on the q-axis (instant win, regardless of config thresholds).
+// Bob plays parallel one row up, so neither side ever sandwiches the other —
+// no captures interfere.
+func finishGame(t *testing.T, ts *httptest.Server, gameID, aliceTok, bobTok string) {
+	t.Helper()
+	for q := 0; q < 5; q++ {
+		_ = postMove(t, ts, gameID, aliceTok, q, 0, http.StatusOK)
+		_ = postMove(t, ts, gameID, bobTok, q, 1, http.StatusOK)
+	}
+	// Final Alice stone completes the 6-alignment.
+	mr := postMove(t, ts, gameID, aliceTok, 5, 0, http.StatusOK)
+	if mr.Game.Status != StatusFinished {
+		t.Fatalf("finishGame: game still %s after 6-alignment", mr.Game.Status)
+	}
 }
 
 func itoa(i int) string {

@@ -28,10 +28,14 @@ func (r *PostgresRepo) SaveNewGame(ctx context.Context, rec *GameRecord) error {
 	defer tx.Rollback()
 
 	cfg := rec.State.Config
+	vis := rec.Visibility
+	if vis == "" {
+		vis = VisibilityPrivate
+	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO games (id, status, board_side, capture_pairs_win, align4_to_win, align5_to_win, initial_time_ms, increment_ms)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, rec.ID, rec.Status, cfg.BoardSide, cfg.CapturePairsWin, cfg.Align4ToWin, cfg.Align5ToWin, cfg.InitialTimeMs, cfg.IncrementMs)
+		INSERT INTO games (id, status, board_side, capture_pairs_win, align4_to_win, align5_to_win, initial_time_ms, increment_ms, visibility)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, rec.ID, rec.Status, cfg.BoardSide, cfg.CapturePairsWin, cfg.Align4ToWin, cfg.Align5ToWin, cfg.InitialTimeMs, cfg.IncrementMs, string(vis))
 	if err != nil {
 		return fmt.Errorf("insert game: %w", err)
 	}
@@ -51,7 +55,8 @@ func (r *PostgresRepo) SaveNewGame(ctx context.Context, rec *GameRecord) error {
 func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, error) {
 	row := r.pool.QueryRowContext(ctx, `
 		SELECT status, board_side, capture_pairs_win, align4_to_win, align5_to_win,
-		       winner_color, win_kind, initial_time_ms, increment_ms, created_at
+		       winner_color, win_kind, initial_time_ms, increment_ms, created_at,
+		       visibility, rematch_game_id
 		FROM games WHERE id = $1
 	`, id)
 	var (
@@ -65,8 +70,10 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 		initialTimeMs int64
 		incrementMs   int64
 		createdAt     time.Time
+		visibility    string
+		rematchID     sql.NullString
 	)
-	if err := row.Scan(&status, &boardSide, &captureWin, &align4, &align5, &winnerColor, &winKind, &initialTimeMs, &incrementMs, &createdAt); err != nil {
+	if err := row.Scan(&status, &boardSide, &captureWin, &align4, &align5, &winnerColor, &winKind, &initialTimeMs, &incrementMs, &createdAt, &visibility, &rematchID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -174,11 +181,13 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 	}
 
 	return &GameRecord{
-		ID:        id,
-		State:     state,
-		Seats:     seats,
-		Status:    status,
-		CreatedAt: createdAt,
+		ID:            id,
+		State:         state,
+		Seats:         seats,
+		Status:        status,
+		Visibility:    Visibility(visibility),
+		RematchGameID: rematchID.String,
+		CreatedAt:     createdAt,
 	}, nil
 }
 
@@ -380,6 +389,61 @@ func (r *PostgresRepo) MessagesForGame(ctx context.Context, gameID string, limit
 		out[i], out[j] = out[j], out[i]
 	}
 	return out, nil
+}
+
+func (r *PostgresRepo) LobbyGames(ctx context.Context, limit int) ([]LobbyEntry, error) {
+	// Public + still-waiting games, with a single denormalised seat-occupancy
+	// count so the lobby UI can show "1/2" without us shipping the full seat
+	// list. The supporting partial index is games_public_waiting_idx.
+	rows, err := r.pool.QueryContext(ctx, `
+		SELECT g.id,
+		       (SELECT COUNT(*) FROM seats s WHERE s.game_id = g.id) AS players,
+		       (SELECT COUNT(*) FROM seats s WHERE s.game_id = g.id AND s.occupied) AS seated,
+		       g.created_at
+		FROM games g
+		WHERE g.status = 'waiting' AND g.visibility = 'public'
+		ORDER BY g.created_at DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]LobbyEntry, 0)
+	for rows.Next() {
+		var e LobbyEntry
+		if err := rows.Scan(&e.GameID, &e.Players, &e.Seated, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepo) SetRematchLink(ctx context.Context, originalID, newID string) (string, error) {
+	// COALESCE preserves an already-set link, so the second writer in a race
+	// is a no-op and we always observe the winning ID with a single RETURNING
+	// — no extra SELECT, no row-level lock dance.
+	row := r.pool.QueryRowContext(ctx, `
+		UPDATE games
+		SET rematch_game_id = COALESCE(rematch_game_id, $1)
+		WHERE id = $2
+		RETURNING rematch_game_id
+	`, newID, originalID)
+	var got sql.NullString
+	if err := row.Scan(&got); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrGameNotFound
+		}
+		return "", err
+	}
+	if !got.Valid || got.String == "" {
+		// Shouldn't happen — COALESCE($1, …) makes the result non-null on
+		// any successful UPDATE — but tolerate it rather than crashing.
+		return newID, nil
+	}
+	return got.String, nil
 }
 
 func deriveOutcome(status Status, mine, winner game.Color) string {

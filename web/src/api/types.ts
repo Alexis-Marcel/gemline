@@ -14,6 +14,7 @@ export const WIN_CAPTURE: WinKind = 4;
 export const WIN_TIMEOUT: WinKind = 5;
 
 export type Status = "waiting" | "playing" | "finished";
+export type Visibility = "public" | "private";
 
 export interface Seat {
   index: number;
@@ -52,6 +53,21 @@ export interface Game {
   thresholds: Thresholds;
   /** ISO-8601 timestamp when the active player's turn started. Empty when the game hasn't started yet. */
   turnStartedAt?: string;
+  visibility: Visibility;
+  /** ID of the rematch game spawned from this one, if any. */
+  rematchGameId?: string;
+}
+
+export interface LobbyEntry {
+  gameId: string;
+  players: number;
+  seated: number;
+  createdAt: string;
+}
+
+export interface RematchResponse {
+  gameId: string;
+  game: Game;
 }
 
 export interface Capture {

@@ -50,9 +50,17 @@ func main() {
 		SupabaseURL: os.Getenv("SUPABASE_URL"),
 	}
 
+	store := server.NewStore(repo)
+	// Background promotion of public multi-player rooms — flips them to
+	// playing once enough seats are occupied and the threshold wait time
+	// for that occupancy has elapsed. Tests don't call this so they stay
+	// deterministic.
+	store.StartMultiPromoter()
+	defer store.Close()
+
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      server.New(log, server.NewStore(repo), cfg).Routes(),
+		Handler:      server.New(log, store, cfg).Routes(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,

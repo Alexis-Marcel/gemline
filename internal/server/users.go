@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 // ProfileDTO is the user-controlled portion of the profile (display name,
@@ -92,6 +93,27 @@ func (s *Server) getMyStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// getLeaderboard returns the top rated players. Anonymous — anyone can see
+// the board. The optional ?limit= caps at 100 to keep the response cheap.
+func (s *Server) getLeaderboard(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil {
+			limit = n
+		}
+	}
+	entries, err := s.store.Leaderboard(r.Context(), limit)
+	if err != nil {
+		s.log.Error("leaderboard", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not load leaderboard")
+		return
+	}
+	if entries == nil {
+		entries = []LeaderboardEntry{}
+	}
+	writeJSON(w, http.StatusOK, entries)
 }
 
 func normalizeDisplayName(s string) string {

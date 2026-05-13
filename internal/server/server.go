@@ -6,7 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"time"
+	"strconv"
 
 	"github.com/alexis/gemline/internal/game"
 	"github.com/golang-jwt/jwt/v5"
@@ -99,7 +99,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /readyz", s.readyz)
 
 	mux.HandleFunc("POST /api/games", s.createGame)
-	mux.HandleFunc("GET /api/games/lobby", s.listLobby)
+	mux.HandleFunc("POST /api/games/matchmake", s.matchmakeGame)
 	mux.HandleFunc("GET /api/games/{id}", s.getGame)
 	mux.HandleFunc("POST /api/games/{id}/join", s.joinGame)
 	mux.HandleFunc("POST /api/games/{id}/moves", s.postMove)
@@ -108,6 +108,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/draw/accept", s.acceptDraw)
 	mux.HandleFunc("POST /api/games/{id}/draw/decline", s.declineDraw)
 	mux.HandleFunc("POST /api/games/{id}/rematch", s.rematchGame)
+	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/bot", s.addBot)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
 	mux.HandleFunc("GET /api/games/{id}/messages", s.getChat)
 	mux.HandleFunc("POST /api/games/{id}/messages", s.postChat)
@@ -139,10 +140,6 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "players must be in [2, 6]")
 		return
 	}
-	if req.Bots < 0 || req.Bots > req.Players {
-		writeError(w, http.StatusBadRequest, "bots must be in [0, players]")
-		return
-	}
 	vis := Visibility(req.Visibility)
 	if vis == "" {
 		vis = VisibilityPrivate
@@ -151,7 +148,7 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "visibility must be 'public' or 'private'")
 		return
 	}
-	rec, err := s.store.Create(r.Context(), req.Players, req.Bots, vis)
+	rec, err := s.store.Create(r.Context(), req.Players, vis)
 	if err != nil {
 		s.log.Error("create game", "err", err)
 		writeError(w, http.StatusInternalServerError, "could not create game")
@@ -163,25 +160,66 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, dto)
 }
 
-const lobbyLimit = 50
-
-func (s *Server) listLobby(w http.ResponseWriter, r *http.Request) {
-	entries, err := s.store.ListLobby(r.Context(), lobbyLimit)
-	if err != nil {
-		s.log.Error("list lobby", "err", err)
-		writeError(w, http.StatusInternalServerError, "could not load lobby")
+// matchmakeGame returns the public waiting game the caller should join — an
+// existing one with a free seat (oldest first), or a freshly-created public
+// game if no candidate is matchable. The client follows up with /join to
+// actually claim a seat.
+func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
+	var req matchmakeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	out := make([]lobbyEntryDTO, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, lobbyEntryDTO{
-			GameID:    e.GameID,
-			Players:   e.Players,
-			Seated:    e.Seated,
-			CreatedAt: e.CreatedAt.UTC().Format(time.RFC3339),
-		})
+	if req.Players < 2 || req.Players > game.MaxPlayers {
+		writeError(w, http.StatusBadRequest, "players must be in [2, 6]")
+		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	rec, err := s.store.Matchmake(r.Context(), req.Players)
+	if err != nil {
+		s.log.Error("matchmake", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not matchmake")
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	writeJSON(w, http.StatusOK, dto)
+}
+
+// addBot fills the requested empty seat with a bot. Only private waiting
+// games accept bots; matchmade public games must be filled by humans.
+func (s *Server) addBot(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	seatIdx, err := strconv.Atoi(r.PathValue("idx"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid seat index")
+		return
+	}
+	rec, err := s.store.AddBot(r.Context(), gameID, seatIdx)
+	if err != nil {
+		writeError(w, statusForAddBotError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	s.hub.Broadcast(gameID, eventState(dto))
+	writeJSON(w, http.StatusOK, dto)
+}
+
+func statusForAddBotError(err error) int {
+	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrBadSeatIndex):
+		return http.StatusBadRequest
+	case errors.Is(err, ErrSeatTaken),
+		errors.Is(err, ErrNotPlaying),
+		errors.Is(err, ErrBotsOnPublic):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (s *Server) rematchGame(w http.ResponseWriter, r *http.Request) {

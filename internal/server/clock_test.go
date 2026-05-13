@@ -32,7 +32,7 @@ func TestClock_ForfeitsActivePlayerWhenTimeExpires(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	rec, err := store.Create(ctx, 2, 0, VisibilityPrivate)
+	rec, err := store.Create(ctx, 2, VisibilityPrivate)
 	if err != nil {
 		t.Fatal(err)
 	}

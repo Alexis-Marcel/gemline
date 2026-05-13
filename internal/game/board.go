@@ -44,6 +44,19 @@ func (b *Board) Set(p Position, c Color) {
 	b.Cells[b.idx(p)] = c
 }
 
+// Clone returns a deep copy. Useful for callers (e.g. the AI) that need to
+// score speculative moves without mutating the live board.
+func (b *Board) Clone() *Board {
+	cells := make([]Color, len(b.Cells))
+	copy(cells, b.Cells)
+	return &Board{Side: b.Side, Cells: cells}
+}
+
+// Directions exposes the three line axes used for captures and alignments.
+// The package-internal `directions` (lowercase) remains the source of truth;
+// this is its read-only export for downstream code (e.g. the AI heuristic).
+var Directions = directions
+
 // directions are the three line axes along which captures and alignments are
 // evaluated on a hex grid. Each entry is the axial unit vector for that line;
 // negating one gives the opposite direction.

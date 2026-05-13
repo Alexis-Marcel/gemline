@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/alexis/gemline/internal/game"
 	"github.com/golang-jwt/jwt/v5"
@@ -62,6 +63,33 @@ func New(log *slog.Logger, store *Store, cfg Config) *Server {
 	store.SetPresenceListener(func(gameID string, seatIndex int, online bool) {
 		srv.hub.Broadcast(gameID, eventPresence(seatIndex, online))
 	})
+	// Draw-offer transitions are infrequent and the change shows up on the
+	// game DTO (drawOfferBy field), so we just push a full state snapshot
+	// rather than introducing a dedicated wire event.
+	store.SetDrawOfferListener(func(gameID string, _ int) {
+		rec, ok, err := store.Get(context.Background(), gameID)
+		if err != nil || !ok {
+			return
+		}
+		rec.Lock()
+		dto := toGameDTO(rec)
+		rec.Unlock()
+		srv.hub.Broadcast(gameID, eventState(dto))
+	})
+	// Server-driven moves (bots) broadcast a move event with the same shape
+	// HTTP-driven moves use, so clients render captures + the new state
+	// identically whether the move came from a human or a bot.
+	store.SetMoveListener(func(gameID string, mv game.MoveResult) {
+		rec, ok, err := store.Get(context.Background(), gameID)
+		if err != nil || !ok {
+			return
+		}
+		rec.Lock()
+		dto := toGameDTO(rec)
+		rec.Unlock()
+		resp := moveResponse{Game: dto, Captures: toCaptureDTOs(mv.Captures)}
+		srv.hub.Broadcast(gameID, eventMove(resp))
+	})
 	return srv
 }
 
@@ -71,9 +99,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /readyz", s.readyz)
 
 	mux.HandleFunc("POST /api/games", s.createGame)
+	mux.HandleFunc("GET /api/games/lobby", s.listLobby)
 	mux.HandleFunc("GET /api/games/{id}", s.getGame)
 	mux.HandleFunc("POST /api/games/{id}/join", s.joinGame)
 	mux.HandleFunc("POST /api/games/{id}/moves", s.postMove)
+	mux.HandleFunc("POST /api/games/{id}/resign", s.resignGame)
+	mux.HandleFunc("POST /api/games/{id}/draw/offer", s.offerDraw)
+	mux.HandleFunc("POST /api/games/{id}/draw/accept", s.acceptDraw)
+	mux.HandleFunc("POST /api/games/{id}/draw/decline", s.declineDraw)
+	mux.HandleFunc("POST /api/games/{id}/rematch", s.rematchGame)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
 	mux.HandleFunc("GET /api/games/{id}/messages", s.getChat)
 	mux.HandleFunc("POST /api/games/{id}/messages", s.postChat)
@@ -105,7 +139,19 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "players must be in [2, 6]")
 		return
 	}
-	rec, err := s.store.Create(r.Context(), req.Players)
+	if req.Bots < 0 || req.Bots > req.Players {
+		writeError(w, http.StatusBadRequest, "bots must be in [0, players]")
+		return
+	}
+	vis := Visibility(req.Visibility)
+	if vis == "" {
+		vis = VisibilityPrivate
+	}
+	if vis != VisibilityPrivate && vis != VisibilityPublic {
+		writeError(w, http.StatusBadRequest, "visibility must be 'public' or 'private'")
+		return
+	}
+	rec, err := s.store.Create(r.Context(), req.Players, req.Bots, vis)
 	if err != nil {
 		s.log.Error("create game", "err", err)
 		writeError(w, http.StatusInternalServerError, "could not create game")
@@ -115,6 +161,158 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 	dto := toGameDTO(rec)
 	rec.Unlock()
 	writeJSON(w, http.StatusCreated, dto)
+}
+
+const lobbyLimit = 50
+
+func (s *Server) listLobby(w http.ResponseWriter, r *http.Request) {
+	entries, err := s.store.ListLobby(r.Context(), lobbyLimit)
+	if err != nil {
+		s.log.Error("list lobby", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not load lobby")
+		return
+	}
+	out := make([]lobbyEntryDTO, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, lobbyEntryDTO{
+			GameID:    e.GameID,
+			Players:   e.Players,
+			Seated:    e.Seated,
+			CreatedAt: e.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) rematchGame(w http.ResponseWriter, r *http.Request) {
+	originalID := r.PathValue("id")
+	rec, err := s.store.Rematch(r.Context(), originalID)
+	if err != nil {
+		writeError(w, statusForRematchError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	writeJSON(w, http.StatusCreated, rematchResponse{GameID: rec.ID, Game: dto})
+}
+
+// resignGame, offerDraw, acceptDraw, declineDraw all share the same shape:
+// extract the seat token, hand off to a Store method, broadcast the new state
+// on success. The differences are which method to call and what status codes
+// the errors map to.
+
+func (s *Server) resignGame(w http.ResponseWriter, r *http.Request) {
+	s.endByConcession(w, r, s.store.Resign, "resign")
+}
+
+func (s *Server) offerDraw(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	token := playerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing player token")
+		return
+	}
+	rec, err := s.store.OfferDraw(r.Context(), gameID, token)
+	if err != nil {
+		writeError(w, statusForDrawError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	writeJSON(w, http.StatusOK, dto)
+}
+
+func (s *Server) acceptDraw(w http.ResponseWriter, r *http.Request) {
+	s.endByConcession(w, r, s.store.AcceptDraw, "draw_accept")
+}
+
+func (s *Server) declineDraw(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	token := playerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing player token")
+		return
+	}
+	rec, err := s.store.DeclineDraw(r.Context(), gameID, token)
+	if err != nil {
+		writeError(w, statusForDrawError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	writeJSON(w, http.StatusOK, dto)
+}
+
+// endByConcession is the shared body of resign + accept-draw — they both
+// auth via seat token, end the game, and broadcast a state snapshot.
+func (s *Server) endByConcession(
+	w http.ResponseWriter,
+	r *http.Request,
+	fn func(ctx context.Context, gameID, token string) (*GameRecord, error),
+	op string,
+) {
+	gameID := r.PathValue("id")
+	token := playerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing player token")
+		return
+	}
+	rec, err := fn(r.Context(), gameID, token)
+	if err != nil {
+		writeError(w, statusForConcessionError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	s.hub.Broadcast(gameID, eventState(dto))
+	s.log.Info("game ended", "op", op, "game", gameID, "winner", dto.Winner, "kind", dto.WinKind)
+	writeJSON(w, http.StatusOK, dto)
+}
+
+func statusForConcessionError(err error) int {
+	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrBadToken):
+		return http.StatusUnauthorized
+	case errors.Is(err, ErrNotPlaying):
+		return http.StatusConflict
+	case errors.Is(err, ErrDrawNotOffered), errors.Is(err, ErrCannotAcceptOwnDrawOffer):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func statusForDrawError(err error) int {
+	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrBadToken):
+		return http.StatusUnauthorized
+	case errors.Is(err, ErrNotPlaying),
+		errors.Is(err, ErrDrawAlreadyOffered),
+		errors.Is(err, ErrDrawNotOffered),
+		errors.Is(err, ErrDrawUnsupported):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func statusForRematchError(err error) int {
+	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrNotFinished):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (s *Server) getGame(w http.ResponseWriter, r *http.Request) {

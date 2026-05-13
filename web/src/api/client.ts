@@ -2,12 +2,15 @@ import { supabase } from "./supabase";
 import type {
   Game,
   JoinResponse,
+  LobbyEntry,
   Message,
   MoveResponse,
   Profile,
+  RematchResponse,
   Replay,
   UserGame,
   UserStats,
+  Visibility,
 } from "./types";
 
 class ApiError extends Error {
@@ -57,10 +60,52 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
-  createGame(players: number) {
+  createGame(
+    players: number,
+    visibility: Visibility = "private",
+    bots: number = 0,
+  ) {
     return request<Game>("/api/games", {
       method: "POST",
-      body: JSON.stringify({ players }),
+      body: JSON.stringify({ players, visibility, bots }),
+    });
+  },
+
+  listLobby() {
+    return request<LobbyEntry[]>("/api/games/lobby");
+  },
+
+  rematch(id: string) {
+    return request<RematchResponse>(`/api/games/${id}/rematch`, {
+      method: "POST",
+    });
+  },
+
+  resign(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/resign`, {
+      method: "POST",
+      playerToken,
+    });
+  },
+
+  offerDraw(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/draw/offer`, {
+      method: "POST",
+      playerToken,
+    });
+  },
+
+  acceptDraw(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/draw/accept`, {
+      method: "POST",
+      playerToken,
+    });
+  },
+
+  declineDraw(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/draw/decline`, {
+      method: "POST",
+      playerToken,
     });
   },
 

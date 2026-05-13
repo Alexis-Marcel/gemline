@@ -94,6 +94,8 @@ const (
 	WinAlignment4
 	WinCapture
 	WinTimeout // the opponent ran out of time
+	WinResign  // the opponent voluntarily resigned
+	WinDraw    // both players agreed to a draw (2-player only)
 )
 
 func (k WinKind) String() string {
@@ -110,6 +112,10 @@ func (k WinKind) String() string {
 		return "capture"
 	case WinTimeout:
 		return "timeout"
+	case WinResign:
+		return "resign"
+	case WinDraw:
+		return "draw"
 	default:
 		return "?"
 	}

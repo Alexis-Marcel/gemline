@@ -8,7 +8,15 @@ Each player has a colored stock of 50 gems. On your turn you place one gem on an
 
 **Capture.** When the pattern `[you][opponent][opponent][you]` appears on any of the three line axes after your placement, with both opponent stones sharing the same color, those two stones are removed and credited to you as one captured pair. You can trigger several captures from a single placement, across different axes or the same axis. A placement that fills the middle of an opponent sandwich does *not* self-capture.
 
-**Win.** A line of 6 of your color, anywhere on the board, is an instant win. Otherwise, the thresholds depend on the player count (configurable, see `internal/game/state.go`). In 2-player mode: three 4-alignments, two 5-alignments, or ten captured pairs.
+**Win.** A line of 6 of your color, anywhere on the board, is an instant win. Otherwise, the thresholds depend on the player count (see the table below, and `internal/game/state.go` for the source of truth). In 2-player mode: eight 4-alignments, three 5-alignments, or twelve captured pairs (24 gems gobbled two-by-two).
+
+| Players | 6-line | 5-lines | 4-lines | Captured pairs |
+| ------- | ------ | ------- | ------- | -------------- |
+| 2       | 1      | 3       | 8       | 12             |
+| 3       | 1      | 3       | 6       | 10             |
+| 4       | 1      | 2       | 5       | 9              |
+| 5       | 1      | 2       | 4       | 7              |
+| 6       | 1      | 2       | 4       | 6              |
 
 ## Status
 

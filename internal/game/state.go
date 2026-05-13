@@ -20,11 +20,12 @@ type Config struct {
 
 const DefaultInitialTimeMs int64 = 10 * 60 * 1000 // 10 minutes
 
-// DefaultConfig returns thresholds for `numPlayers` (2..6).
-//
-// The 2-player thresholds come from the published rules. Values for 3..6 are
-// placeholders, biased toward keeping multi-player games tractable, and
-// should be revisited once the official rulebook is available.
+// DefaultConfig returns thresholds for `numPlayers` (2..6), straight from the
+// printed rulebook (page with the "Nombre de joueurs" table). A 6-alignment
+// is always an instant win; the other columns are the count of *distinct*
+// maximal runs the player must hold simultaneously. CapturePairsWin is the
+// number of captured *pairs* — the rulebook lists gems (gobbled 2-by-2), so
+// the value here is half the gem count.
 func DefaultConfig(numPlayers int) Config {
 	cfg := Config{
 		BoardSide:     DefaultBoardSide,
@@ -33,25 +34,25 @@ func DefaultConfig(numPlayers int) Config {
 	}
 	switch numPlayers {
 	case 2:
-		cfg.CapturePairsWin = 10
-		cfg.Align4ToWin = 3
-		cfg.Align5ToWin = 2
+		cfg.CapturePairsWin = 12 // 24 gems
+		cfg.Align4ToWin = 8
+		cfg.Align5ToWin = 3
 	case 3:
-		cfg.CapturePairsWin = 8
-		cfg.Align4ToWin = 3
-		cfg.Align5ToWin = 2
+		cfg.CapturePairsWin = 10 // 20 gems
+		cfg.Align4ToWin = 6
+		cfg.Align5ToWin = 3
 	case 4:
-		cfg.CapturePairsWin = 6
-		cfg.Align4ToWin = 2
+		cfg.CapturePairsWin = 9 // 18 gems
+		cfg.Align4ToWin = 5
 		cfg.Align5ToWin = 2
 	case 5:
-		cfg.CapturePairsWin = 5
-		cfg.Align4ToWin = 2
-		cfg.Align5ToWin = 1
+		cfg.CapturePairsWin = 7 // 14 gems
+		cfg.Align4ToWin = 4
+		cfg.Align5ToWin = 2
 	case 6:
-		cfg.CapturePairsWin = 4
-		cfg.Align4ToWin = 2
-		cfg.Align5ToWin = 1
+		cfg.CapturePairsWin = 6 // 12 gems
+		cfg.Align4ToWin = 4
+		cfg.Align5ToWin = 2
 	default:
 		return DefaultConfig(2)
 	}
@@ -221,6 +222,38 @@ func (g *GameState) Forfeit(loser Color) {
 			g.Players[i].TimeRemainingMs = 0
 		}
 	}
+}
+
+// Resign ends the game by declaring `loser` voluntarily resigned. With two
+// players the survivor wins; with more, the game ends with no winner. The
+// resign is distinct from a timeout (Forfeit) because the win-kind affects
+// post-game stats and what we render to the player.
+func (g *GameState) Resign(loser Color) {
+	if g.IsOver() {
+		return
+	}
+	g.WinKind = WinResign
+	if len(g.Players) == 2 {
+		for _, p := range g.Players {
+			if p.Color != loser {
+				g.Winner = p.Color
+				return
+			}
+		}
+	}
+	g.Winner = Empty
+}
+
+// AgreeDraw ends a 2-player game in a draw. Callers must enforce that the
+// game has exactly two players — the engine deliberately doesn't pick a
+// "winner of the draw" for multi-player, since drawn games in 3+ player mode
+// aren't part of the published rules.
+func (g *GameState) AgreeDraw() {
+	if g.IsOver() {
+		return
+	}
+	g.WinKind = WinDraw
+	g.Winner = Empty
 }
 
 // checkWin returns the kind of win achieved by `p`, or WinNone. Alignment

@@ -2,7 +2,6 @@ import { supabase } from "./supabase";
 import type {
   Game,
   JoinResponse,
-  LobbyEntry,
   Message,
   MoveResponse,
   Profile,
@@ -10,7 +9,6 @@ import type {
   Replay,
   UserGame,
   UserStats,
-  Visibility,
 } from "./types";
 
 class ApiError extends Error {
@@ -60,19 +58,26 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
-  createGame(
-    players: number,
-    visibility: Visibility = "private",
-    bots: number = 0,
-  ) {
+  // createGame always creates a private game from the frontend; public games
+  // are spawned implicitly by matchmake() when no candidate exists.
+  createGame(players: number) {
     return request<Game>("/api/games", {
       method: "POST",
-      body: JSON.stringify({ players, visibility, bots }),
+      body: JSON.stringify({ players, visibility: "private" }),
     });
   },
 
-  listLobby() {
-    return request<LobbyEntry[]>("/api/games/lobby");
+  matchmake(players: number) {
+    return request<Game>("/api/games/matchmake", {
+      method: "POST",
+      body: JSON.stringify({ players }),
+    });
+  },
+
+  addBot(id: string, seatIndex: number) {
+    return request<Game>(`/api/games/${id}/seats/${seatIndex}/bot`, {
+      method: "POST",
+    });
   },
 
   rematch(id: string) {

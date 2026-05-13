@@ -44,8 +44,9 @@ var (
 	ErrDrawNotOffered = errors.New("no draw offer pending")
 	ErrCannotAcceptOwnDrawOffer = errors.New("the offering player cannot accept their own draw offer")
 	ErrDrawAlreadyOffered = errors.New("a draw is already being offered")
-	ErrDrawUnsupported = errors.New("draw is only supported in 2-player games")
-	ErrBadBotCount = errors.New("bot count must be between 0 and the player count")
+	ErrDrawUnsupported  = errors.New("draw is only supported in 2-player games")
+	ErrBotsOnPublic     = errors.New("bots cannot be added to public games")
+	ErrBadSeatIndex     = errors.New("seat index out of range")
 )
 
 // Seat is a play slot in a game. Once claimed, only the SHA-256 of the
@@ -344,20 +345,16 @@ func (s *Store) handleFlag(gameID string) {
 }
 
 // Create initializes a game, persists it, and caches it in memory. Visibility
-// controls whether the game is discoverable through the public lobby; passing
-// the zero value defaults to private. `numBots` claims the highest-indexed
-// seats with internal bot tokens — the game then transitions to playing
-// straight away if every other seat is filled by a human (or if numBots ==
-// numPlayers).
-func (s *Store) Create(ctx context.Context, numPlayers, numBots int, vis Visibility) (*GameRecord, error) {
+// controls whether the game is discoverable through matchmaking; passing the
+// zero value defaults to private. Bots are *not* claimed at create time —
+// callers add them per-seat via AddBot once the game exists (private games
+// only).
+func (s *Store) Create(ctx context.Context, numPlayers int, vis Visibility) (*GameRecord, error) {
 	if vis == "" {
 		vis = VisibilityPrivate
 	}
 	if vis != VisibilityPrivate && vis != VisibilityPublic {
 		return nil, ErrBadVisibility
-	}
-	if numBots < 0 || numBots > numPlayers {
-		return nil, ErrBadBotCount
 	}
 	colors := make([]game.Color, numPlayers)
 	seats := make([]Seat, numPlayers)
@@ -365,33 +362,14 @@ func (s *Store) Create(ctx context.Context, numPlayers, numBots int, vis Visibil
 		colors[i] = game.Color(i + 1)
 		seats[i] = Seat{Index: i, Color: colors[i]}
 	}
-	// Bots take the highest-numbered seats so seat 0 is the natural pick
-	// for the first human in a solo-vs-bot game. The tokens are random but
-	// never returned to any HTTP caller — they live only in this Store.
-	for i := numPlayers - numBots; i < numPlayers; i++ {
-		token := newToken()
-		seats[i].Name = botName(i)
-		seats[i].TokenHash = hashToken(token)
-		seats[i].Occupied = true
-		seats[i].IsBot = true
-	}
-	allSeated := numBots == numPlayers
-	status := StatusWaiting
-	if allSeated {
-		status = StatusPlaying
-	}
-	gs := game.NewGame(colors, game.DefaultConfig(numPlayers))
 	rec := &GameRecord{
 		ID:          newID(),
-		State:       gs,
+		State:       game.NewGame(colors, game.DefaultConfig(numPlayers)),
 		Seats:       seats,
-		Status:      status,
+		Status:      StatusWaiting,
 		Visibility:  vis,
 		CreatedAt:   time.Now(),
 		DrawOfferBy: -1,
-	}
-	if allSeated {
-		rec.State.StartClock(time.Now())
 	}
 	if err := s.repo.SaveNewGame(ctx, rec); err != nil {
 		return nil, err
@@ -399,14 +377,6 @@ func (s *Store) Create(ctx context.Context, numPlayers, numBots int, vis Visibil
 	s.mu.Lock()
 	s.games[rec.ID] = rec
 	s.mu.Unlock()
-	if allSeated {
-		// All seats are bots: arm the clock and schedule the first move
-		// since no human Join will trigger it.
-		rec.Lock()
-		s.armClock(rec)
-		rec.Unlock()
-		s.maybeScheduleBot(rec)
-	}
 	return rec, nil
 }
 
@@ -437,22 +407,10 @@ type LobbyEntry struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-// ListLobby returns the most recently created public waiting games, capped at
-// limit. The repo (when DB-backed) is the source of truth and returns an
-// empty-but-non-nil slice for "no public waiting games"; a nil return signals
-// "no persistence wired up at all" (noopRepo) — in that case we fall back to
-// scanning the in-memory cache so single-process hermetic runs still work.
-func (s *Store) ListLobby(ctx context.Context, limit int) ([]LobbyEntry, error) {
-	entries, err := s.repo.LobbyGames(ctx, limit)
-	if err != nil {
-		return nil, err
-	}
-	if entries != nil {
-		return entries, nil
-	}
-	return s.scanLobbyCache(limit), nil
-}
-
+// scanLobbyCache walks the in-memory cache and returns every public waiting
+// game it knows about, in most-recent-first order. Used by Matchmake when
+// the repo is a noop (hermetic tests) — single-process mode means the cache
+// is authoritative for "what public games exist right now".
 func (s *Store) scanLobbyCache(limit int) []LobbyEntry {
 	s.mu.Lock()
 	candidates := make([]*GameRecord, 0, len(s.games))
@@ -743,6 +701,110 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 	// PlayMove takes rec.Lock(), which is held by the deferred Unlock above.
 	defer s.maybeScheduleBot(rec)
 	return res, rec, nil
+}
+
+// AddBot claims an empty seat with a bot. Restricted to private games —
+// matchmade public games must be filled by humans through matchmaking, not
+// stuffed by whoever holds the URL. When the placement fills the last seat
+// the game transitions to playing and (if seat 0 is a bot) its first move
+// is scheduled.
+func (s *Store) AddBot(ctx context.Context, gameID string, seatIdx int) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	if rec.Status != StatusWaiting {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.Visibility != VisibilityPrivate {
+		rec.Unlock()
+		return rec, ErrBotsOnPublic
+	}
+	if seatIdx < 0 || seatIdx >= len(rec.Seats) {
+		rec.Unlock()
+		return rec, ErrBadSeatIndex
+	}
+	if rec.Seats[seatIdx].Occupied {
+		rec.Unlock()
+		return rec, ErrSeatTaken
+	}
+
+	token := newToken()
+	rec.Seats[seatIdx].Name = botName(seatIdx)
+	rec.Seats[seatIdx].TokenHash = hashToken(token)
+	rec.Seats[seatIdx].Occupied = true
+	rec.Seats[seatIdx].IsBot = true
+
+	startedPlaying := false
+	if rec.AllSeated() {
+		rec.Status = StatusPlaying
+		startedPlaying = true
+		rec.State.StartClock(time.Now())
+	}
+
+	if err := s.repo.UpdateSeat(ctx, gameID, &rec.Seats[seatIdx], rec.Status); err != nil {
+		rec.Unlock()
+		return rec, err
+	}
+	if startedPlaying {
+		s.armClock(rec)
+	}
+	rec.Unlock()
+
+	if startedPlaying {
+		// Active player may itself be a bot — kick its turn.
+		s.maybeScheduleBot(rec)
+	}
+	return rec, nil
+}
+
+// Matchmake returns a public waiting game of the requested player count
+// with at least one free seat, creating a fresh public game if no such
+// candidate exists. The oldest matching game wins — newer candidates wait
+// their turn so solo joiners don't starve.
+func (s *Store) Matchmake(ctx context.Context, players int) (*GameRecord, error) {
+	// Pull a generous slice of candidates and filter Go-side. The repo path
+	// returns most-recent first; we iterate in reverse to favour the oldest.
+	candidates, err := s.repo.LobbyGames(ctx, 50)
+	if err != nil {
+		return nil, err
+	}
+	if candidates == nil {
+		// noopRepo — fall back to the in-memory cache.
+		candidates = s.scanLobbyCache(50)
+	}
+	for i := len(candidates) - 1; i >= 0; i-- {
+		c := candidates[i]
+		if c.Players != players {
+			continue
+		}
+		if c.Seated >= c.Players {
+			continue
+		}
+		rec, ok, err := s.Get(ctx, c.GameID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			// Stale entry (cache eviction race). Skip and try the next.
+			continue
+		}
+		// Re-check status under the lock: another join may have filled the
+		// last seat between the candidate snapshot and us reaching it.
+		rec.Lock()
+		stillJoinable := rec.Status == StatusWaiting && !rec.AllSeated()
+		rec.Unlock()
+		if stillJoinable {
+			return rec, nil
+		}
+	}
+	return s.Create(ctx, players, VisibilityPublic)
 }
 
 // Resign ends a game in progress by recording that the seat behind `token`

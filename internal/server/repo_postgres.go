@@ -188,6 +188,7 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 		Visibility:    Visibility(visibility),
 		RematchGameID: rematchID.String,
 		CreatedAt:     createdAt,
+		DrawOfferBy:   -1, // draw offers don't survive restarts; players can re-offer
 	}, nil
 }
 

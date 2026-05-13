@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alexis/gemline/internal/game"
 	"github.com/coder/websocket"
 )
 
@@ -243,6 +244,125 @@ func TestWebSocketBroadcastsMoves(t *testing.T) {
 	}
 }
 
+func TestResignEndsGameInTwoPlayer(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	_ = joinGame(t, ts, g.ID, "Bob", nil)
+
+	// Alice (seat 0, C1) resigns → Bob (C2) wins.
+	dto := postResign(t, ts, g.ID, j1.Token, http.StatusOK)
+	if dto.Status != StatusFinished {
+		t.Fatalf("want status finished, got %s", dto.Status)
+	}
+	if dto.Winner != game.C2 {
+		t.Fatalf("want winner C2 (Bob), got %v", dto.Winner)
+	}
+	if dto.WinKind != game.WinResign {
+		t.Fatalf("want win kind resign, got %v", dto.WinKind)
+	}
+}
+
+func TestResignRequiresPlaying(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	// Not started yet (Bob hasn't joined) → resign returns 409.
+	postResignRaw(t, ts, g.ID, j1.Token, http.StatusConflict)
+}
+
+func TestResignRequiresValidToken(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = joinGame(t, ts, g.ID, "Alice", nil)
+	_ = joinGame(t, ts, g.ID, "Bob", nil)
+	postResignRaw(t, ts, g.ID, "not-a-real-token", http.StatusUnauthorized)
+}
+
+func TestDrawOfferAcceptEndsAsDraw(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	j2 := joinGame(t, ts, g.ID, "Bob", nil)
+
+	// Alice offers; the snapshot returned reflects the pending offer.
+	dto := postDraw(t, ts, g.ID, "offer", j1.Token, http.StatusOK)
+	if dto.DrawOfferBy != 0 {
+		t.Fatalf("want drawOfferBy=0 after Alice offered, got %d", dto.DrawOfferBy)
+	}
+	// Bob accepts → game ends as a draw (Winner=Empty, WinKind=WinDraw).
+	dto = postDraw(t, ts, g.ID, "accept", j2.Token, http.StatusOK)
+	if dto.Status != StatusFinished {
+		t.Fatalf("want status finished, got %s", dto.Status)
+	}
+	if dto.Winner != game.Empty {
+		t.Fatalf("want no winner on draw, got %v", dto.Winner)
+	}
+	if dto.WinKind != game.WinDraw {
+		t.Fatalf("want win kind draw, got %v", dto.WinKind)
+	}
+	if dto.DrawOfferBy != -1 {
+		t.Fatalf("want drawOfferBy cleared after accept, got %d", dto.DrawOfferBy)
+	}
+}
+
+func TestDrawCannotAcceptOwnOffer(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	_ = joinGame(t, ts, g.ID, "Bob", nil)
+
+	_ = postDraw(t, ts, g.ID, "offer", j1.Token, http.StatusOK)
+	postDrawRaw(t, ts, g.ID, "accept", j1.Token, http.StatusConflict)
+}
+
+func TestDrawDeclineClearsOffer(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	j2 := joinGame(t, ts, g.ID, "Bob", nil)
+
+	_ = postDraw(t, ts, g.ID, "offer", j1.Token, http.StatusOK)
+	dto := postDraw(t, ts, g.ID, "decline", j2.Token, http.StatusOK)
+	if dto.DrawOfferBy != -1 {
+		t.Fatalf("want drawOfferBy cleared after decline, got %d", dto.DrawOfferBy)
+	}
+	if dto.Status != StatusPlaying {
+		t.Fatalf("decline must keep game playing, got %s", dto.Status)
+	}
+}
+
+func TestDrawAutoCancelsOnMove(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	_ = joinGame(t, ts, g.ID, "Bob", nil)
+
+	_ = postDraw(t, ts, g.ID, "offer", j1.Token, http.StatusOK)
+	// Alice (the offerer) plays a move → the pending offer must be cleared.
+	mr := postMove(t, ts, g.ID, j1.Token, 0, 0, http.StatusOK)
+	if mr.Game.DrawOfferBy != -1 {
+		t.Fatalf("move must auto-cancel pending draw, got drawOfferBy=%d", mr.Game.DrawOfferBy)
+	}
+}
+
+func TestDrawRejectedInMultiplayer(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 3)
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	_ = joinGame(t, ts, g.ID, "Bob", nil)
+	_ = joinGame(t, ts, g.ID, "Charlie", nil)
+	postDrawRaw(t, ts, g.ID, "offer", j1.Token, http.StatusConflict)
+}
+
 // ---- helpers ----
 
 func createGame(t *testing.T, ts *httptest.Server, players int) gameDTO {
@@ -399,6 +519,62 @@ func finishGame(t *testing.T, ts *httptest.Server, gameID, aliceTok, bobTok stri
 	if mr.Game.Status != StatusFinished {
 		t.Fatalf("finishGame: game still %s after 6-alignment", mr.Game.Status)
 	}
+}
+
+func postResign(t *testing.T, ts *httptest.Server, gameID, token string, wantStatus int) gameDTO {
+	t.Helper()
+	return decodeGameDTO(t, postResignRaw(t, ts, gameID, token, wantStatus))
+}
+
+func postResignRaw(t *testing.T, ts *httptest.Server, gameID, token string, wantStatus int) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+gameID+"/resign", nil)
+	req.Header.Set("X-Player-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != wantStatus {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("resign: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
+	}
+	return resp
+}
+
+func postDraw(t *testing.T, ts *httptest.Server, gameID, op, token string, wantStatus int) gameDTO {
+	t.Helper()
+	return decodeGameDTO(t, postDrawRaw(t, ts, gameID, op, token, wantStatus))
+}
+
+func postDrawRaw(t *testing.T, ts *httptest.Server, gameID, op, token string, wantStatus int) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+gameID+"/draw/"+op, nil)
+	req.Header.Set("X-Player-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != wantStatus {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("draw/%s: want=%d got=%d body=%s", op, wantStatus, resp.StatusCode, b)
+	}
+	return resp
+}
+
+
+func decodeGameDTO(t *testing.T, resp *http.Response) gameDTO {
+	t.Helper()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return gameDTO{}
+	}
+	var g gameDTO
+	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
+		t.Fatal(err)
+	}
+	return g
 }
 
 func itoa(i int) string {

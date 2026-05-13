@@ -40,6 +40,10 @@ var (
 	ErrNotPlaying    = errors.New("game is not in playing state")
 	ErrNotFinished   = errors.New("game is not finished")
 	ErrBadVisibility = errors.New("invalid visibility")
+	ErrDrawNotOffered = errors.New("no draw offer pending")
+	ErrCannotAcceptOwnDrawOffer = errors.New("the offering player cannot accept their own draw offer")
+	ErrDrawAlreadyOffered = errors.New("a draw is already being offered")
+	ErrDrawUnsupported = errors.New("draw is only supported in 2-player games")
 )
 
 // Seat is a play slot in a game. Once claimed, only the SHA-256 of the
@@ -65,6 +69,13 @@ type GameRecord struct {
 	Visibility    Visibility
 	RematchGameID string // ID of the rematch game spawned from this one, if any
 	CreatedAt     time.Time
+
+	// DrawOfferBy is the seat index of the player currently offering a draw,
+	// or -1 if no offer is pending. Draw is only supported in 2-player games
+	// (see Store.OfferDraw). Lives on GameRecord rather than GameState because
+	// it is not part of the engine's pure rule logic and is not persisted —
+	// an offer cancels naturally on server restart (the player can re-offer).
+	DrawOfferBy int
 }
 
 func (r *GameRecord) Lock()   { r.mu.Lock() }
@@ -109,8 +120,9 @@ type Store struct {
 	presence *presenceManager
 	seatRefs map[string]map[int]int // gameID → seatIndex → live connections
 
-	onState    func(gameID string)                             // state changed (forfeit, etc.)
-	onPresence func(gameID string, seatIndex int, online bool) // presence transition
+	onState     func(gameID string)                             // state changed (forfeit, etc.)
+	onPresence  func(gameID string, seatIndex int, online bool) // presence transition
+	onDrawOffer func(gameID string, offeredBy int)              // draw offer set (>=0) or cleared (-1)
 }
 
 func NewStore(repo Repository) *Store {
@@ -136,6 +148,14 @@ func (s *Store) SetStateListener(fn func(gameID string)) { s.onState = fn }
 // players see the indicator update without a full state push.
 func (s *Store) SetPresenceListener(fn func(gameID string, seatIndex int, online bool)) {
 	s.onPresence = fn
+}
+
+// SetDrawOfferListener registers a callback fired whenever the pending draw
+// offer state changes (a player opens or closes one). offeredBy is the
+// offering seat index, or -1 when the offer is cleared (declined, withdrawn,
+// or auto-cancelled by a move).
+func (s *Store) SetDrawOfferListener(fn func(gameID string, offeredBy int)) {
+	s.onDrawOffer = fn
 }
 
 // Close stops every running clock + presence timer. Call on shutdown.
@@ -313,12 +333,13 @@ func (s *Store) Create(ctx context.Context, numPlayers int, vis Visibility) (*Ga
 		seats[i] = Seat{Index: i, Color: colors[i]}
 	}
 	rec := &GameRecord{
-		ID:         newID(),
-		State:      game.NewGame(colors, game.DefaultConfig(numPlayers)),
-		Seats:      seats,
-		Status:     StatusWaiting,
-		Visibility: vis,
-		CreatedAt:  time.Now(),
+		ID:          newID(),
+		State:       game.NewGame(colors, game.DefaultConfig(numPlayers)),
+		Seats:       seats,
+		Status:      StatusWaiting,
+		Visibility:  vis,
+		CreatedAt:   time.Now(),
+		DrawOfferBy: -1,
 	}
 	if err := s.repo.SaveNewGame(ctx, rec); err != nil {
 		return nil, err
@@ -438,12 +459,13 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, er
 		seats[i] = Seat{Index: i, Color: colors[i]}
 	}
 	rec := &GameRecord{
-		ID:         newID(),
-		State:      game.NewGame(colors, game.DefaultConfig(numPlayers)),
-		Seats:      seats,
-		Status:     StatusWaiting,
-		Visibility: vis,
-		CreatedAt:  time.Now(),
+		ID:          newID(),
+		State:       game.NewGame(colors, game.DefaultConfig(numPlayers)),
+		Seats:       seats,
+		Status:      StatusWaiting,
+		Visibility:  vis,
+		CreatedAt:   time.Now(),
+		DrawOfferBy: -1,
 	}
 	if err := s.repo.SaveNewGame(ctx, rec); err != nil {
 		return nil, err
@@ -615,6 +637,13 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 	if rec.State.IsOver() {
 		rec.Status = StatusFinished
 	}
+	// A move from either player automatically rescinds any pending draw
+	// offer — you can't both ask for a draw and keep playing. The subsequent
+	// move broadcast carries the new game DTO (DrawOfferBy=-1) to clients,
+	// so we don't fire the draw-offer listener here — doing so under the
+	// rec.Lock held by the deferred Unlock would deadlock anyway when the
+	// listener tries to re-enter through store.Get.
+	rec.DrawOfferBy = -1
 
 	if perr := s.repo.AppendMove(ctx, gameID, ordinal, move, rec.State.Winner, rec.State.WinKind, rec.Status); perr != nil {
 		// We've already mutated in-memory state; returning the persist error
@@ -627,6 +656,191 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 	// rec is still locked — armClock doesn't take the rec lock itself.
 	s.armClock(rec)
 	return res, rec, nil
+}
+
+// Resign ends a game in progress by recording that the seat behind `token`
+// gave up. The win-kind is WinResign; the survivor (in 2-player mode) is the
+// winner. Persists the new outcome and notifies state listeners so the WS
+// hub broadcasts the final snapshot.
+func (s *Store) Resign(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.Status != StatusPlaying {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	rec.State.Resign(seat.Color)
+	rec.Status = StatusFinished
+	winner := rec.State.Winner
+	winKind := rec.State.WinKind
+	// Any pending draw offer is cleared along with the game ending.
+	hadOffer := rec.DrawOfferBy >= 0
+	rec.DrawOfferBy = -1
+	rec.Unlock()
+
+	s.clocks.Cancel(gameID)
+	s.presence.CancelGame(gameID)
+	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
+		// In-memory truth wins (same policy as handleFlag) — log the persist
+		// failure but don't roll the engine back.
+		_ = err
+	}
+	if hadOffer && s.onDrawOffer != nil {
+		s.onDrawOffer(gameID, -1)
+	}
+	if s.onState != nil {
+		s.onState(gameID)
+	}
+	return rec, nil
+}
+
+// OfferDraw records that the seat behind `token` would accept a draw if the
+// opponent agrees. Restricted to 2-player games per the design call. The
+// offer auto-cancels on any subsequent move (see PlayMove). Re-offering with
+// an already-pending offer is rejected so the UI surfaces "already pending"
+// cleanly rather than silently overwriting.
+func (s *Store) OfferDraw(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	if len(rec.Seats) != 2 {
+		rec.Unlock()
+		return rec, ErrDrawUnsupported
+	}
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.Status != StatusPlaying {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.DrawOfferBy >= 0 {
+		if rec.DrawOfferBy == seat.Index {
+			// Re-offering by the same player is a no-op — return success so
+			// the UI's optimistic state matches the server.
+			rec.Unlock()
+			return rec, nil
+		}
+		// The opponent is already offering; the right action is "accept",
+		// not "offer". Surface this distinction to the caller.
+		rec.Unlock()
+		return rec, ErrDrawAlreadyOffered
+	}
+	rec.DrawOfferBy = seat.Index
+	offeredBy := seat.Index
+	rec.Unlock()
+
+	// Listener may need to re-enter the record (via store.Get → toGameDTO),
+	// so we MUST release rec.Lock before firing it. Same pattern as Resign.
+	if s.onDrawOffer != nil {
+		s.onDrawOffer(gameID, offeredBy)
+	}
+	return rec, nil
+}
+
+// AcceptDraw ends the game in a draw if the *opponent* has an offer pending.
+// Self-acceptance is rejected. 2-player only.
+func (s *Store) AcceptDraw(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.Status != StatusPlaying {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.DrawOfferBy < 0 {
+		rec.Unlock()
+		return rec, ErrDrawNotOffered
+	}
+	if rec.DrawOfferBy == seat.Index {
+		rec.Unlock()
+		return rec, ErrCannotAcceptOwnDrawOffer
+	}
+	rec.State.AgreeDraw()
+	rec.Status = StatusFinished
+	rec.DrawOfferBy = -1
+	winner := rec.State.Winner
+	winKind := rec.State.WinKind
+	rec.Unlock()
+
+	s.clocks.Cancel(gameID)
+	s.presence.CancelGame(gameID)
+	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
+		_ = err
+	}
+	if s.onDrawOffer != nil {
+		s.onDrawOffer(gameID, -1)
+	}
+	if s.onState != nil {
+		s.onState(gameID)
+	}
+	return rec, nil
+}
+
+// DeclineDraw clears a pending draw offer. Either the opponent (refusing the
+// offer) or the offering player (withdrawing it) may call this — we don't
+// distinguish them at the wire level.
+func (s *Store) DeclineDraw(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	_, ok = rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.Status != StatusPlaying {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.DrawOfferBy < 0 {
+		rec.Unlock()
+		return rec, ErrDrawNotOffered
+	}
+	rec.DrawOfferBy = -1
+	rec.Unlock()
+
+	if s.onDrawOffer != nil {
+		s.onDrawOffer(gameID, -1)
+	}
+	return rec, nil
 }
 
 func firstFreeSeat(seats []Seat) int {

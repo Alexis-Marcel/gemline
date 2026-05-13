@@ -60,6 +60,11 @@ type gameDTO struct {
 
 	Visibility    Visibility `json:"visibility"`
 	RematchGameID string     `json:"rematchGameId,omitempty"`
+
+	// DrawOfferBy is the seat index that currently has a draw offer
+	// pending, or -1 when no offer is active. Only meaningful while
+	// status == "playing".
+	DrawOfferBy int `json:"drawOfferBy"`
 }
 
 // lobbyEntryDTO is the wire shape of a public-lobby entry. We keep the JSON
@@ -165,6 +170,7 @@ func toGameDTO(rec *GameRecord) gameDTO {
 		MoveCount:     len(s.History),
 		Visibility:    vis,
 		RematchGameID: rec.RematchGameID,
+		DrawOfferBy:   rec.DrawOfferBy,
 		Thresholds: thresholdsDTO{
 			CapturePairsWin: s.Config.CapturePairsWin,
 			Align4ToWin:     s.Config.Align4ToWin,

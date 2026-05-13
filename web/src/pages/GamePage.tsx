@@ -163,6 +163,51 @@ export function GamePage() {
     }
   }
 
+  const handleResign = useCallback(async () => {
+    if (!creds) return;
+    if (!window.confirm("Abandonner la partie ?")) return;
+    setError(null);
+    try {
+      const g = await api.resign(id, creds.token);
+      setLocalGame(g);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Erreur forfait");
+    }
+  }, [creds, id]);
+
+  const handleOfferDraw = useCallback(async () => {
+    if (!creds) return;
+    setError(null);
+    try {
+      const g = await api.offerDraw(id, creds.token);
+      setLocalGame(g);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Erreur nul");
+    }
+  }, [creds, id]);
+
+  const handleAcceptDraw = useCallback(async () => {
+    if (!creds) return;
+    setError(null);
+    try {
+      const g = await api.acceptDraw(id, creds.token);
+      setLocalGame(g);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Erreur nul");
+    }
+  }, [creds, id]);
+
+  const handleDeclineDraw = useCallback(async () => {
+    if (!creds) return;
+    setError(null);
+    try {
+      const g = await api.declineDraw(id, creds.token);
+      setLocalGame(g);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Erreur nul");
+    }
+  }, [creds, id]);
+
   async function openReplay() {
     setReplayLoading(true);
     setError(null);
@@ -223,6 +268,14 @@ export function GamePage() {
           Gemline
         </Link>
         <div className="flex items-center gap-3">
+          {!creds && game.status !== "waiting" && (
+            <span
+              className="rounded-full border border-zinc-700 bg-zinc-900/60 px-2 py-0.5 text-[11px] text-zinc-400"
+              title="Tu observes cette partie sans y prendre part"
+            >
+              Spectateur
+            </span>
+          )}
           <ConnStatus status={wsStatus} attempt={wsAttempt} />
           <UserNav />
         </div>
@@ -272,6 +325,17 @@ export function GamePage() {
             <p className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3 text-sm text-zinc-300">
               En attente de {seatsFree} joueur(s)…
             </p>
+          )}
+
+          {game.status === "playing" && creds && (
+            <DrawOfferAndActions
+              game={game}
+              mySeatIndex={creds.seatIndex}
+              onOfferDraw={handleOfferDraw}
+              onAcceptDraw={handleAcceptDraw}
+              onDeclineDraw={handleDeclineDraw}
+              onResign={handleResign}
+            />
           )}
 
           {game.status === "finished" && (
@@ -468,8 +532,91 @@ function winKindLabel(k: WinKind): string {
       return "captures";
     case 5:
       return "drapeau (temps écoulé)";
+    case 6:
+      return "forfait";
+    case 7:
+      return "nul d'accord parties";
     default:
       return "?";
   }
 }
 
+// DrawOfferAndActions renders the per-seat action area while a game is in
+// play: forfait + nul-related buttons, plus the offer banner when one is
+// pending. Multi-player games drop the draw controls entirely since draws
+// are only supported in 2-player.
+function DrawOfferAndActions({
+  game,
+  mySeatIndex,
+  onOfferDraw,
+  onAcceptDraw,
+  onDeclineDraw,
+  onResign,
+}: {
+  game: Game;
+  mySeatIndex: number;
+  onOfferDraw: () => void;
+  onAcceptDraw: () => void;
+  onDeclineDraw: () => void;
+  onResign: () => void;
+}) {
+  const drawSupported = game.seats.length === 2;
+  const offeredBy = game.drawOfferBy ?? -1;
+  const offerPendingByMe = offeredBy === mySeatIndex;
+  const offerPendingByThem = offeredBy >= 0 && !offerPendingByMe;
+
+  return (
+    <div className="space-y-2">
+      {offerPendingByThem && (
+        <div className="space-y-2 rounded-xl border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-100">
+          <div>
+            🤝 {gemName(game.seats[offeredBy]?.color ?? 0)} propose un nul.
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={onAcceptDraw}
+              className="flex-1 rounded-md bg-amber-400 px-3 py-1.5 text-xs font-medium text-zinc-950 transition hover:bg-amber-300"
+            >
+              Accepter
+            </button>
+            <button
+              onClick={onDeclineDraw}
+              className="flex-1 rounded-md border border-amber-400/50 px-3 py-1.5 text-xs text-amber-100 transition hover:bg-amber-400/10"
+            >
+              Refuser
+            </button>
+          </div>
+        </div>
+      )}
+
+      {offerPendingByMe && (
+        <div className="flex items-center justify-between rounded-md border border-zinc-700 bg-zinc-900/60 p-2 text-xs text-zinc-300">
+          <span>En attente de l'adversaire pour le nul…</span>
+          <button
+            onClick={onDeclineDraw}
+            className="text-zinc-400 underline-offset-2 hover:text-zinc-200 hover:underline"
+          >
+            Retirer
+          </button>
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        {drawSupported && offeredBy < 0 && (
+          <button
+            onClick={onOfferDraw}
+            className="flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 transition hover:border-zinc-500"
+          >
+            Proposer un nul
+          </button>
+        )}
+        <button
+          onClick={onResign}
+          className="flex-1 rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-200 transition hover:border-red-700"
+        >
+          Abandonner
+        </button>
+      </div>
+    </div>
+  );
+}

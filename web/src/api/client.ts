@@ -77,6 +77,34 @@ export const api = {
     });
   },
 
+  resign(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/resign`, {
+      method: "POST",
+      playerToken,
+    });
+  },
+
+  offerDraw(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/draw/offer`, {
+      method: "POST",
+      playerToken,
+    });
+  },
+
+  acceptDraw(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/draw/accept`, {
+      method: "POST",
+      playerToken,
+    });
+  },
+
+  declineDraw(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/draw/decline`, {
+      method: "POST",
+      playerToken,
+    });
+  },
+
   getGame(id: string) {
     return request<Game>(`/api/games/${id}`);
   },

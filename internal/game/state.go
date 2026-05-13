@@ -224,6 +224,38 @@ func (g *GameState) Forfeit(loser Color) {
 	}
 }
 
+// Resign ends the game by declaring `loser` voluntarily resigned. With two
+// players the survivor wins; with more, the game ends with no winner. The
+// resign is distinct from a timeout (Forfeit) because the win-kind affects
+// post-game stats and what we render to the player.
+func (g *GameState) Resign(loser Color) {
+	if g.IsOver() {
+		return
+	}
+	g.WinKind = WinResign
+	if len(g.Players) == 2 {
+		for _, p := range g.Players {
+			if p.Color != loser {
+				g.Winner = p.Color
+				return
+			}
+		}
+	}
+	g.Winner = Empty
+}
+
+// AgreeDraw ends a 2-player game in a draw. Callers must enforce that the
+// game has exactly two players — the engine deliberately doesn't pick a
+// "winner of the draw" for multi-player, since drawn games in 3+ player mode
+// aren't part of the published rules.
+func (g *GameState) AgreeDraw() {
+	if g.IsOver() {
+		return
+	}
+	g.WinKind = WinDraw
+	g.Winner = Empty
+}
+
 // checkWin returns the kind of win achieved by `p`, or WinNone. Alignment
 // wins are checked before capture wins so that a 6-alignment takes
 // precedence over any concurrent capture threshold.

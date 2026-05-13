@@ -95,8 +95,9 @@ func (s *Server) getMyStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
-// getLeaderboard returns the top rated players. Anonymous — anyone can see
-// the board. The optional ?limit= caps at 100 to keep the response cheap.
+// getLeaderboard returns the top rated players for one mode (1v1 or
+// multi). Anonymous — anyone can see the board. ?limit= caps at 100
+// to keep responses cheap; ?mode= defaults to "1v1".
 func (s *Server) getLeaderboard(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if q := r.URL.Query().Get("limit"); q != "" {
@@ -104,7 +105,15 @@ func (s *Server) getLeaderboard(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	entries, err := s.store.Leaderboard(r.Context(), limit)
+	mode := r.URL.Query().Get("mode")
+	if mode == "" {
+		mode = RatingMode1v1
+	}
+	if mode != RatingMode1v1 && mode != RatingModeMulti {
+		writeError(w, http.StatusBadRequest, "mode must be '1v1' or 'multi'")
+		return
+	}
+	entries, err := s.store.Leaderboard(r.Context(), mode, limit)
 	if err != nil {
 		s.log.Error("leaderboard", "err", err)
 		writeError(w, http.StatusInternalServerError, "could not load leaderboard")

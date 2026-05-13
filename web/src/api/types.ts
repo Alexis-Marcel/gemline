@@ -118,13 +118,17 @@ export interface UserGame {
   updatedAt: string;
 }
 
+export type RatingMode = "1v1" | "multi";
+
 export interface UserStats {
   total: number;
   won: number;
   lost: number;
   ongoing: number;
-  /** Current Elo. 1200 is the default for a user who's never played a rated game. */
-  rating: number;
+  /** Current 1v1 Elo. 1200 is the default for a user who's never played a rated 1v1. */
+  ratingOneVOne: number;
+  /** Current multi Elo. 1200 is the default for a user who's never played a rated multi. */
+  ratingMulti: number;
 }
 
 export interface LeaderboardEntry {

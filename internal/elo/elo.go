@@ -51,3 +51,61 @@ func Update(rating, opponent int, outcome Outcome) int {
 	delta := float64(K) * (outcome.score() - exp)
 	return rating + int(math.Round(delta))
 }
+
+// MultiResult is a single player's updated rating after a multi-player
+// rated game. Returned by UpdateMulti — index 0 is the winner.
+type MultiResult struct {
+	UserID    string
+	NewRating int
+	Result    rune // 'W' for winner, 'L' for the rest
+}
+
+// UpdateMulti applies the "average opponent" extension of Elo to a
+// finished N-player game (N >= 3). The winner gains points by virtue of
+// having beaten the average rating of the rest of the field; the losers
+// split that same total loss equally so the system stays zero-sum across
+// the table. With N=2 this degenerates to a regular pairwise Update, but
+// callers should prefer Update for 2-player to keep behaviour identical
+// to the pre-multi era.
+//
+// winnerID/winnerRating identify the player who triggered the win
+// condition. opponentIDs/opponentRatings are the rest of the seated
+// players (must be the same length, same ordering).
+func UpdateMulti(
+	winnerID string, winnerRating int,
+	opponentIDs []string, opponentRatings []int,
+) []MultiResult {
+	n := len(opponentIDs)
+	if n == 0 || n != len(opponentRatings) {
+		return nil
+	}
+
+	avg := 0
+	for _, r := range opponentRatings {
+		avg += r
+	}
+	avg /= n
+
+	newWinner := Update(winnerRating, avg, Win)
+	gain := newWinner - winnerRating
+	// Split the loss as evenly as possible across the losers. Rounding to
+	// int means we may be off by ±1 from a perfect zero-sum total; we
+	// pin the difference onto the first loser so the books balance.
+	perLoss := gain / n
+	remainder := gain - perLoss*n // can be negative if gain is negative
+
+	out := make([]MultiResult, 0, n+1)
+	out = append(out, MultiResult{UserID: winnerID, NewRating: newWinner, Result: 'W'})
+	for i, id := range opponentIDs {
+		loss := perLoss
+		if i == 0 {
+			loss += remainder
+		}
+		out = append(out, MultiResult{
+			UserID:    id,
+			NewRating: opponentRatings[i] - loss,
+			Result:    'L',
+		})
+	}
+	return out
+}

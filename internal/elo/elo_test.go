@@ -53,6 +53,51 @@ func TestUpdate_FavoriteLossIsExpensive(t *testing.T) {
 	}
 }
 
+func TestUpdateMulti_ZeroSum(t *testing.T) {
+	// Whatever the winner gains, the table loses exactly the same — no
+	// inflation, no deflation of the Elo pool from a single multi game.
+	cases := []struct {
+		winner   int
+		opps     []int
+	}{
+		{1500, []int{1500, 1500, 1500}},        // even table
+		{1800, []int{1200, 1400, 1600}},        // strong winner
+		{1100, []int{1700, 1700, 1700}},        // huge upset
+		{1500, []int{1500, 1500}},              // 3-player game
+		{1400, []int{1300, 1500, 1700, 1200}},  // 5 players
+	}
+	for _, c := range cases {
+		oppIDs := make([]string, len(c.opps))
+		for i := range oppIDs {
+			oppIDs[i] = "opp"
+		}
+		results := UpdateMulti("winner", c.winner, oppIDs, c.opps)
+		// Sum of deltas across everyone must be 0.
+		total := 0
+		for i, r := range results {
+			var prev int
+			if i == 0 {
+				prev = c.winner
+			} else {
+				prev = c.opps[i-1]
+			}
+			total += r.NewRating - prev
+		}
+		if total != 0 {
+			t.Errorf("winner=%d opps=%v: total delta=%d, want 0", c.winner, c.opps, total)
+		}
+	}
+}
+
+func TestUpdateMulti_WinnerGainsAgainstStrongerField(t *testing.T) {
+	// 1100 winner vs three 1700s: winner gains more than against equals.
+	results := UpdateMulti("w", 1100, []string{"a", "b", "c"}, []int{1700, 1700, 1700})
+	winnerGain := results[0].NewRating - 1100
+	if winnerGain <= K/2 {
+		t.Fatalf("upset win should gain more than K/2=%d, got +%d", K/2, winnerGain)
+	}
+}
+
 func TestUpdate_ZeroSum(t *testing.T) {
 	// For arbitrary inputs, the swap of points between players must net to
 	// zero (a defining property of Elo).

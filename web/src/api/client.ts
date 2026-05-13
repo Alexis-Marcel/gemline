@@ -199,10 +199,11 @@ export const api = {
     return request<UserStats>("/api/users/me/stats");
   },
 
-  getLeaderboard(limit = 50) {
-    return request<LeaderboardEntry[]>(`/api/leaderboard?limit=${limit}`, {
-      skipAuth: true,
-    });
+  getLeaderboard(mode: "1v1" | "multi" = "1v1", limit = 50) {
+    return request<LeaderboardEntry[]>(
+      `/api/leaderboard?mode=${mode}&limit=${limit}`,
+      { skipAuth: true },
+    );
   },
 };
 

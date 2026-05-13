@@ -89,6 +89,25 @@ func NewGame(playerColors []Color, cfg Config) *GameState {
 	}
 }
 
+// Clone returns a deep copy of the game state suitable for speculative
+// simulation (e.g. the AI's minimax search). Players are slice-copied so
+// per-player counters drift independently. History is deliberately omitted
+// — callers that simulate forward don't need the trail behind the current
+// position, and skipping it keeps clones cheap.
+func (g *GameState) Clone() *GameState {
+	players := make([]Player, len(g.Players))
+	copy(players, g.Players)
+	return &GameState{
+		Config:        g.Config,
+		Board:         g.Board.Clone(),
+		Players:       players,
+		Turn:          g.Turn,
+		Winner:        g.Winner,
+		WinKind:       g.WinKind,
+		TurnStartedAt: g.TurnStartedAt,
+	}
+}
+
 // StartClock initialises the turn-start timestamp. Call once after NewGame
 // to begin counting time against the first player. If time control is
 // disabled (Config.InitialTimeMs == 0), this is a no-op.

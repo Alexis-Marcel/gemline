@@ -55,28 +55,28 @@ type Repository interface {
 	// Store.Rematch to resolve concurrent rematch calls.
 	SetRematchLink(ctx context.Context, originalID, newID string) (string, error)
 
-	// RatingFor returns the rating row for userID, or a zero-value Rating
-	// when no row exists yet. Callers must apply elo.DefaultRating
+	// RatingFor returns the rating row for (userID, mode), or a zero-value
+	// Rating when no row exists yet. Callers must apply elo.DefaultRating
 	// themselves when Rating.Games == 0.
-	RatingFor(ctx context.Context, userID string) (Rating, error)
+	RatingFor(ctx context.Context, userID, mode string) (Rating, error)
 
-	// RatingsFor returns rating rows for `userIDs` in the same order; missing
-	// rows are returned as zero-value Rating entries.
-	RatingsFor(ctx context.Context, userIDs []string) ([]Rating, error)
+	// RatingsFor returns rating rows for `userIDs` in the given mode, same
+	// order; missing rows are returned as zero-value Rating entries.
+	RatingsFor(ctx context.Context, userIDs []string, mode string) ([]Rating, error)
 
 	// ApplyRatedGame atomically marks `gameID` as rated (via
 	// `UPDATE games SET rated_at = NOW() WHERE rated_at IS NULL RETURNING`)
-	// and persists the two upserted rating rows. Returns true if this call
-	// won the race and applied the rating; false if the game was already
-	// rated (no-op). Both updates and the games row run in a single
-	// transaction so a crash mid-write can't leave one rating bumped and
-	// the other untouched.
-	ApplyRatedGame(ctx context.Context, gameID string, updates []RatingUpdate) (bool, error)
+	// and persists the upserted rating rows for the supplied mode. Returns
+	// true if this call won the race and applied the rating; false if the
+	// game was already rated (no-op). Both updates and the games row run
+	// in a single transaction so a crash mid-write can't leave one rating
+	// bumped and the other untouched.
+	ApplyRatedGame(ctx context.Context, gameID, mode string, updates []RatingUpdate) (bool, error)
 
-	// Leaderboard returns the top-`limit` rated users (rating DESC), joined
-	// with their display name. Users with no profile row are omitted —
-	// they're not visible enough to surface on a board.
-	Leaderboard(ctx context.Context, limit int) ([]LeaderboardEntry, error)
+	// Leaderboard returns the top-`limit` rated users for the given mode
+	// (rating DESC), joined with their display name. Users with no profile
+	// row are omitted — they're not visible enough to surface on a board.
+	Leaderboard(ctx context.Context, mode string, limit int) ([]LeaderboardEntry, error)
 
 	// FinalizeStart deletes every unoccupied seat row for `gameID` (the
 	// host clicked Start and chose to play with fewer than max players)
@@ -103,20 +103,32 @@ type UserGame struct {
 	UpdatedAt  string     `json:"updatedAt"`
 }
 
-// UserStats are aggregate counts derived from the user's finished games.
+// UserStats are aggregate counts derived from the user's finished games,
+// plus the current Elo for each rating mode. Either rating defaults to
+// elo.DefaultRating (1200) when the user has no row for that mode yet.
 type UserStats struct {
-	Total   int `json:"total"`
-	Won     int `json:"won"`
-	Lost    int `json:"lost"`
-	Ongoing int `json:"ongoing"`
-	// Rating is the current Elo. Defaults to elo.DefaultRating when the
-	// user has no row in the ratings table yet (never played a rated game).
-	Rating int `json:"rating"`
+	Total          int `json:"total"`
+	Won            int `json:"won"`
+	Lost           int `json:"lost"`
+	Ongoing        int `json:"ongoing"`
+	RatingOneVOne  int `json:"ratingOneVOne"`
+	RatingMulti    int `json:"ratingMulti"`
 }
 
-// Rating is one user's current Elo + per-result aggregate counts.
+// RatingMode identifies which queue a rating belongs to. chess.com would
+// call this "Bullet/Blitz/Rapide"; for Gemline it's the player count split
+// — 1v1 and multi each have their own Elo so a strong 1v1 player isn't
+// disadvantaged by their inexperience in 4P games (and vice versa).
+const (
+	RatingMode1v1   = "1v1"
+	RatingModeMulti = "multi"
+)
+
+// Rating is one user's current Elo + per-result aggregate counts, scoped
+// to a single rating mode.
 type Rating struct {
 	UserID    string
+	Mode      string
 	Rating    int
 	Games     int
 	Wins      int
@@ -193,23 +205,24 @@ func (noopRepo) SetRematchLink(_ context.Context, _, newID string) (string, erro
 	// idempotency contract intact for single-process, in-memory runs.
 	return newID, nil
 }
-func (noopRepo) RatingFor(context.Context, string) (Rating, error) {
+func (noopRepo) RatingFor(context.Context, string, string) (Rating, error) {
 	return Rating{}, nil
 }
-func (noopRepo) RatingsFor(_ context.Context, userIDs []string) ([]Rating, error) {
+func (noopRepo) RatingsFor(_ context.Context, userIDs []string, mode string) ([]Rating, error) {
 	out := make([]Rating, len(userIDs))
 	for i, id := range userIDs {
 		out[i].UserID = id
+		out[i].Mode = mode
 	}
 	return out, nil
 }
-func (noopRepo) ApplyRatedGame(context.Context, string, []RatingUpdate) (bool, error) {
+func (noopRepo) ApplyRatedGame(context.Context, string, string, []RatingUpdate) (bool, error) {
 	// Without DB-backed atomicity we can't guarantee single-application.
 	// Return false ("already rated") so Store.maybeApplyRating doesn't
 	// double-credit Elo across hermetic tests.
 	return false, nil
 }
-func (noopRepo) Leaderboard(context.Context, int) ([]LeaderboardEntry, error) {
+func (noopRepo) Leaderboard(context.Context, string, int) ([]LeaderboardEntry, error) {
 	return nil, nil
 }
 func (noopRepo) FinalizeStart(context.Context, string, Status) error { return nil }

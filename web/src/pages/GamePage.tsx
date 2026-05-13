@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
+import { useAuth } from "../auth/AuthProvider";
 import type { Color, Game, Replay, WinKind } from "../api/types";
 import {
   acquireMoveStream,
@@ -22,6 +23,7 @@ import { cellsAtStep, lastMoveAt } from "../lib/replay";
 export function GamePage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const {
     game: liveGame,
     status: wsStatus,
@@ -124,19 +126,15 @@ export function GamePage() {
     }
   }, [game, creds]);
 
-  async function handleJoin() {
-    if (!name.trim()) {
-      setError("Choisis un nom");
-      return;
-    }
+  async function handleJoin(joinAs: string | undefined) {
     setJoining(true);
     setError(null);
     try {
-      const res = await api.joinGame(id, name.trim());
+      const res = await api.joinGame(id, joinAs);
       saveCredentials(id, {
         token: res.token,
         seatIndex: res.seat.index,
-        name: name.trim(),
+        name: res.seat.name,
       });
       setLocalGame(res.game);
     } catch (err) {
@@ -144,6 +142,22 @@ export function GamePage() {
     } finally {
       setJoining(false);
     }
+  }
+
+  // handleCancelMatchmaking: vacate a seat in a still-waiting game and go
+  // home. Clear local creds eagerly so a stale WS state event doesn't put
+  // us back in the seat we just vacated.
+  async function handleCancelMatchmaking() {
+    if (!creds) return;
+    const token = creds.token;
+    clearCredentials(id);
+    setLocalGame(null);
+    try {
+      await api.leaveSeat(id, token);
+    } catch {
+      /* best-effort — server may already think we're gone */
+    }
+    navigate("/");
   }
 
   // If a rematch was created for this game (either by us or someone else),
@@ -253,6 +267,25 @@ export function GamePage() {
   const boardHighlight = inReplay ? lastMoveAt(replay.steps, replayStep) : null;
 
   const seatsFree = game.seats.filter((s) => !s.occupied).length;
+  const seatsOccupied = game.seats.length - seatsFree;
+
+  // "Recherche d'un adversaire" — the matchmaking-style screen. Triggered
+  // when you've been auto-seated into a fresh public game and nobody else
+  // is here yet. We render it instead of the full game UI so it feels like
+  // a real queue rather than "you got dumped onto a board".
+  const isSearching =
+    game.status === "waiting" &&
+    !!creds &&
+    game.visibility === "public" &&
+    seatsOccupied === 1;
+  if (isSearching) {
+    return (
+      <SearchingForOpponent
+        players={game.seats.length}
+        onCancel={handleCancelMatchmaking}
+      />
+    );
+  }
 
   return (
     <div className="mx-auto max-w-6xl p-3 lg:p-4">
@@ -312,10 +345,11 @@ export function GamePage() {
           <Objectives thresholds={game.thresholds} />
 
           {game.status === "waiting" && !creds && (
-            <JoinForm
-              value={name}
+            <JoinPanel
+              isAuthed={!!user}
+              name={name}
               onChange={setName}
-              onSubmit={handleJoin}
+              onJoin={(asName) => handleJoin(asName)}
               disabled={joining}
               seatsFree={seatsFree}
             />
@@ -472,24 +506,49 @@ function statusMeta(
   }
 }
 
-function JoinForm({
-  value,
+// JoinPanel hides the legacy "type your name" form for authenticated users —
+// the server pulls the display name from their profile, so a single
+// "Rejoindre" button is enough. Anonymous users still get the name input,
+// since the server has no way to identify them otherwise.
+function JoinPanel({
+  isAuthed,
+  name,
   onChange,
-  onSubmit,
+  onJoin,
   disabled,
   seatsFree,
 }: {
-  value: string;
+  isAuthed: boolean;
+  name: string;
   onChange: (v: string) => void;
-  onSubmit: () => void;
+  onJoin: (name?: string) => void;
   disabled: boolean;
   seatsFree: number;
 }) {
+  if (seatsFree === 0) return null;
+  if (isAuthed) {
+    return (
+      <button
+        type="button"
+        onClick={() => onJoin(undefined)}
+        disabled={disabled}
+        className="w-full rounded-xl border border-amber-400 bg-amber-400/10 px-3 py-3 text-left transition hover:bg-amber-400/20 disabled:opacity-50"
+      >
+        <div className="text-sm font-medium text-amber-100">
+          {disabled ? "…" : "Rejoindre la partie"}
+        </div>
+        <div className="mt-0.5 text-xs text-zinc-400">
+          Tu joues sous ton nom de profil.
+        </div>
+      </button>
+    );
+  }
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        onSubmit();
+        if (!name.trim()) return;
+        onJoin(name.trim());
       }}
       className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-900/40 p-3"
     >
@@ -501,17 +560,54 @@ function JoinForm({
         autoFocus
         className="block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
         placeholder="Ton nom"
-        value={value}
+        value={name}
         onChange={(e) => onChange(e.target.value)}
       />
       <button
         type="submit"
-        disabled={disabled || seatsFree === 0}
+        disabled={disabled || !name.trim()}
         className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
       >
         {disabled ? "..." : "Rejoindre"}
       </button>
     </form>
+  );
+}
+
+// SearchingForOpponent is the chess.com-style waiting room for matchmade
+// games. Renders before the game layout so the user sees a clean "queue"
+// state instead of an empty board.
+function SearchingForOpponent({
+  players,
+  onCancel,
+}: {
+  players: number;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="flex h-screen items-center justify-center bg-zinc-950 p-6">
+      <div className="w-full max-w-sm space-y-6 rounded-xl border border-zinc-800 bg-zinc-900/60 p-6 text-center">
+        <div
+          aria-hidden
+          className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-700 border-t-amber-400"
+        />
+        <div className="space-y-1">
+          <h1 className="text-lg font-medium text-zinc-100">
+            Recherche d'un adversaire…
+          </h1>
+          <p className="text-sm text-zinc-400">
+            Partie {players === 2 ? "1 contre 1" : `à ${players} joueurs`}.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-sm text-zinc-400 underline-offset-2 transition hover:text-zinc-200 hover:underline"
+        >
+          Annuler
+        </button>
+      </div>
+    </div>
   );
 }
 

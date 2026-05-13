@@ -774,10 +774,11 @@ func (s *Store) AddBot(ctx context.Context, gameID string, seatIdx int) (*GameRe
 }
 
 // Matchmake returns a public waiting game of the requested player count
-// with at least one free seat, creating a fresh public game if no such
-// candidate exists. The oldest matching game wins — newer candidates wait
-// their turn so solo joiners don't starve.
-func (s *Store) Matchmake(ctx context.Context, players int) (*GameRecord, error) {
+// with at least one free seat that `excludeUserID` is *not* already seated
+// in. The oldest matching game wins — newer candidates wait their turn so
+// solo joiners don't starve. If no candidate matches, a fresh public game
+// is created.
+func (s *Store) Matchmake(ctx context.Context, players int, excludeUserID string) (*GameRecord, error) {
 	// Pull a generous slice of candidates and filter Go-side. The repo path
 	// returns most-recent first; we iterate in reverse to favour the oldest.
 	candidates, err := s.repo.LobbyGames(ctx, 50)
@@ -805,15 +806,61 @@ func (s *Store) Matchmake(ctx context.Context, players int) (*GameRecord, error)
 			continue
 		}
 		// Re-check status under the lock: another join may have filled the
-		// last seat between the candidate snapshot and us reaching it.
+		// last seat between the candidate snapshot and us reaching it. Also
+		// skip games where the requester is already seated — re-clicking
+		// "Find match" should land us somewhere new, not in the game we're
+		// already waiting in.
 		rec.Lock()
-		stillJoinable := rec.Status == StatusWaiting && !rec.AllSeated()
+		joinable := rec.Status == StatusWaiting && !rec.AllSeated()
+		if joinable && excludeUserID != "" {
+			for _, seat := range rec.Seats {
+				if seat.UserID == excludeUserID {
+					joinable = false
+					break
+				}
+			}
+		}
 		rec.Unlock()
-		if stillJoinable {
+		if joinable {
 			return rec, nil
 		}
 	}
 	return s.Create(ctx, players, VisibilityPublic)
+}
+
+// LeaveSeat frees the seat behind `token` and broadcasts the new state.
+// Only allowed while the game is still in `waiting`: leaving a game in play
+// is what Resign is for. The seat's name/user/bot/token are all cleared so a
+// fresh join can reuse the slot.
+func (s *Store) LeaveSeat(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+	rec.Lock()
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.Status != StatusWaiting {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	seatIdx := seat.Index
+	rec.Seats[seatIdx] = Seat{
+		Index: seatIdx,
+		Color: seat.Color,
+	}
+	if err := s.repo.UpdateSeat(ctx, gameID, &rec.Seats[seatIdx], rec.Status); err != nil {
+		rec.Unlock()
+		return rec, err
+	}
+	rec.Unlock()
+	return rec, nil
 }
 
 // Resign ends a game in progress by recording that the seat behind `token`

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/alexis/gemline/internal/game"
 	"github.com/golang-jwt/jwt/v5"
@@ -109,6 +110,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/draw/decline", s.declineDraw)
 	mux.HandleFunc("POST /api/games/{id}/rematch", s.rematchGame)
 	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/bot", s.addBot)
+	mux.HandleFunc("POST /api/games/{id}/leave", s.leaveSeat)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
 	mux.HandleFunc("GET /api/games/{id}/messages", s.getChat)
 	mux.HandleFunc("POST /api/games/{id}/messages", s.postChat)
@@ -163,9 +165,15 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 
 // matchmakeGame returns the public waiting game the caller should join — an
 // existing one with a free seat (oldest first), or a freshly-created public
-// game if no candidate is matchable. The client follows up with /join to
-// actually claim a seat.
+// game if no candidate is matchable. Atomically auto-joins the caller so
+// the client can navigate straight into the game without a follow-up /join.
+// Requires authentication — matchmade games feed the rating system, and
+// rating needs a stable identity.
 func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
+	u := requireUser(w, r)
+	if u == nil {
+		return
+	}
 	var req matchmakeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
@@ -175,16 +183,40 @@ func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "players must be in [2, 6]")
 		return
 	}
-	rec, err := s.store.Matchmake(r.Context(), req.Players)
+	rec, err := s.store.Matchmake(r.Context(), req.Players, u.ID)
 	if err != nil {
 		s.log.Error("matchmake", "err", err)
 		writeError(w, http.StatusInternalServerError, "could not matchmake")
 		return
 	}
+	name := s.displayNameFor(r.Context(), u)
+	seat, token, err := s.store.Join(r.Context(), rec.ID, name, u.ID, -1)
+	if err != nil {
+		writeError(w, statusForJoinError(err), err.Error())
+		return
+	}
 	rec.Lock()
 	dto := toGameDTO(rec)
 	rec.Unlock()
-	writeJSON(w, http.StatusOK, dto)
+	s.hub.Broadcast(rec.ID, eventState(dto))
+	writeJSON(w, http.StatusOK, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
+}
+
+// displayNameFor resolves the user's preferred display name, falling back to
+// the email's local-part and finally to a generic "Joueur" if everything is
+// blank. Used by paths that auto-join (matchmake, signed-in join without a
+// body) — never asks the user to retype something we already know.
+func (s *Server) displayNameFor(ctx context.Context, u *AuthUser) string {
+	if p, err := s.store.Profile(ctx, u.ID); err == nil && p != nil && p.DisplayName != "" {
+		return p.DisplayName
+	}
+	if at := strings.IndexByte(u.Email, '@'); at > 0 {
+		return u.Email[:at]
+	}
+	if u.Email != "" {
+		return u.Email
+	}
+	return "Joueur"
 }
 
 // addBot fills the requested empty seat with a bot. Only private waiting
@@ -206,6 +238,41 @@ func (s *Server) addBot(w http.ResponseWriter, r *http.Request) {
 	rec.Unlock()
 	s.hub.Broadcast(gameID, eventState(dto))
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// leaveSeat frees the caller's seat in a still-waiting game. Equivalent to
+// "cancel matchmaking" from the user's perspective: they vacate the seat
+// they were holding and the game becomes joinable again.
+func (s *Server) leaveSeat(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	token := playerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing player token")
+		return
+	}
+	rec, err := s.store.LeaveSeat(r.Context(), gameID, token)
+	if err != nil {
+		writeError(w, statusForLeaveError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	s.hub.Broadcast(gameID, eventState(dto))
+	writeJSON(w, http.StatusOK, dto)
+}
+
+func statusForLeaveError(err error) int {
+	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrBadToken):
+		return http.StatusUnauthorized
+	case errors.Is(err, ErrNotPlaying):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func statusForAddBotError(err error) int {
@@ -373,21 +440,29 @@ func (s *Server) getGame(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) joinGame(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
+	// The body is optional for authenticated users (we know their identity
+	// and display name). Anonymous joins still need a name, but the absence
+	// of a body should not blow up the request.
 	var req joinGameRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid body")
-		return
-	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
 	seatIdx := -1
 	if req.Seat != nil {
 		seatIdx = *req.Seat
 	}
 
 	userID := ""
+	name := strings.TrimSpace(req.Name)
 	if u, ok := userFromContext(r.Context()); ok {
 		userID = u.ID
+		if name == "" {
+			name = s.displayNameFor(r.Context(), u)
+		}
 	}
-	seat, token, err := s.store.Join(r.Context(), gameID, req.Name, userID, seatIdx)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "name required for anonymous join")
+		return
+	}
+	seat, token, err := s.store.Join(r.Context(), gameID, name, userID, seatIdx)
 	if err != nil {
 		writeError(w, statusForJoinError(err), err.Error())
 		return

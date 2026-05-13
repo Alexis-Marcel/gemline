@@ -397,40 +397,73 @@ func TestBotPlaysWhenItIsItsTurn(t *testing.T) {
 	}
 }
 
-func TestMatchmakeCreatesGameWhenNoneOpen(t *testing.T) {
+func TestMatchmakeRejectsAnonymous(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := postMatchmake(t, ts, 2, http.StatusOK)
-	if g.Status != StatusWaiting {
-		t.Fatalf("want waiting, got %s", g.Status)
-	}
-	if g.Visibility != VisibilityPublic {
-		t.Fatalf("matchmade games must be public, got %q", g.Visibility)
-	}
-	if len(g.Seats) != 2 {
-		t.Fatalf("want 2 seats, got %d", len(g.Seats))
+	// No X-Test-User-ID header → 401.
+	resp, _ := http.Post(ts.URL+"/api/games/matchmake", "application/json", strings.NewReader(`{"players":2}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d", resp.StatusCode)
 	}
 }
 
-func TestMatchmakeReturnsExistingMatchableGame(t *testing.T) {
+func TestMatchmakeCreatesAndAutoJoins(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	first := postMatchmake(t, ts, 2, http.StatusOK)  // creates a fresh public game
-	_ = joinGame(t, ts, first.ID, "Alice", nil)       // seat 0 taken, seat 1 free
-	second := postMatchmake(t, ts, 2, http.StatusOK)  // should reuse `first`
-	if second.ID != first.ID {
-		t.Fatalf("matchmake should reuse the partially-filled game; got %s vs %s", second.ID, first.ID)
+	j := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	if j.Game.Status != StatusWaiting {
+		t.Fatalf("want waiting, got %s", j.Game.Status)
+	}
+	if j.Game.Visibility != VisibilityPublic {
+		t.Fatalf("matchmade games must be public, got %q", j.Game.Visibility)
+	}
+	if !j.Game.Seats[0].Occupied {
+		t.Fatalf("matchmake should auto-seat the caller, got seat 0 = %+v", j.Game.Seats[0])
+	}
+	if j.Token == "" {
+		t.Fatalf("matchmake must return a seat token")
+	}
+}
+
+func TestMatchmakePairsTwoCallers(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	alice := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	bob := postMatchmake(t, ts, 2, "bob", http.StatusOK)
+	if alice.Game.ID != bob.Game.ID {
+		t.Fatalf("two callers for 2P should land in the same game; got %s and %s", alice.Game.ID, bob.Game.ID)
+	}
+	if bob.Game.Status != StatusPlaying {
+		t.Fatalf("game should transition to playing once both seats are filled, got %s", bob.Game.Status)
+	}
+}
+
+func TestMatchmakeSkipsGameWhereUserAlreadySeated(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	first := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	// Alice clicks 1v1 again — she's already seated in `first`, so the
+	// matchmaker must create a new public game rather than handing her
+	// back the one she's already in.
+	second := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	if second.Game.ID == first.Game.ID {
+		t.Fatalf("matchmake should not return a game the caller is already seated in")
 	}
 }
 
 func TestMatchmakeSkipsFullGames(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	full := postMatchmake(t, ts, 2, http.StatusOK)
-	_ = joinGame(t, ts, full.ID, "Alice", nil)
-	_ = joinGame(t, ts, full.ID, "Bob", nil) // now playing, can't be matched
-	fresh := postMatchmake(t, ts, 2, http.StatusOK)
-	if fresh.ID == full.ID {
+	a := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	b := postMatchmake(t, ts, 2, "bob", http.StatusOK)
+	if a.Game.ID != b.Game.ID || b.Game.Status != StatusPlaying {
+		t.Fatalf("setup broke: a.id=%s b.id=%s status=%s", a.Game.ID, b.Game.ID, b.Game.Status)
+	}
+	// Now a third caller — the game above is full/playing, so matchmake
+	// must spawn a fresh one.
+	c := postMatchmake(t, ts, 2, "carol", http.StatusOK)
+	if c.Game.ID == a.Game.ID {
 		t.Fatalf("matchmake should not return a full game")
 	}
 }
@@ -438,13 +471,44 @@ func TestMatchmakeSkipsFullGames(t *testing.T) {
 func TestMatchmakeSeparatesPlayerCounts(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	two := postMatchmake(t, ts, 2, http.StatusOK)
-	four := postMatchmake(t, ts, 4, http.StatusOK)
-	if two.ID == four.ID {
+	two := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	four := postMatchmake(t, ts, 4, "alice", http.StatusOK)
+	if two.Game.ID == four.Game.ID {
 		t.Fatalf("2-player and 4-player matchmaking must return different games")
 	}
-	if len(two.Seats) != 2 || len(four.Seats) != 4 {
-		t.Fatalf("seat counts mismatched (2P=%d 4P=%d)", len(two.Seats), len(four.Seats))
+	if len(two.Game.Seats) != 2 || len(four.Game.Seats) != 4 {
+		t.Fatalf("seat counts mismatched (2P=%d 4P=%d)", len(two.Game.Seats), len(four.Game.Seats))
+	}
+}
+
+func TestLeaveSeatFreesIt(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	j := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	// Alice cancels → her seat is freed.
+	resp, err := postLeave(t, ts, j.Game.ID, j.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("leave: status=%d", resp.StatusCode)
+	}
+	cur := getGameViaHTTP(t, ts, j.Game.ID)
+	if cur.Seats[j.Seat.Index].Occupied {
+		t.Fatalf("seat should be empty after leave, got %+v", cur.Seats[j.Seat.Index])
+	}
+}
+
+func TestLeaveSeatRejectedAfterStart(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	a := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	_ = postMatchmake(t, ts, 2, "bob", http.StatusOK) // fills the game → playing
+	resp, _ := postLeave(t, ts, a.Game.ID, a.Token)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("want 409 leaving a started game, got %d", resp.StatusCode)
 	}
 }
 
@@ -590,10 +654,23 @@ func postAddBotRaw(t *testing.T, ts *httptest.Server, gameID string, seatIdx, wa
 	return resp
 }
 
-func postMatchmake(t *testing.T, ts *httptest.Server, players, wantStatus int) gameDTO {
+func postLeave(t *testing.T, ts *httptest.Server, gameID, token string) (*http.Response, error) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+gameID+"/leave", nil)
+	req.Header.Set("X-Player-Token", token)
+	return http.DefaultClient.Do(req)
+}
+
+// postMatchmake calls /api/games/matchmake as `userID`, which the hermetic
+// auth middleware turns into an AuthUser via the X-Test-User-ID back door.
+// Returns the joinResponse — the caller is automatically seated.
+func postMatchmake(t *testing.T, ts *httptest.Server, players int, userID string, wantStatus int) joinResponse {
 	t.Helper()
 	body := strings.NewReader(`{"players":` + itoa(players) + `}`)
-	resp, err := http.Post(ts.URL+"/api/games/matchmake", "application/json", body)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/matchmake", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-User-ID", userID)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,11 +679,14 @@ func postMatchmake(t *testing.T, ts *httptest.Server, players, wantStatus int) g
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("matchmake: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
 	}
-	var g gameDTO
-	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
+	if wantStatus != http.StatusOK {
+		return joinResponse{}
+	}
+	var j joinResponse
+	if err := json.NewDecoder(resp.Body).Decode(&j); err != nil {
 		t.Fatal(err)
 	}
-	return g
+	return j
 }
 
 func postRematch(t *testing.T, ts *httptest.Server, id string, wantStatus int) rematchResponse {

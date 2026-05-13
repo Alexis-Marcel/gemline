@@ -1,8 +1,10 @@
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
+import { useAuth } from "../auth/AuthProvider";
 import { Button } from "../components/Button";
 import { UserNav } from "../components/UserNav";
+import { saveCredentials } from "../lib/auth";
 
 const MULTIPLAYER_DEFAULT_PLAYERS = 4;
 
@@ -10,6 +12,7 @@ type Mode = "menu" | "private";
 
 export function HomePage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [busy, setBusy] = useState<"" | "1v1" | "multi" | "private">("");
   const [joinId, setJoinId] = useState("");
   const [mode, setMode] = useState<Mode>("menu");
@@ -17,12 +20,29 @@ export function HomePage() {
   const [error, setError] = useState<string | null>(null);
 
   async function matchmake(players: number, key: "1v1" | "multi") {
+    if (!user) {
+      // Matchmaking needs a stable identity (ratings, name). Send anonymous
+      // users to login with a return-to so they land back here after.
+      navigate("/login?next=/");
+      return;
+    }
     setBusy(key);
     setError(null);
     try {
-      const game = await api.matchmake(players);
-      navigate(`/game/${game.id}`);
+      const res = await api.matchmake(players);
+      // We're seated atomically — persist the seat token so the GamePage
+      // shows us as a player, not a spectator, on first render.
+      saveCredentials(res.game.id, {
+        token: res.token,
+        seatIndex: res.seat.index,
+        name: res.seat.name,
+      });
+      navigate(`/game/${res.game.id}`);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        navigate("/login?next=/");
+        return;
+      }
       setError(err instanceof ApiError ? err.message : "Erreur matchmaking");
     } finally {
       setBusy("");

@@ -68,10 +68,23 @@ export const api = {
     });
   },
 
+  // matchmake requires a signed-in user — the server 401s otherwise.
+  // Atomic: the caller is auto-joined into the matched game, so the client
+  // gets back the seat token and can navigate straight in without a
+  // follow-up /join call.
   matchmake(players: number) {
-    return request<Game>("/api/games/matchmake", {
+    return request<JoinResponse>("/api/games/matchmake", {
       method: "POST",
       body: JSON.stringify({ players }),
+    });
+  },
+
+  // leaveSeat frees the caller's seat in a still-waiting game (cancel
+  // matchmaking, or back out of a private invite before play starts).
+  leaveSeat(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/leave`, {
+      method: "POST",
+      playerToken,
     });
   },
 
@@ -119,10 +132,15 @@ export const api = {
     return request<Game>(`/api/games/${id}`);
   },
 
-  joinGame(id: string, name: string, seat?: number) {
+  // joinGame: pass `name` only for anonymous users — authenticated users
+  // let the server fill it from their profile display name.
+  joinGame(id: string, name?: string, seat?: number) {
+    const body: Record<string, unknown> = {};
+    if (name) body.name = name;
+    if (seat !== undefined) body.seat = seat;
     return request<JoinResponse>(`/api/games/${id}/join`, {
       method: "POST",
-      body: JSON.stringify(seat === undefined ? { name } : { name, seat }),
+      body: JSON.stringify(body),
     });
   },
 

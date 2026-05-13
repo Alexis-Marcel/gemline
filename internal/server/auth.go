@@ -88,6 +88,20 @@ func jwtMiddleware(verifier jwt.Keyfunc, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := authorizationBearer(r)
 		if token == "" || verifier == nil {
+			// Hermetic-test back door: when auth is disabled (no SUPABASE_URL),
+			// honour an X-Test-User-ID header so server tests can exercise
+			// auth-requiring endpoints without standing up a real IdP. In
+			// production the verifier is non-nil so this code never runs.
+			if verifier == nil {
+				if id := r.Header.Get("X-Test-User-ID"); id != "" {
+					ctx := context.WithValue(r.Context(), userCtxKey{}, &AuthUser{
+						ID:    id,
+						Email: id + "@test.local",
+					})
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -936,8 +936,13 @@ func (r *PostgresRepo) MatchmakeTick(
 		// see them. The same tx commit that materialises the game also
 		// removes them — no in-between state where users have no game
 		// and no queue presence.
+		//
+		// Cast $1 to uuid[] explicitly: pgx serialises a Go []string as
+		// text[], and there is no implicit text[]→uuid[] coercion for
+		// the ANY comparison. The cast happens once per query, server
+		// side, before the WHERE evaluates.
 		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM matchmake_queue WHERE user_id = ANY($1)
+			DELETE FROM matchmake_queue WHERE user_id = ANY($1::uuid[])
 		`, userIDs); err != nil {
 			return nil, fmt.Errorf("delete matched queue: %w", err)
 		}

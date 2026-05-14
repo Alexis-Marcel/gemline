@@ -181,6 +181,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/profile", s.putProfile)
 	mux.HandleFunc("GET /api/users/me/games", s.getMyGames)
 	mux.HandleFunc("GET /api/users/me/stats", s.getMyStats)
+	// /search literal must come before the {userId} pattern with
+	// net/http's mux — pattern specificity gives literal segments
+	// priority but order helps with the registration check.
+	mux.HandleFunc("GET /api/users/search", s.searchProfiles)
+	mux.HandleFunc("GET /api/users/{userId}", s.getPublicProfile)
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
 	return loggingMiddleware(s.log, corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, mux)))

@@ -22,8 +22,33 @@ export interface Seat {
   index: number;
   color: Color;
   name: string;
+  /** Public Supabase user id for authenticated seats. Empty/undefined
+   *  for anonymous players and bots. Surfaced so the UI can link a
+   *  seat name to that player's public profile page. */
+  userId?: string;
   occupied: boolean;
   isBot: boolean;
+}
+
+/** Returned by GET /api/users/:userId. Read-only, no email or other
+ *  private info — same scope as the leaderboard. */
+export interface PublicProfile {
+  userId: string;
+  displayName: string;
+  ratingOneVOne: number;
+  ratingMulti: number;
+  gamesOneVOne: number;
+  gamesMulti: number;
+  won: number;
+  lost: number;
+  draws: number;
+}
+
+/** One row of the GET /api/users/search response. */
+export interface ProfileSearchEntry {
+  userId: string;
+  displayName: string;
+  ratingOneVOne: number;
 }
 
 export interface PlayerScore {

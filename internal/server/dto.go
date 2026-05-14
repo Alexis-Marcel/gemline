@@ -33,11 +33,16 @@ type moveRequest struct {
 }
 
 type seatDTO struct {
-	Index    int        `json:"index"`
-	Color    game.Color `json:"color"`
-	Name     string     `json:"name"`
-	Occupied bool       `json:"occupied"`
-	IsBot    bool       `json:"isBot"`
+	Index int        `json:"index"`
+	Color game.Color `json:"color"`
+	Name  string     `json:"name"`
+	// UserID is the public Supabase user id for authenticated seats.
+	// Empty for anonymous players and bots. Surfaced so the frontend
+	// can link a seat's name to that player's public profile page
+	// without having to cross-reference the ratings payload.
+	UserID   string `json:"userId,omitempty"`
+	Occupied bool   `json:"occupied"`
+	IsBot    bool   `json:"isBot"`
 }
 
 type playerDTO struct {
@@ -212,6 +217,7 @@ func toSeatDTO(s *Seat) seatDTO {
 		Index:    s.Index,
 		Color:    s.Color,
 		Name:     s.Name,
+		UserID:   s.UserID,
 		Occupied: s.Occupied,
 		IsBot:    s.IsBot,
 	}

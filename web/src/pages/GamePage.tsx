@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import { useMatchmake } from "../api/matchmake";
 import { useAuth } from "../auth/AuthProvider";
-import type { Color, Game, GameRatings, Replay, WinKind } from "../api/types";
+import type { Color, Game, GameRatings, Replay } from "../api/types";
 import {
   acquireMoveStream,
   acquirePresenceStream,
@@ -842,27 +842,6 @@ function StartButton({ game, onStart }: { game: Game; onStart: () => void }) {
       </div>
     </button>
   );
-}
-
-function winKindLabel(k: WinKind): string {
-  switch (k) {
-    case 1:
-      return "alignement de 6";
-    case 2:
-      return "alignements de 5";
-    case 3:
-      return "alignements de 4";
-    case 4:
-      return "captures";
-    case 5:
-      return "drapeau (temps écoulé)";
-    case 6:
-      return "forfait";
-    case 7:
-      return "nul d'accord parties";
-    default:
-      return "?";
-  }
 }
 
 // DrawOfferAndActions renders the per-seat action area while a game is in

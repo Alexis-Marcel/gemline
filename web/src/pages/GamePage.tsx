@@ -343,13 +343,43 @@ export function GamePage() {
     navigate("/");
   }
 
-  // onNewGame routes the "Nouvelle partie" buttons (in the sidebar and
-  // in the modal) into the matchmaking flow with the same player count
-  // as the game that just ended. Hidden entirely for anonymous users —
-  // matchmaking requires auth server-side, so a button that just
-  // bounced to /login would be UX noise.
+  // "Nouvelle partie" mirrors the visibility of the game that just
+  // ended: a public/matchmade game funnels back into matchmaking, a
+  // private game spawns a fresh empty private game with the same
+  // player count. handleNewPrivateGame reuses the caller's seat name
+  // (held in creds) so an anonymous host doesn't have to retype it.
+  const [creatingNew, setCreatingNew] = useState(false);
+  async function handleNewPrivateGame() {
+    if (!game) return;
+    setCreatingNew(true);
+    setError(null);
+    try {
+      const res = await api.createGame(game.seats.length, creds?.name);
+      saveCredentials(res.game.id, {
+        token: res.token,
+        seatIndex: res.seat.index,
+        name: res.seat.name,
+      });
+      navigate(`/game/${res.game.id}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Erreur création");
+    } finally {
+      setCreatingNew(false);
+    }
+  }
+  const isPrivate = game?.visibility === "private";
   const playerCount = game?.seats.length ?? 2;
-  const onNewGame = user ? () => matchmake.start(playerCount) : null;
+  // Private branch needs creds (we use the seat name for anon hosts;
+  // for authed users the server falls back to the profile name, but
+  // having creds at all means we know who's asking). Public/matchmade
+  // branch needs auth — matchmaking 401s anonymous callers server-side.
+  const onNewGame =
+    isPrivate && creds
+      ? handleNewPrivateGame
+      : !isPrivate && user
+        ? () => matchmake.start(playerCount)
+        : null;
+  const newGameBusy = creatingNew || matchmakeBusy;
 
   if (!game) {
     return (
@@ -536,10 +566,14 @@ export function GamePage() {
                 <button
                   type="button"
                   onClick={onNewGame}
-                  disabled={matchmakeBusy}
+                  disabled={newGameBusy}
                   className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
                 >
-                  {matchmakeBusy ? "Recherche…" : "Nouvelle partie"}
+                  {creatingNew
+                    ? "Création…"
+                    : matchmakeBusy
+                      ? "Recherche…"
+                      : "Nouvelle partie"}
                 </button>
               )}
               <div className="flex gap-2">
@@ -619,7 +653,8 @@ export function GamePage() {
           ratings={ratings}
           rematchLink={rematchLink}
           rematching={rematching}
-          matchmakeBusy={matchmakeBusy}
+          newGameBusy={newGameBusy}
+          newGameBusyLabel={creatingNew ? "Création…" : matchmakeBusy ? "Recherche…" : null}
           onRematch={handleRematch}
           onNewGame={
             onNewGame

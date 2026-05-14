@@ -11,10 +11,14 @@ interface GameEndModalProps {
   ratings: GameRatings | null;
   rematchLink: string | null;
   rematching: boolean;
-  /** True while the matchmaking queue is being entered or the user is
-   *  waiting for a match. The "Nouvelle partie" button shows
-   *  "Recherche…" and disables to prevent double-enqueue. */
-  matchmakeBusy: boolean;
+  /** True while a "Nouvelle partie" click is in flight — either
+   *  matchmaking is enqueueing (public) or a private createGame is
+   *  posting. Disables the button to prevent double-submit. */
+  newGameBusy: boolean;
+  /** Optional in-progress label shown on the button while busy
+   *  ("Recherche…" for matchmaking, "Création…" for private). null
+   *  means the button keeps its idle label even while disabled. */
+  newGameBusyLabel: string | null;
   onRematch: () => void;
   onNewGame: (() => void) | null;
   onClose: () => void;
@@ -39,7 +43,8 @@ export function GameEndModal({
   ratings,
   rematchLink,
   rematching,
-  matchmakeBusy,
+  newGameBusy,
+  newGameBusyLabel,
   onRematch,
   onNewGame,
   onClose,
@@ -132,10 +137,12 @@ export function GameEndModal({
           {onNewGame && (
             <Button
               onClick={onNewGame}
-              disabled={matchmakeBusy}
+              disabled={newGameBusy}
               className="w-full"
             >
-              {matchmakeBusy ? "Recherche…" : "Nouvelle partie"}
+              {newGameBusy && newGameBusyLabel
+                ? newGameBusyLabel
+                : "Nouvelle partie"}
             </Button>
           )}
           <div className="flex gap-2">

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import type { Game, GameRatings } from "../api/types";
 import { gemColor } from "../lib/colors";
 import { PlayerClock } from "./PlayerClock";
@@ -81,7 +82,16 @@ export function Scoreboard({
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="truncate font-medium">
                     {seat.occupied ? (
-                      <span className="text-zinc-100">{seat.name}</span>
+                      seat.userId && !seat.isBot ? (
+                        <Link
+                          to={`/profile/${seat.userId}`}
+                          className="text-zinc-100 hover:text-amber-300 hover:underline"
+                        >
+                          {seat.name}
+                        </Link>
+                      ) : (
+                        <span className="text-zinc-100">{seat.name}</span>
+                      )
                     ) : (
                       <span className="text-zinc-500">Siège vide</span>
                     )}

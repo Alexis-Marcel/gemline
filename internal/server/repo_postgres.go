@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -604,4 +605,223 @@ func deriveOutcome(status Status, mine, winner game.Color) string {
 		return "won"
 	}
 	return "lost"
+}
+
+// AppendEvent inserts one row into game_events with a monotonically
+// increasing per-game seq. The CTE bumps games.event_seq and feeds the
+// new value to the INSERT in one statement — the row-level lock on
+// games.id serializes concurrent writers without explicit locking.
+//
+// If gameID does not exist, the UPDATE matches zero rows, the CTE
+// returns empty, and the INSERT does nothing — we surface this as
+// ErrGameNotFound so callers can distinguish it from a transient DB
+// error.
+func (r *PostgresRepo) AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage) (int, error) {
+	row := r.pool.QueryRowContext(ctx, `
+		WITH s AS (
+			UPDATE games SET event_seq = event_seq + 1
+			WHERE id = $1 RETURNING event_seq
+		)
+		INSERT INTO game_events (game_id, seq, type, payload)
+		SELECT $1, s.event_seq, $2, $3 FROM s
+		RETURNING seq
+	`, gameID, eventType, []byte(payload))
+	var seq int
+	if err := row.Scan(&seq); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrGameNotFound
+		}
+		return 0, fmt.Errorf("append event: %w", err)
+	}
+	return seq, nil
+}
+
+func (r *PostgresRepo) LoadEvent(ctx context.Context, gameID string, seq int) (EventRow, error) {
+	row := r.pool.QueryRowContext(ctx, `
+		SELECT seq, type, payload FROM game_events
+		WHERE game_id = $1 AND seq = $2
+	`, gameID, seq)
+	var ev EventRow
+	var payload []byte
+	if err := row.Scan(&ev.Seq, &ev.Type, &payload); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return EventRow{}, nil
+		}
+		return EventRow{}, fmt.Errorf("load event: %w", err)
+	}
+	ev.Payload = json.RawMessage(payload)
+	return ev, nil
+}
+
+func (r *PostgresRepo) EventsSince(ctx context.Context, gameID string, sinceSeq, limit int) ([]EventRow, error) {
+	rows, err := r.pool.QueryContext(ctx, `
+		SELECT seq, type, payload FROM game_events
+		WHERE game_id = $1 AND seq > $2
+		ORDER BY seq
+		LIMIT $3
+	`, gameID, sinceSeq, limit)
+	if err != nil {
+		return nil, fmt.Errorf("events since: %w", err)
+	}
+	defer rows.Close()
+
+	var out []EventRow
+	for rows.Next() {
+		var ev EventRow
+		var payload []byte
+		if err := rows.Scan(&ev.Seq, &ev.Type, &payload); err != nil {
+			return nil, fmt.Errorf("scan event: %w", err)
+		}
+		ev.Payload = json.RawMessage(payload)
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
+func (r *PostgresRepo) CurrentEventSeq(ctx context.Context, gameID string) (int, error) {
+	row := r.pool.QueryRowContext(ctx, `SELECT event_seq FROM games WHERE id = $1`, gameID)
+	var seq int
+	if err := row.Scan(&seq); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrGameNotFound
+		}
+		return 0, fmt.Errorf("current event seq: %w", err)
+	}
+	return seq, nil
+}
+
+func (r *PostgresRepo) EnqueueMatchmake(ctx context.Context, userID string, players int, mode string, rating int) error {
+	_, err := r.pool.ExecContext(ctx, `
+		INSERT INTO matchmake_queue (user_id, players, mode, rating)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id) DO UPDATE
+		SET players = EXCLUDED.players,
+		    mode = EXCLUDED.mode,
+		    rating = EXCLUDED.rating,
+		    enqueued_at = NOW()
+	`, userID, players, mode, rating)
+	return err
+}
+
+func (r *PostgresRepo) CancelMatchmake(ctx context.Context, userID string) error {
+	_, err := r.pool.ExecContext(ctx, `DELETE FROM matchmake_queue WHERE user_id = $1`, userID)
+	return err
+}
+
+// matchmakeBatchSize caps how many rows one tick locks at once. Big
+// enough to give the pairing logic something to work with, small enough
+// that the row-level locks don't sit on the table for noticeable time.
+const matchmakeBatchSize = 100
+
+func (r *PostgresRepo) MatchmakeTick(
+	ctx context.Context,
+	players int,
+	mode string,
+	pairFn func([]QueuedUser) [][]QueuedUser,
+) ([]MatchedSeat, error) {
+	tx, err := r.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// FOR UPDATE SKIP LOCKED is the load-bearing piece here. Multiple
+	// pods can tick concurrently and each will grab disjoint rows —
+	// the ones another pod is already processing get skipped on this
+	// pass and picked up next tick by whoever wins the race.
+	//
+	// We left-join profiles so the display name lands with the row
+	// (single round-trip, no per-user lookup later). Users without a
+	// profile row get an empty string; the caller falls back to a
+	// sensible default.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT q.user_id, q.rating, q.enqueued_at, COALESCE(p.display_name, '')
+		FROM matchmake_queue q
+		LEFT JOIN profiles p ON p.user_id = q.user_id
+		WHERE q.players = $1 AND q.mode = $2
+		ORDER BY q.enqueued_at
+		FOR UPDATE OF q SKIP LOCKED
+		LIMIT $3
+	`, players, mode, matchmakeBatchSize)
+	if err != nil {
+		return nil, fmt.Errorf("select queue: %w", err)
+	}
+	var queued []QueuedUser
+	for rows.Next() {
+		var qu QueuedUser
+		if err := rows.Scan(&qu.UserID, &qu.Rating, &qu.EnqueuedAt, &qu.DisplayName); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan queue row: %w", err)
+		}
+		queued = append(queued, qu)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(queued) < players {
+		// Not enough for even one pairing this tick. Commit (releases
+		// our locks) and wait for the next interval.
+		return nil, tx.Commit()
+	}
+
+	groups := pairFn(queued)
+	if len(groups) == 0 {
+		return nil, tx.Commit()
+	}
+
+	var seats []MatchedSeat
+	for _, g := range groups {
+		if len(g) != players {
+			// pairFn contract violation — skip rather than crash.
+			continue
+		}
+		gameID := newID()
+		cfg := game.DefaultConfig(players)
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO games (id, status, board_side, capture_pairs_win, align4_to_win, align5_to_win, initial_time_ms, increment_ms, visibility)
+			VALUES ($1, 'playing', $2, $3, $4, $5, $6, $7, 'public')
+		`, gameID, cfg.BoardSide, cfg.CapturePairsWin, cfg.Align4ToWin, cfg.Align5ToWin, cfg.InitialTimeMs, cfg.IncrementMs); err != nil {
+			return nil, fmt.Errorf("insert matched game: %w", err)
+		}
+
+		userIDs := make([]string, 0, len(g))
+		for i, u := range g {
+			token := newToken()
+			name := u.DisplayName
+			if name == "" {
+				name = "Joueur"
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO seats (game_id, seat_index, color, name, token_hash, user_id, occupied, is_bot)
+				VALUES ($1, $2, $3, $4, $5, $6, TRUE, FALSE)
+			`, gameID, i, int(game.Color(i+1)), name, hashToken(token), u.UserID); err != nil {
+				return nil, fmt.Errorf("insert matched seat: %w", err)
+			}
+			seats = append(seats, MatchedSeat{
+				UserID:    u.UserID,
+				GameID:    gameID,
+				SeatIndex: i,
+				Token:     token,
+				Name:      name,
+			})
+			userIDs = append(userIDs, u.UserID)
+		}
+
+		// Drop the matched users' queue rows so the next tick won't
+		// see them. The same tx commit that materialises the game also
+		// removes them — no in-between state where users have no game
+		// and no queue presence.
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM matchmake_queue WHERE user_id = ANY($1)
+		`, userIDs); err != nil {
+			return nil, fmt.Errorf("delete matched queue: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return seats, nil
 }

@@ -21,7 +21,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// Bots play instantly in tests so assertions don't have to sleep.
 	store := NewStore(nil).WithBotDelay(0)
-	return httptest.NewServer(New(log, store, Config{}).Routes())
+	return httptest.NewServer(New(log, store, nil, Config{}).Routes())
 }
 
 func TestHealthz(t *testing.T) {

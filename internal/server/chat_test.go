@@ -53,7 +53,7 @@ func newChatTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := NewStore(&memChatRepo{}).WithBotDelay(0)
-	return httptest.NewServer(New(log, store, Config{}).Routes())
+	return httptest.NewServer(New(log, store, nil, Config{}).Routes())
 }
 
 func postChatMessage(t *testing.T, ts *httptest.Server, gameID, token, body string) *http.Response {

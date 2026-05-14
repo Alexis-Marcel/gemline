@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"time"
 
 	"github.com/alexis/gemline/internal/game"
 )
@@ -84,6 +86,87 @@ type Repository interface {
 	// player count (rules are decided at start time, not create time), and
 	// flips the game's status to `status` — all in a single transaction.
 	FinalizeStart(ctx context.Context, gameID string, status Status, cfg game.Config) error
+
+	// AppendEvent atomically increments games.event_seq and inserts a new
+	// row into game_events, returning the assigned seq. Used by the
+	// EventPublisher before a NOTIFY wake-up. Concurrent inserts for the
+	// same gameID are serialized by the row-level lock on games.id.
+	AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage) (int, error)
+
+	// LoadEvent returns one row by (gameID, seq). Used by the backplane
+	// listener to fetch the payload after a NOTIFY wake-up indicates a
+	// new seq is available.
+	LoadEvent(ctx context.Context, gameID string, seq int) (EventRow, error)
+
+	// EventsSince returns events with seq > sinceSeq, ascending, capped at
+	// limit. Backs the HTTP catch-up endpoint clients use to fill any gap
+	// when a WebSocket reconnects.
+	EventsSince(ctx context.Context, gameID string, sinceSeq, limit int) ([]EventRow, error)
+
+	// CurrentEventSeq returns the latest event_seq value for gameID, or
+	// 0 if the game exists but has no events yet. Used at WS open time
+	// to tag the initial state snapshot with a sequence number the client
+	// can use to detect catch-up gaps on reconnect.
+	CurrentEventSeq(ctx context.Context, gameID string) (int, error)
+
+	// EnqueueMatchmake inserts or refreshes a ticket for userID. PK
+	// conflict on user_id triggers an upsert that bumps enqueued_at to
+	// now, so clicking "find match" twice doesn't stack duplicates and
+	// pushes the user to the back of the queue.
+	EnqueueMatchmake(ctx context.Context, userID string, players int, mode string, rating int) error
+
+	// CancelMatchmake removes the ticket for userID. No-op when no row
+	// exists, so cancelling twice or after a successful match is safe.
+	CancelMatchmake(ctx context.Context, userID string) error
+
+	// MatchmakeTick runs one matcher iteration for (players, mode) inside
+	// a single transaction. The matcher SELECTs and locks pending rows
+	// (FOR UPDATE SKIP LOCKED), hands the locked rows to pairFn for in-Go
+	// pairing, then for each returned group creates a new game in
+	// `playing` status, seats the players, and deletes their queue rows.
+	// All-or-nothing per tick: a transient error rolls everything back and
+	// the next tick re-picks the same rows.
+	//
+	// pairFn receives the locked rows (ordered by enqueued_at ASC, oldest
+	// first) and returns groups of exactly `players` users to commit as
+	// games. Returning an empty list is fine — the tick commits and waits
+	// for the next one. Anyone left in queue stays locked-and-released for
+	// the next tick to retry.
+	MatchmakeTick(ctx context.Context, players int, mode string, pairFn func([]QueuedUser) [][]QueuedUser) ([]MatchedSeat, error)
+}
+
+// EventRow is a persisted row in game_events. Payload stays as
+// json.RawMessage so callers can either pass it through to a WS client
+// unchanged or unmarshal it into a domain type as needed.
+type EventRow struct {
+	Seq     int             `json:"seq"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// QueuedUser is one row pulled from matchmake_queue while the matcher
+// is deciding pairings. DisplayName is joined from profiles so the
+// matcher doesn't need a second round-trip per user.
+type QueuedUser struct {
+	UserID      string
+	Rating      int
+	EnqueuedAt  time.Time
+	DisplayName string
+}
+
+// MatchedSeat is the matcher's output for one user that landed in a
+// freshly-created game. The publisher uses GameID to NOTIFY the lobby
+// channel and Token to let the client authenticate the seat on its
+// first request without a separate join call. Name is the display
+// name the matcher wrote into the seats row — surfaced in the
+// match_found event so the client can show "You're playing as <name>"
+// before the full game state has loaded.
+type MatchedSeat struct {
+	UserID    string
+	GameID    string
+	SeatIndex int
+	Token     string
+	Name      string
 }
 
 // Profile is the user-controlled profile row.
@@ -228,3 +311,26 @@ func (noopRepo) Leaderboard(context.Context, string, int) ([]LeaderboardEntry, e
 	return nil, nil
 }
 func (noopRepo) FinalizeStart(context.Context, string, Status, game.Config) error { return nil }
+
+// Without a DB the event log doesn't exist; AppendEvent reports 0 as
+// the seq and the EventPublisher will refuse to wake up the bus.
+// Tests and dev runs without DATABASE_URL fall through to the
+// in-process Hub.Deliver path instead.
+func (noopRepo) AppendEvent(context.Context, string, string, json.RawMessage) (int, error) {
+	return 0, nil
+}
+func (noopRepo) LoadEvent(context.Context, string, int) (EventRow, error) { return EventRow{}, nil }
+func (noopRepo) EventsSince(context.Context, string, int, int) ([]EventRow, error) {
+	return nil, nil
+}
+func (noopRepo) CurrentEventSeq(context.Context, string) (int, error) { return 0, nil }
+
+// Matchmake queue isn't simulated in noop mode — single-process dev runs
+// without DATABASE_URL fall back to the legacy synchronous matchmake
+// path (still wired in for compatibility), and tests that need queue
+// behaviour go through a Postgres-backed Store.
+func (noopRepo) EnqueueMatchmake(context.Context, string, int, string, int) error { return nil }
+func (noopRepo) CancelMatchmake(context.Context, string) error                    { return nil }
+func (noopRepo) MatchmakeTick(context.Context, int, string, func([]QueuedUser) [][]QueuedUser) ([]MatchedSeat, error) {
+	return nil, nil
+}

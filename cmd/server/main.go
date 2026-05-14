@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alexis/gemline/internal/backplane"
 	"github.com/alexis/gemline/internal/db"
 	"github.com/alexis/gemline/internal/server"
 	"github.com/joho/godotenv"
@@ -33,7 +34,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var repo server.Repository
+	var (
+		repo server.Repository
+		bp   *backplane.Backplane
+	)
 	if dsn != "" {
 		pool, err := db.Open(ctx, dsn)
 		if err != nil {
@@ -43,6 +47,13 @@ func main() {
 		defer pool.Close()
 		repo = server.NewPostgresRepo(pool)
 		log.Info("persistence enabled", "driver", "postgres")
+
+		// Postgres backplane: LISTEN/NOTIFY bus shared by the WS
+		// event scaler and (later) the matchmaking lobby. We only
+		// build the object here; Start happens after the server has
+		// registered its handlers, so the first session LISTENs on
+		// the right set of channels.
+		bp = backplane.New(dsn, pool, log)
 	} else {
 		log.Info("persistence disabled — running with in-memory store only")
 	}
@@ -60,9 +71,22 @@ func main() {
 	store.StartMultiPromoter()
 	defer store.Close()
 
+	// server.New registers backplane.Subscribe(ChannelGameEvents, …)
+	// before we Start the listener — so the first LISTEN session
+	// includes the event channel.
+	apiServer := server.New(log, store, bp, cfg)
+	if bp != nil {
+		bp.Start(ctx)
+		defer bp.Close()
+	}
+	// The matcher needs the backplane to be live so its match
+	// notifications reach lobby WS subscribers on other pods. Start
+	// after Start above. Cancel propagates via ctx on shutdown.
+	apiServer.StartMatcher(ctx)
+
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      server.New(log, store, cfg).Routes(),
+		Handler:      apiServer.Routes(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,

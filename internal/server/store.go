@@ -151,6 +151,30 @@ type Store struct {
 	promoterStop chan struct{}
 }
 
+// Repo returns the backing repository. Exposed so wiring code that
+// builds the EventPublisher (which needs to AppendEvent) doesn't need
+// to be passed the repo separately.
+func (s *Store) Repo() Repository { return s.repo }
+
+// Invalidate drops the in-memory cache entry for gameID. The next call
+// to Get reloads from the canonical store, picking up any mutation
+// committed by another pod. Wired into the backplane's event listener:
+// every notification from a different pod's EventPublisher triggers
+// Invalidate on the receiving pod, so our cached rec never drifts
+// further than one NOTIFY hop behind reality.
+//
+// Idempotent and cheap; safe to call when nothing is cached. Also
+// safe to call concurrently with any other Store method — we only
+// touch the games map under s.mu, and live references held by other
+// goroutines (e.g. a WS handler reading the rec) keep working off
+// their existing pointer. They will, however, see staler-than-usual
+// data until they call Get again — which is the contract.
+func (s *Store) Invalidate(gameID string) {
+	s.mu.Lock()
+	delete(s.games, gameID)
+	s.mu.Unlock()
+}
+
 func NewStore(repo Repository) *Store {
 	if repo == nil {
 		repo = noopRepo{}

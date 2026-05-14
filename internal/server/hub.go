@@ -7,9 +7,14 @@ import (
 )
 
 // Event is what gets pushed over the WebSocket. Type is a discriminator,
-// payload depends on it.
+// payload depends on it. Seq is the per-game monotonic sequence number
+// assigned when the event was persisted to game_events; it's zero (and
+// elided from the wire) for transient events that bypass persistence
+// (initial connect snapshots are tagged with the current event_seq by
+// the WS handler so clients can detect catch-up gaps on reconnect).
 type Event struct {
 	Type    string      `json:"type"`
+	Seq     int         `json:"seq,omitempty"`
 	Payload interface{} `json:"payload"`
 }
 
@@ -79,13 +84,19 @@ func (h *Hub) Unsubscribe(gameID string, sub *subscriber) {
 	close(sub.ch)
 }
 
-func (h *Hub) Broadcast(gameID string, ev Event) {
+// Deliver fans an event out to every local subscriber of gameID. It is
+// the in-process side of the bus; cross-pod delivery goes through the
+// EventPublisher → Postgres NOTIFY → backplane Listener → Deliver chain.
+// Callers must not call Deliver directly to broadcast — use
+// EventPublisher.Publish, which records the event and triggers the
+// notification that ends up calling Deliver on every pod.
+func (h *Hub) Deliver(gameID string, ev Event) {
 	b, err := json.Marshal(ev)
 	if err != nil {
 		// Marshalling an event must never silently drop — that hides DTO
 		// regressions (e.g. a non-marshalable field added to a payload).
 		// Log and bail; the per-sub buffers stay untouched.
-		h.log.Error("hub broadcast: marshal event", "game", gameID, "type", ev.Type, "err", err)
+		h.log.Error("hub deliver: marshal event", "game", gameID, "type", ev.Type, "err", err)
 		return
 	}
 	dropped := 0
@@ -103,6 +114,16 @@ func (h *Hub) Broadcast(gameID string, ev Event) {
 		// client can't keep up and is missing frames. Worth logging so we
 		// can investigate, without making it an error: dropping is the
 		// documented policy.
-		h.log.Warn("hub broadcast: subscribers dropped event", "game", gameID, "type", ev.Type, "dropped", dropped)
+		h.log.Warn("hub deliver: subscribers dropped event", "game", gameID, "type", ev.Type, "dropped", dropped)
 	}
+}
+
+// HasSubs returns true if at least one subscriber is currently
+// registered for gameID. The backplane listener uses this to skip the
+// game_events SELECT when a notification arrives for a game we have
+// no local interest in — most pods, most events, don't care.
+func (h *Hub) HasSubs(gameID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.subs[gameID]) > 0
 }

@@ -286,6 +286,18 @@ func (r *PostgresRepo) UpsertProfile(ctx context.Context, userID, displayName st
 	return err
 }
 
+// EnsureProfile is the create-only sibling of UpsertProfile: it never
+// overwrites an existing display_name. Useful at rating-apply time and
+// in /api/auth/me, where we want every authenticated player to have a
+// profile row without stomping on a name they may have set themselves.
+func (r *PostgresRepo) EnsureProfile(ctx context.Context, userID, fallbackName string) error {
+	_, err := r.pool.ExecContext(ctx, `
+		INSERT INTO profiles (user_id, display_name) VALUES ($1, $2)
+		ON CONFLICT (user_id) DO NOTHING
+	`, userID, fallbackName)
+	return err
+}
+
 func (r *PostgresRepo) GamesForUser(ctx context.Context, userID string, limit int) ([]UserGame, error) {
 	rows, err := r.pool.QueryContext(ctx, `
 		SELECT g.id, g.status, s.seat_index, s.color, g.winner_color,

@@ -152,6 +152,9 @@ type Store struct {
 	// promoterStop signals the multi-room auto-promotion goroutine to halt.
 	// nil while the promoter hasn't been started.
 	promoterStop chan struct{}
+	// cleanerStop signals the stale-game cleaner goroutine to halt.
+	// nil while the cleaner hasn't been started.
+	cleanerStop chan struct{}
 }
 
 // Repo returns the backing repository. Exposed so wiring code that
@@ -248,14 +251,73 @@ func (s *Store) SetRatedListener(fn func(gameID string)) {
 	s.onRated = fn
 }
 
-// Close stops every running clock + presence timer + the multi promoter.
-// Call on shutdown.
+// Close stops every running clock + presence timer + the multi promoter +
+// the stale-game cleaner. Call on shutdown.
 func (s *Store) Close() {
 	s.clocks.CancelAll()
 	s.presence.CancelAll()
 	if s.promoterStop != nil {
 		close(s.promoterStop)
 		s.promoterStop = nil
+	}
+	if s.cleanerStop != nil {
+		close(s.cleanerStop)
+		s.cleanerStop = nil
+	}
+}
+
+// StaleWaitingTTL is the age beyond which a waiting game is considered
+// abandoned and gets deleted by the cleaner. Long enough that "we'll
+// resume tomorrow" private games survive, short enough that orphaned
+// rooms don't accumulate forever.
+const StaleWaitingTTL = 7 * 24 * time.Hour
+
+// staleCleanerInterval governs how often the cleaner runs. Once per
+// hour is plenty: at our scale the table grows by handful of waiting
+// rows per day in the worst case.
+const staleCleanerInterval = 1 * time.Hour
+
+// StartStaleGameCleaner spins up a background goroutine that deletes
+// waiting games older than StaleWaitingTTL on a regular tick. Safe to
+// call on every pod — DELETE is idempotent and the same rows would
+// just go to whichever pod ticks first. Idempotent against double
+// invocation in a single process.
+func (s *Store) StartStaleGameCleaner(log *slog.Logger) {
+	if s.cleanerStop != nil {
+		return
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	s.cleanerStop = make(chan struct{})
+	stop := s.cleanerStop
+	go func() {
+		ticker := time.NewTicker(staleCleanerInterval)
+		defer ticker.Stop()
+		// Tick once immediately so a freshly-deployed pod doesn't wait
+		// a full hour to clean accumulated junk.
+		s.runStaleCleaner(log)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				s.runStaleCleaner(log)
+			}
+		}
+	}()
+}
+
+func (s *Store) runStaleCleaner(log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	n, err := s.repo.DeleteStaleWaitingGames(ctx, StaleWaitingTTL)
+	if err != nil {
+		log.Error("stale game cleaner", "err", err)
+		return
+	}
+	if n > 0 {
+		log.Info("stale waiting games cleaned", "count", n, "ttl", StaleWaitingTTL.String())
 	}
 }
 

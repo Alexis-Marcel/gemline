@@ -136,10 +136,9 @@ export function ProfilePage() {
               <Stat label="Elo 1 contre 1" value={stats.ratingOneVOne} accent="text-amber-300" />
               <Stat label="Elo multi" value={stats.ratingMulti} accent="text-amber-300" />
             </dl>
-            <dl className="grid grid-cols-3 gap-3">
+            <dl className="grid grid-cols-2 gap-3">
               <Stat label="Victoires" value={stats.won} accent="text-emerald-400" />
               <Stat label="Défaites" value={stats.lost} accent="text-red-400" />
-              <Stat label="En cours" value={stats.ongoing} accent="text-amber-400" />
             </dl>
           </>
         ) : (

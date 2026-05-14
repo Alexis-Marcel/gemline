@@ -1,6 +1,7 @@
 import { supabase } from "./supabase";
 import type {
   Game,
+  GameRatings,
   JoinResponse,
   LeaderboardEntry,
   Message,
@@ -166,6 +167,13 @@ export const api = {
 
   getGame(id: string) {
     return request<Game>(`/api/games/${id}`);
+  },
+
+  // getGameRatings drives the in-game Elo line and the end-of-game
+  // modal's delta section. Returns rated:false for any game that
+  // isn't matchmaking-eligible (private, or any seat is a bot/anon).
+  getGameRatings(id: string) {
+    return request<GameRatings>(`/api/games/${id}/ratings`, { skipAuth: true });
   },
 
   // joinGame: pass `name` only for anonymous users — authenticated users

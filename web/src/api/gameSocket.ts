@@ -1,4 +1,11 @@
-import type { Game, GameEventRow, Message, MoveResponse, WsEvent } from "./types";
+import type {
+  Game,
+  GameEventRow,
+  GameRatings,
+  Message,
+  MoveResponse,
+  WsEvent,
+} from "./types";
 
 export type ConnStatus = "connecting" | "open" | "reconnecting" | "offline";
 
@@ -12,6 +19,7 @@ type Listener = (state: ConnState) => void;
 type ChatListener = (msg: Message) => void;
 type PresenceListener = (seatIndex: number, online: boolean) => void;
 type MoveListener = (move: MoveResponse) => void;
+type RatedListener = (ratings: GameRatings) => void;
 
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 15_000;
@@ -28,6 +36,7 @@ class GameSocket {
   private chatListeners = new Set<ChatListener>();
   private presenceListeners = new Set<PresenceListener>();
   private moveListeners = new Set<MoveListener>();
+  private ratedListeners = new Set<RatedListener>();
   private reconnectTimer: number | null = null;
   private closed = false;
   /** Locally-tracked presence map (seatIndex → online). Lets new subscribers
@@ -98,12 +107,18 @@ class GameSocket {
     return () => this.moveListeners.delete(fn);
   }
 
+  subscribeRated(fn: RatedListener): () => void {
+    this.ratedListeners.add(fn);
+    return () => this.ratedListeners.delete(fn);
+  }
+
   hasSubscribers(): boolean {
     return (
       this.listeners.size > 0 ||
       this.chatListeners.size > 0 ||
       this.presenceListeners.size > 0 ||
-      this.moveListeners.size > 0
+      this.moveListeners.size > 0 ||
+      this.ratedListeners.size > 0
     );
   }
 
@@ -187,6 +202,8 @@ class GameSocket {
       const { seatIndex, online } = ev.payload;
       this.presence.set(seatIndex, online);
       for (const l of this.presenceListeners) l(seatIndex, online);
+    } else if (ev.type === "rated") {
+      for (const l of this.ratedListeners) l(ev.payload);
     }
   }
 
@@ -341,6 +358,40 @@ export function acquireMoveStream(gameId: string, listener: MoveListener): () =>
     sockets.set(gameId, socket);
   }
   const unsubscribe = socket.subscribeMove(listener);
+  return () => {
+    unsubscribe();
+    const s = sockets.get(gameId);
+    if (s && !s.hasSubscribers()) {
+      const t = window.setTimeout(() => {
+        const s2 = sockets.get(gameId);
+        if (s2 && !s2.hasSubscribers()) {
+          s2.close();
+          sockets.delete(gameId);
+        }
+        cleanupTimers.delete(gameId);
+      }, CLEANUP_GRACE_MS);
+      cleanupTimers.set(gameId, t);
+    }
+  };
+}
+
+// acquireRatedStream subscribes to "rated" events — fired once per
+// game when the server has applied the Elo update post game-end. The
+// end-of-game modal uses this to swap from "calcul du rating…" to the
+// final deltas without polling. Same shared-socket + refcount semantics
+// as the other acquire* helpers.
+export function acquireRatedStream(gameId: string, listener: RatedListener): () => void {
+  const pending = cleanupTimers.get(gameId);
+  if (pending !== undefined) {
+    window.clearTimeout(pending);
+    cleanupTimers.delete(gameId);
+  }
+  let socket = sockets.get(gameId);
+  if (!socket) {
+    socket = new GameSocket(gameId);
+    sockets.set(gameId, socket);
+  }
+  const unsubscribe = socket.subscribeRated(listener);
   return () => {
     unsubscribe();
     const s = sockets.get(gameId);

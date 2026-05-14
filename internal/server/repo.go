@@ -83,6 +83,14 @@ type Repository interface {
 	// bumped and the other untouched.
 	ApplyRatedGame(ctx context.Context, gameID, mode string, updates []RatingUpdate) (bool, error)
 
+	// RatingsForGame builds the per-seat rating snapshot for one game:
+	// each seated user's current rating in the right mode, plus the
+	// applied delta if ApplyRatedGame has already run for this game.
+	// Returns Rated=false for games that aren't eligible (private, or
+	// any seat is a bot/anonymous). Used by the end-of-game modal and
+	// by the in-game Scoreboard's Elo line.
+	RatingsForGame(ctx context.Context, gameID string) (GameRatings, error)
+
 	// Leaderboard returns the top-`limit` rated users for the given mode
 	// (rating DESC), joined with their display name. Users with no profile
 	// row are omitted — they're not visible enough to surface on a board.
@@ -232,10 +240,43 @@ type Rating struct {
 
 // RatingUpdate is what ApplyRatedGame persists per user. Result drives the
 // wins/losses/draws counter columns; NewRating overrides the rating column.
+// OldRating is the rating that was in effect at the start of the game and
+// is recorded in rating_history alongside the delta so the end-of-game UI
+// can show "+12 / -8" without having to subtract anything client-side.
 type RatingUpdate struct {
-	UserID    string
-	NewRating int
-	Result    rune // 'W' | 'L' | 'D'
+	UserID     string
+	OldRating  int
+	NewRating  int
+	Result     rune // 'W' | 'L' | 'D'
+}
+
+// SeatRating is the per-seat rating snapshot returned by
+// Repository.RatingsForGame and embedded in the "rated" WS event. The
+// optional fields (OldRating/NewRating/Delta/Result) are populated only
+// when the game has actually been rated — i.e. ApplyRatedGame ran and
+// games.rated_at is set. Before that, callers see CurrentRating only.
+type SeatRating struct {
+	SeatIndex     int    `json:"seatIndex"`
+	UserID        string `json:"userId"`
+	CurrentRating int    `json:"currentRating"`
+	// Applied-only fields. Marshaled out via omitempty so the wire
+	// shape stays small for unrated or in-progress games.
+	OldRating int    `json:"oldRating,omitempty"`
+	NewRating int    `json:"newRating,omitempty"`
+	Delta     int    `json:"delta,omitempty"`
+	Result    string `json:"result,omitempty"` // "W" | "L" | "D"
+}
+
+// GameRatings is what GET /api/games/:id/ratings returns and what
+// flows over the WS in a "rated" event. Rated tells the client whether
+// this game is eligible (public, no bots, all authed); Applied tells
+// it whether the Elo math has actually run (games.rated_at IS NOT
+// NULL). Seats is empty when the game isn't rated.
+type GameRatings struct {
+	Mode    string       `json:"mode"`
+	Rated   bool         `json:"rated"`
+	Applied bool         `json:"applied"`
+	Seats   []SeatRating `json:"seats"`
 }
 
 // LeaderboardEntry surfaces a single ranked player on the public board.
@@ -318,6 +359,13 @@ func (noopRepo) ApplyRatedGame(context.Context, string, string, []RatingUpdate) 
 }
 func (noopRepo) Leaderboard(context.Context, string, int) ([]LeaderboardEntry, error) {
 	return nil, nil
+}
+
+// In noop mode the in-memory Store can't tell whether the game is
+// rateable (no profiles, no ratings), so we report Rated=false and
+// let the client UI hide the Elo section gracefully.
+func (noopRepo) RatingsForGame(context.Context, string) (GameRatings, error) {
+	return GameRatings{Rated: false, Applied: false, Seats: []SeatRating{}}, nil
 }
 func (noopRepo) FinalizeStart(context.Context, string, Status, game.Config) error { return nil }
 

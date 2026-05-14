@@ -2,16 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
-import type { Color, Game, Replay, WinKind } from "../api/types";
+import type { Color, Game, GameRatings, Replay, WinKind } from "../api/types";
 import {
   acquireMoveStream,
   acquirePresenceStream,
+  acquireRatedStream,
   getSocket,
   type ConnStatus as WsConnStatus,
 } from "../api/gameSocket";
 import { useGameSocket } from "../api/ws";
 import { Board } from "../components/Board";
 import { ChatPanel } from "../components/ChatPanel";
+import { GameEndModal } from "../components/GameEndModal";
 import { Objectives } from "../components/Objectives";
 import { ReplayControls } from "../components/ReplayControls";
 import { Scoreboard } from "../components/Scoreboard";
@@ -44,6 +46,17 @@ export function GamePage() {
   // (we haven't received a presence event yet, default to optimistic online).
   const [presence, setPresence] = useState<Record<number, boolean>>({});
 
+  // Per-game rating snapshot for the in-Scoreboard Elo line and the
+  // end-of-game modal. We seed from an HTTP fetch on mount and let the
+  // WS "rated" event overwrite once the server applies deltas — those
+  // two paths converge on the same shape (api.getGameRatings == the
+  // event payload), so we can replace the whole object on each update.
+  const [ratings, setRatings] = useState<GameRatings | null>(null);
+  // Modal dismissal flag — once the user closes the GameEndModal we
+  // don't reopen it unless they navigate away and back. Lets them get
+  // to the chat + replay underneath without nagging.
+  const [endModalDismissed, setEndModalDismissed] = useState(false);
+
   // Stones captured by the most recent move, kept around briefly so the
   // Board can animate them out. Each entry has a unique key so React doesn't
   // re-use a dying ghost when a subsequent capture lands on the same cell.
@@ -75,6 +88,39 @@ export function GamePage() {
   useEffect(() => {
     return acquirePresenceStream(id, (seatIndex, online) => {
       setPresence((prev) => ({ ...prev, [seatIndex]: online }));
+    });
+  }, [id]);
+
+  // Initial ratings fetch on mount, plus a refetch on the
+  // playing→finished transition so the modal has data even if the WS
+  // "rated" event was missed. The "rated" subscription below handles
+  // the live case; this is the resync safety net.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getGameRatings(id)
+      .then((gr) => {
+        if (!cancelled) setRatings(gr);
+      })
+      .catch(() => {
+        /* server returns 404 for unknown games or a transient error
+         * — either way the UI gracefully degrades to "no Elo info"
+         * via ratings:null and the modal falls back to a generic
+         * end-of-game card. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  // The end-of-game modal needs `applied: true` to show deltas. The
+  // server emits a "rated" WS event right after ApplyRatedGame
+  // commits; subscribing here is the live path. Refetch fallback is
+  // below (on finished transition) in case the event arrives before
+  // the modal can render.
+  useEffect(() => {
+    return acquireRatedStream(id, (gr) => {
+      setRatings(gr);
     });
   }, [id]);
 
@@ -125,6 +171,26 @@ export function GamePage() {
       // keep creds; just used for the "you" highlight in the final scoreboard
     }
   }, [game, creds]);
+
+  // On the playing→finished transition, refetch ratings as a safety
+  // net in case the WS "rated" event was lost (rare, but the live
+  // path is fire-and-forget so we don't depend on it). If the server
+  // hasn't applied yet we'll get applied:false now and the WS
+  // subscription will swap to applied:true a moment later.
+  const isFinished = game?.status === "finished";
+  useEffect(() => {
+    if (!isFinished) return;
+    let cancelled = false;
+    api
+      .getGameRatings(id)
+      .then((gr) => {
+        if (!cancelled) setRatings(gr);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [id, isFinished]);
 
   async function handleJoin(joinAs: string | undefined) {
     setJoining(true);
@@ -330,6 +396,7 @@ export function GamePage() {
             game={game}
             mySeatIndex={creds?.seatIndex ?? null}
             presence={presence}
+            ratings={ratings}
             onAddBot={
               game.status === "waiting" &&
               game.visibility === "private" &&
@@ -406,23 +473,23 @@ export function GamePage() {
             />
           )}
 
-          {game.status === "finished" && (
-            <>
-              <Banner>
+          {game.status === "finished" && endModalDismissed && (
+            // Compact recap once the user has dismissed the modal:
+            // they explicitly chose to keep playing with chat/replay,
+            // so we keep a small reminder + a "Revoir le résultat"
+            // button to bring the modal back if they want.
+            <div className="space-y-2 rounded-md border border-zinc-800 bg-zinc-900/40 p-3 text-sm text-zinc-200">
+              <p className="font-medium">
                 🏆 {gemName(game.winner)} gagne par {winKindLabel(game.winKind)}
-              </Banner>
+              </p>
               <button
-                onClick={handleRematch}
-                disabled={rematching}
-                className="rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
+                type="button"
+                onClick={() => setEndModalDismissed(false)}
+                className="text-xs text-amber-300 hover:text-amber-200"
               >
-                {rematching
-                  ? "Création…"
-                  : rematchLink
-                    ? "Aller à la revanche"
-                    : "Revanche"}
+                Revoir le résultat
               </button>
-            </>
+            </div>
           )}
 
           {inReplay ? (
@@ -462,6 +529,18 @@ export function GamePage() {
           )}
         </aside>
       </div>
+
+      {game.status === "finished" && !endModalDismissed && (
+        <GameEndModal
+          game={game}
+          ratings={ratings}
+          rematchLink={rematchLink}
+          rematching={rematching}
+          onRematch={handleRematch}
+          onClose={() => setEndModalDismissed(true)}
+          onLeave={handleLeave}
+        />
+      )}
     </div>
   );
 }
@@ -652,14 +731,6 @@ function ShareCard({ id }: { id: string }) {
         onFocus={(e) => e.currentTarget.select()}
         className="w-full rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[11px] text-zinc-300"
       />
-    </div>
-  );
-}
-
-function Banner({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-200">
-      {children}
     </div>
   );
 }

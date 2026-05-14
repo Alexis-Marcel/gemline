@@ -130,6 +130,20 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *S
 		resp := moveResponse{Game: dto, Captures: toCaptureDTOs(mv.Captures)}
 		srv.events.Publish(gameID, eventMove(resp))
 	})
+	// Rated callback fires once per game right after ApplyRatedGame
+	// commits. We rebuild the rating snapshot from the DB rather than
+	// piping deltas through the callback so all consumers (this WS
+	// event, the HTTP catch-up endpoint) see exactly the same shape.
+	// Slight overhead (one extra query) for a path that fires once
+	// per finished rated game — negligible.
+	store.SetRatedListener(func(gameID string) {
+		gr, err := store.RatingsForGame(context.Background(), gameID)
+		if err != nil {
+			log.Error("rated listener: load ratings", "game", gameID, "err", err)
+			return
+		}
+		srv.events.Publish(gameID, eventRated(gr))
+	})
 	return srv
 }
 
@@ -153,6 +167,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/start", s.startGame)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
 	mux.HandleFunc("GET /api/games/{id}/events", s.getGameEvents)
+	mux.HandleFunc("GET /api/games/{id}/ratings", s.getGameRatings)
 	mux.HandleFunc("GET /api/games/{id}/messages", s.getChat)
 	mux.HandleFunc("POST /api/games/{id}/messages", s.postChat)
 	mux.HandleFunc("GET /ws/games/{id}", s.wsGame)
@@ -607,6 +622,27 @@ func (s *Server) getGameEvents(w http.ResponseWriter, r *http.Request) {
 		rows = []EventRow{}
 	}
 	writeJSON(w, http.StatusOK, rows)
+}
+
+// getGameRatings serves the Elo snapshot for the end-of-game modal +
+// in-game Scoreboard line. Returns Rated=false (with empty seats) for
+// games that aren't matchmaking-eligible — the client UI uses that
+// flag to hide the Elo section entirely. No auth required: ratings
+// are public information for a given game ID, same as the existing
+// /api/games/:id endpoint.
+func (s *Server) getGameRatings(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	gr, err := s.store.RatingsForGame(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrGameNotFound) {
+			writeError(w, http.StatusNotFound, "game not found")
+			return
+		}
+		s.log.Error("ratings for game", "game", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "could not load ratings")
+		return
+	}
+	writeJSON(w, http.StatusOK, gr)
 }
 
 func (s *Server) getGame(w http.ResponseWriter, r *http.Request) {

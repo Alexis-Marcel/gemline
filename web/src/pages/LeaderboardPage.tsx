@@ -67,7 +67,10 @@ export function LeaderboardPage() {
         <ol className="space-y-1.5">
           {entries.map((e, i) => (
             <li key={e.userId}>
-              <div className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-sm">
+              <Link
+                to={`/profile/${e.userId}`}
+                className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-sm transition hover:border-amber-400"
+              >
                 <div className="flex items-center gap-3 min-w-0">
                   <span className={`w-6 text-right font-mono ${rankColor(i)}`}>
                     {i + 1}
@@ -82,7 +85,7 @@ export function LeaderboardPage() {
                     {e.rating}
                   </span>
                 </div>
-              </div>
+              </Link>
             </li>
           ))}
         </ol>

@@ -142,6 +142,26 @@ export const api = {
     });
   },
 
+  // inviteSeat reserves an empty seat for a named user. The seat
+  // shows their name with an "en attente" affordance until they
+  // navigate to the game URL and join. Server-side guards:
+  // private + waiting + seat empty.
+  inviteSeat(id: string, seatIndex: number, userId: string, displayName: string) {
+    return request<Game>(`/api/games/${id}/seats/${seatIndex}/invite`, {
+      method: "POST",
+      body: JSON.stringify({ userId, displayName }),
+    });
+  },
+
+  // cancelSeatInvite clears a pending invitation on a seat. The
+  // seat returns to the empty state. Server-side: must actually be
+  // an invited seat (not a human, not a bot, not empty).
+  cancelSeatInvite(id: string, seatIndex: number) {
+    return request<Game>(`/api/games/${id}/seats/${seatIndex}/invite`, {
+      method: "DELETE",
+    });
+  },
+
   rematch(id: string) {
     return request<RematchResponse>(`/api/games/${id}/rematch`, {
       method: "POST",

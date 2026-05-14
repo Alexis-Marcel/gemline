@@ -21,6 +21,13 @@ interface ScoreboardProps {
    *  seat. Same conditions as onAddBot (private + waiting); undefined
    *  in any other context. */
   onRemoveBot?: (seatIndex: number) => void;
+  /** Invoked when the user clicks "+ Inviter" on an empty seat. Same
+   *  conditions as onAddBot. */
+  onInviteSeat?: (seatIndex: number) => void;
+  /** Invoked when the user clicks "× Annuler" on a seat that's
+   *  reserved-but-not-joined (invitation pending). Same conditions
+   *  as onAddBot. */
+  onCancelInvite?: (seatIndex: number) => void;
 }
 
 const DISCONNECT_GRACE_MS = 60_000;
@@ -37,6 +44,8 @@ export function Scoreboard({
   ratings,
   onAddBot,
   onRemoveBot,
+  onInviteSeat,
+  onCancelInvite,
 }: ScoreboardProps) {
   const t = game.thresholds;
   const clockEnabled = t.initialTimeMs > 0;
@@ -56,6 +65,14 @@ export function Scoreboard({
         const online = presence[i];
         const showOffline =
           seat.occupied && game.status === "playing" && online === false;
+        // A seat is "invited but not joined" when it has a userId and a
+        // display name set, but Occupied is false and it's not a bot —
+        // exactly what Store.InviteSeat persists. The UI shows the
+        // invitee's name with an "en attente" badge until they actually
+        // navigate to the URL and Store.Join lands them on this exact
+        // seat.
+        const isInvited =
+          !seat.occupied && !seat.isBot && !!seat.userId && seat.name !== "";
         return (
           <li
             key={p.color}
@@ -92,12 +109,24 @@ export function Scoreboard({
                       ) : (
                         <span className="text-zinc-100">{seat.name}</span>
                       )
+                    ) : isInvited ? (
+                      <Link
+                        to={`/profile/${seat.userId}`}
+                        className="text-zinc-300 hover:text-amber-300 hover:underline"
+                      >
+                        {seat.name}
+                      </Link>
                     ) : (
                       <span className="text-zinc-500">Siège vide</span>
                     )}
                     {seat.isBot && (
                       <span className="ml-2 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-zinc-400">
                         Bot
+                      </span>
+                    )}
+                    {isInvited && (
+                      <span className="ml-2 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-amber-300">
+                        En attente
                       </span>
                     )}
                     {isYou && (
@@ -142,15 +171,37 @@ export function Scoreboard({
                     </button>
                   </div>
                 )}
-                {waiting && !seat.occupied && onAddBot && (
+                {waiting && isInvited && onCancelInvite && (
                   <div className="mt-2">
                     <button
                       type="button"
-                      onClick={() => onAddBot(seat.index)}
-                      className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 transition hover:border-amber-400 hover:text-amber-100"
+                      onClick={() => onCancelInvite(seat.index)}
+                      className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-400 transition hover:border-red-400 hover:text-red-300"
                     >
-                      + Bot
+                      × Annuler l'invitation
                     </button>
+                  </div>
+                )}
+                {waiting && !seat.occupied && !isInvited && (onAddBot || onInviteSeat) && (
+                  <div className="mt-2 flex gap-2">
+                    {onInviteSeat && (
+                      <button
+                        type="button"
+                        onClick={() => onInviteSeat(seat.index)}
+                        className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 transition hover:border-amber-400 hover:text-amber-100"
+                      >
+                        + Inviter
+                      </button>
+                    )}
+                    {onAddBot && (
+                      <button
+                        type="button"
+                        onClick={() => onAddBot(seat.index)}
+                        className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 transition hover:border-amber-400 hover:text-amber-100"
+                      >
+                        + Bot
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

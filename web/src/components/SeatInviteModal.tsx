@@ -1,33 +1,41 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { ApiError, api } from "../api/client";
-import type { ProfileSearchEntry } from "../api/types";
-import { saveCredentials } from "../lib/auth";
+import type { Game, ProfileSearchEntry } from "../api/types";
 import { Button } from "./Button";
 
-interface InviteFriendModalProps {
+interface SeatInviteModalProps {
+  gameId: string;
+  seatIndex: number;
+  /** Called with the updated game after a successful invite, so the
+   *  parent can replace its local state without waiting for the WS
+   *  state event. */
+  onInvited: (game: Game) => void;
   onClose: () => void;
 }
 
 const SEARCH_DEBOUNCE_MS = 200;
-const PRIVATE_SEATS = 2;
 
 /**
- * InviteFriendModal lets the caller pick another player by name and
- * spawns a fresh private 2-seat game. The caller is seated; the
- * invitee gets the URL via clipboard so they can be reached over
- * whatever channel (Discord, email, etc.). A future revision could
- * push a lobby-WS notification — for now this is the simple path.
+ * SeatInviteModal lets the host pick a player to reserve a specific
+ * seat for. Identical to the legacy InviteFriendModal in its search
+ * UX, but the action is "tie this player to that seat in the
+ * current game" rather than "create a new game with them invited" —
+ * the host stays in the game they were just in and the seat
+ * surfaces the invitee with an "en attente" badge until they show
+ * up via the URL.
  */
-export function InviteFriendModal({ onClose }: InviteFriendModalProps) {
-  const navigate = useNavigate();
+export function SeatInviteModal({
+  gameId,
+  seatIndex,
+  onInvited,
+  onClose,
+}: SeatInviteModalProps) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<ProfileSearchEntry[]>([]);
   const [searching, setSearching] = useState(false);
   const [inviting, setInviting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Close on Escape — standard modal affordance, mirrors GameEndModal.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -36,9 +44,6 @@ export function InviteFriendModal({ onClose }: InviteFriendModalProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Debounced search: 200ms after the user stops typing, fire the
-  // query. Anything shorter floods the server with abandoned
-  // typeahead requests; anything longer feels laggy.
   useEffect(() => {
     const query = q.trim();
     if (query === "") {
@@ -51,37 +56,26 @@ export function InviteFriendModal({ onClose }: InviteFriendModalProps) {
       api
         .searchUsers(query)
         .then((r) => setResults(r))
-        .catch((err) => {
-          setError(err instanceof ApiError ? err.message : "Erreur recherche");
-        })
+        .catch((err) =>
+          setError(err instanceof ApiError ? err.message : "Erreur recherche"),
+        )
         .finally(() => setSearching(false));
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
   }, [q]);
 
-  async function handlePick(_entry: ProfileSearchEntry) {
+  async function handlePick(entry: ProfileSearchEntry) {
     setInviting(true);
     setError(null);
     try {
-      // Spawn a fresh 2-seat private game with the caller already
-      // seated. We don't pass a name — the server resolves it from
-      // the caller's profile (modal is only surfaced to authed
-      // users). The invitee joins by URL.
-      const res = await api.createGame(PRIVATE_SEATS);
-      saveCredentials(res.game.id, {
-        token: res.token,
-        seatIndex: res.seat.index,
-        name: res.seat.name,
-      });
-      const url = `${window.location.origin}/game/${res.game.id}`;
-      try {
-        await navigator.clipboard.writeText(url);
-      } catch {
-        /* Some browsers / contexts disallow clipboard access without a
-         * gesture; the user will see the URL in the address bar after
-         * the navigate below. */
-      }
-      navigate(`/game/${res.game.id}`);
+      const game = await api.inviteSeat(
+        gameId,
+        seatIndex,
+        entry.userId,
+        entry.displayName,
+      );
+      onInvited(game);
+      onClose();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Erreur invitation");
     } finally {
@@ -109,11 +103,11 @@ export function InviteFriendModal({ onClose }: InviteFriendModalProps) {
 
         <header className="mb-4">
           <h2 className="text-lg font-semibold text-zinc-100">
-            Inviter un ami
+            Inviter un joueur
           </h2>
           <p className="mt-1 text-sm text-zinc-400">
-            Cherche un joueur par son nom. Tu seras envoyé dans une nouvelle
-            partie privée et le lien sera copié dans ton presse-papier.
+            Cherche un joueur par son nom. Il sera réservé sur ce siège
+            jusqu'à ce qu'il rejoigne la partie.
           </p>
         </header>
 

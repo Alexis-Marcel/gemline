@@ -131,6 +131,15 @@ export const api = {
     });
   },
 
+  // removeBot vacates a bot-occupied seat in a private waiting game.
+  // Server-side guards: status=waiting + visibility=private + seat must
+  // actually be a bot. Same auth model as addBot — no token required.
+  removeBot(id: string, seatIndex: number) {
+    return request<Game>(`/api/games/${id}/seats/${seatIndex}/bot`, {
+      method: "DELETE",
+    });
+  },
+
   rematch(id: string) {
     return request<RematchResponse>(`/api/games/${id}/rematch`, {
       method: "POST",

@@ -49,6 +49,7 @@ var (
 	ErrDrawAlreadyOffered = errors.New("a draw is already being offered")
 	ErrDrawUnsupported  = errors.New("draw is only supported in 2-player games")
 	ErrBotsOnPublic      = errors.New("bots cannot be added to public games")
+	ErrSeatNotBot        = errors.New("seat is not occupied by a bot")
 	ErrAnonymousOnPublic = errors.New("public games require authentication to join")
 	ErrBadSeatIndex      = errors.New("seat index out of range")
 	ErrPublicCannotStart = errors.New("public games start automatically; manual start is only for private games")
@@ -1035,6 +1036,51 @@ func (s *Store) AddBot(ctx context.Context, gameID string, seatIdx int) (*GameRe
 		// Active player may itself be a bot — kick its turn.
 		s.maybeScheduleBot(rec)
 	}
+	return rec, nil
+}
+
+// RemoveBot vacates a bot-occupied seat in a private waiting game. The
+// inverse of AddBot: same guards (private + waiting + seat in range)
+// plus the seat must actually be occupied by a bot (vs. a human, who
+// would leave via Store.LeaveSeat with their own token). Resets the
+// seat to its empty state and persists.
+func (s *Store) RemoveBot(ctx context.Context, gameID string, seatIdx int) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	if rec.Status != StatusWaiting {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.Visibility != VisibilityPrivate {
+		rec.Unlock()
+		return rec, ErrBotsOnPublic
+	}
+	if seatIdx < 0 || seatIdx >= len(rec.Seats) {
+		rec.Unlock()
+		return rec, ErrBadSeatIndex
+	}
+	if !rec.Seats[seatIdx].Occupied || !rec.Seats[seatIdx].IsBot {
+		rec.Unlock()
+		return rec, ErrSeatNotBot
+	}
+
+	rec.Seats[seatIdx].Name = ""
+	rec.Seats[seatIdx].TokenHash = nil
+	rec.Seats[seatIdx].Occupied = false
+	rec.Seats[seatIdx].IsBot = false
+
+	if err := s.repo.UpdateSeat(ctx, gameID, &rec.Seats[seatIdx], rec.Status); err != nil {
+		rec.Unlock()
+		return rec, err
+	}
+	rec.Unlock()
 	return rec, nil
 }
 

@@ -59,6 +59,22 @@ func DefaultConfig(numPlayers int) Config {
 	return cfg
 }
 
+// ConfigFor returns the rulebook thresholds for `numPlayers`, but preserves
+// the time-control fields from `base`. Used when a game's actual player count
+// is known later than its creation (e.g. private game created with 6 slots,
+// but only 3 sit down before the host clicks Start). The clock budget that
+// was chosen at create-time is independent of how many players ultimately
+// sit, so we carry it through.
+func ConfigFor(numPlayers int, base Config) Config {
+	out := DefaultConfig(numPlayers)
+	out.InitialTimeMs = base.InitialTimeMs
+	out.IncrementMs = base.IncrementMs
+	if base.BoardSide > 0 {
+		out.BoardSide = base.BoardSide
+	}
+	return out
+}
+
 // GameState is an in-progress (or finished) game. It is not safe for
 // concurrent use — callers must serialize access externally.
 type GameState struct {

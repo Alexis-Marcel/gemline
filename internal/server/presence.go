@@ -29,13 +29,14 @@ func newPresenceManager() *presenceManager {
 }
 
 // Schedule starts a disconnect-grace timer for the seat. If a timer already
-// existed for the same key, it is cancelled first.
+// existed for the same key, it is cancelled first. The cancel-and-install is
+// atomic under pm.mu so two concurrent Schedules for the same key cannot
+// orphan one of their cancel funcs and leak a goroutine.
 func (pm *presenceManager) Schedule(gameID string, seatIndex int, grace time.Duration, onTimeout func()) {
 	key := presenceKey{gameID, seatIndex}
-	pm.cancelLocked(key)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	pm.mu.Lock()
+	pm.cancelLocked(key)
 	pm.cancels[key] = cancel
 	pm.mu.Unlock()
 

@@ -14,10 +14,11 @@ import (
 )
 
 type Server struct {
-	store    *Store
-	hub      *Hub
-	log      *slog.Logger
-	verifier jwt.Keyfunc
+	store          *Store
+	hub            *Hub
+	log            *slog.Logger
+	verifier       jwt.Keyfunc
+	allowedOrigins []string // nil/empty = dev-permissive (CORS `*`, WS skips origin)
 }
 
 // Config holds optional dependencies that change how the server behaves.
@@ -26,16 +27,28 @@ type Server struct {
 // from <SupabaseURL>/auth/v1/.well-known/jwks.json and verifies
 // asymmetrically-signed user JWTs. When it's empty, auth is disabled
 // and every /api/auth/* endpoint responds 401.
+//
+// AllowedOrigins controls which Origins are permitted by the CORS middleware
+// and the WebSocket upgrade. Empty/unset means "dev mode" — `*` for CORS and
+// the WS origin check is skipped. Production deployments MUST set this to
+// the actual frontend origin(s).
 type Config struct {
-	SupabaseURL string
+	SupabaseURL    string
+	AllowedOrigins []string
 }
 
 // New returns a Server backed by the given store and config.
 func New(log *slog.Logger, store *Store, cfg Config) *Server {
 	srv := &Server{
-		store: store,
-		hub:   NewHub(),
-		log:   log,
+		store:          store,
+		hub:            NewHub(log),
+		log:            log,
+		allowedOrigins: cfg.AllowedOrigins,
+	}
+	if len(cfg.AllowedOrigins) == 0 {
+		log.Warn("CORS + WS origin checks disabled — set AllowedOrigins for production")
+	} else {
+		log.Info("CORS + WS origin checks enabled", "origins", cfg.AllowedOrigins)
 	}
 
 	if cfg.SupabaseURL == "" {
@@ -123,7 +136,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/users/me/stats", s.getMyStats)
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
-	return loggingMiddleware(s.log, corsMiddleware(jwtMiddleware(s.verifier, mux)))
+	return loggingMiddleware(s.log, corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, mux)))
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {

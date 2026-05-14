@@ -139,13 +139,9 @@ export function Scoreboard({
 /**
  * RatingChip renders a player's current rating and (once the game's
  * Elo math has been applied) the delta they took out of this match.
- * Three modes:
- *   - applied:false → just the rating, dimmed
- *   - applied:true with delta > 0 → "📈 1259 +12" (green)
- *   - applied:true with delta < 0 → "📈 1241 -12" (red)
- *   - applied:true with delta = 0 → "📈 1250 ±0" (zinc, for draws)
- * The delta sits to the right of the rating value to mimic the chess.com
- * post-game card the players already understand.
+ * A tiny uppercase "Elo" label disambiguates the number from other
+ * stats on the row — mirrors the chess-site convention without
+ * resorting to an emoji that read as decorative noise.
  */
 function RatingChip({
   sr,
@@ -164,10 +160,13 @@ function RatingChip({
           ? "text-red-400"
           : "text-zinc-500";
   return (
-    <span className="font-mono tabular-nums text-zinc-400">
-      📈 {sr.currentRating}
+    <span className="inline-flex items-baseline gap-1 font-mono tabular-nums text-zinc-300">
+      <span className="text-[9px] uppercase tracking-wider text-zinc-500">
+        Elo
+      </span>
+      {sr.currentRating}
       {delta !== undefined && (
-        <span className={`ml-1 text-xs font-semibold ${deltaCls}`}>
+        <span className={`text-xs font-semibold ${deltaCls}`}>
           {delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "±0"}
         </span>
       )}

@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { Link } from "react-router-dom";
 import type { Game, GameRatings, WinKind } from "../api/types";
 import { gemColor, gemName } from "../lib/colors";
 import { Button } from "./Button";
@@ -122,9 +123,19 @@ export function GameEndModal({
                       className="inline-block h-4 w-4 rounded-full"
                       style={{ background: gemColor(seat.color) ?? "#27272a" }}
                     />
-                    <span className="flex-1 truncate text-sm text-zinc-100">
-                      {seat.name}
-                    </span>
+                    {seat.userId && !seat.isBot ? (
+                      <Link
+                        to={`/profile/${seat.userId}`}
+                        onClick={onClose}
+                        className="flex-1 truncate text-sm text-zinc-100 hover:text-amber-300 hover:underline"
+                      >
+                        {seat.name}
+                      </Link>
+                    ) : (
+                      <span className="flex-1 truncate text-sm text-zinc-100">
+                        {seat.name}
+                      </span>
+                    )}
                     <RatingCell sr={sr} />
                   </li>
                 );

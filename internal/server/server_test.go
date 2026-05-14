@@ -675,6 +675,36 @@ func TestLeaveSeatRejectedAfterStart(t *testing.T) {
 	}
 }
 
+// TestGameRatings_NoopFallsBackToUnrated guards the API contract of
+// the rated-game-end modal: in hermetic mode (no DB) the endpoint
+// always reports rated:false with an empty seats list, so the client
+// can render a generic end-of-game card instead of crashing.
+func TestGameRatings_NoopFallsBackToUnrated(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+
+	resp, err := http.Get(ts.URL + "/api/games/" + g.ID + "/ratings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("want 200, got %d: %s", resp.StatusCode, b)
+	}
+	var gr GameRatings
+	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
+		t.Fatal(err)
+	}
+	if gr.Rated {
+		t.Fatalf("noop repo must report rated:false, got %+v", gr)
+	}
+	if len(gr.Seats) != 0 {
+		t.Fatalf("noop repo must report empty seats, got %+v", gr.Seats)
+	}
+}
+
 func TestLeaderboardEmptyByDefault(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()

@@ -98,13 +98,42 @@ export type WsEvent =
   | { type: "state"; seq?: number; payload: Game }
   | { type: "move"; seq?: number; payload: MoveResponse }
   | { type: "chat"; seq?: number; payload: Message }
-  | { type: "presence"; seq?: number; payload: { seatIndex: number; online: boolean } };
+  | { type: "presence"; seq?: number; payload: { seatIndex: number; online: boolean } }
+  | { type: "rated"; seq?: number; payload: GameRatings };
 
 /** Row shape returned by GET /api/games/:id/events?since=N. */
 export interface GameEventRow {
   seq: number;
   type: WsEvent["type"];
   payload: WsEvent["payload"];
+}
+
+/**
+ * Per-seat rating snapshot. The applied-only fields (oldRating, newRating,
+ * delta, result) are present when the game's Elo math has run, and absent
+ * otherwise — the JSON tags use omitempty server-side.
+ */
+export interface SeatRating {
+  seatIndex: number;
+  userId: string;
+  currentRating: number;
+  oldRating?: number;
+  newRating?: number;
+  delta?: number;
+  result?: "W" | "L" | "D";
+}
+
+/**
+ * Returned by GET /api/games/:id/ratings and shipped as the payload of
+ * the "rated" WS event. `rated` is the eligibility gate (public game,
+ * no bots, no anon); `applied` becomes true once ApplyRatedGame has
+ * run. Until then, seats only carry `currentRating`.
+ */
+export interface GameRatings {
+  mode: "1v1" | "multi";
+  rated: boolean;
+  applied: boolean;
+  seats: SeatRating[];
 }
 
 export interface Message {

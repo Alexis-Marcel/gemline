@@ -30,6 +30,14 @@ func eventChat(m Message) Event {
 	return Event{Type: "chat", Payload: m}
 }
 
+// eventRated is emitted once after a finished public game's ratings have
+// been persisted. Payload mirrors GET /api/games/:id/ratings so the
+// client can apply it as a drop-in replacement for the data it
+// fetched on game-end, with no special-casing.
+func eventRated(gr GameRatings) Event {
+	return Event{Type: "rated", Payload: gr}
+}
+
 type presencePayload struct {
 	SeatIndex int  `json:"seatIndex"`
 	Online    bool `json:"online"`

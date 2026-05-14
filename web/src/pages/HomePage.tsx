@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
+import { useMatchmake } from "../api/matchmake";
 import { useAuth } from "../auth/AuthProvider";
 import { Button } from "../components/Button";
 import { UserNav } from "../components/UserNav";
@@ -17,36 +18,50 @@ type Mode = "menu" | "private-name";
 export function HomePage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [busy, setBusy] = useState<"" | "1v1" | "multi" | "private">("");
+  const [busy, setBusy] = useState<"" | "private">("");
   const [joinId, setJoinId] = useState("");
   const [mode, setMode] = useState<Mode>("menu");
   const [hostName, setHostName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const matchmake = useMatchmake();
+  // Track which button the user clicked so the spinner attaches to it
+  // rather than to both 1v1 and multi at once.
+  const [queuedFor, setQueuedFor] = useState<"1v1" | "multi" | null>(null);
 
-  async function matchmake(players: number, key: "1v1" | "multi") {
+  // When the matcher resolves to a match, save the seat credentials and
+  // navigate. The hook stays in "matched" state until we leave the page,
+  // which is fine — the navigation effectively unmounts this component
+  // and the hook's cleanup teardown fires.
+  useEffect(() => {
+    if (matchmake.state.status === "matched") {
+      const { match } = matchmake.state;
+      saveCredentials(match.gameId, {
+        token: match.token,
+        seatIndex: match.seatIndex,
+        name: match.name,
+      });
+      navigate(`/game/${match.gameId}`);
+    } else if (matchmake.state.status === "error") {
+      setError(matchmake.state.message);
+      setQueuedFor(null);
+    } else if (matchmake.state.status === "idle") {
+      setQueuedFor(null);
+    }
+  }, [matchmake.state, navigate]);
+
+  async function findMatch(players: number, key: "1v1" | "multi") {
     if (!user) {
       navigate("/login?next=/");
       return;
     }
-    setBusy(key);
     setError(null);
-    try {
-      const res = await api.matchmake(players);
-      saveCredentials(res.game.id, {
-        token: res.token,
-        seatIndex: res.seat.index,
-        name: res.seat.name,
-      });
-      navigate(`/game/${res.game.id}`);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        navigate("/login?next=/");
-        return;
-      }
-      setError(err instanceof ApiError ? err.message : "Erreur matchmaking");
-    } finally {
-      setBusy("");
-    }
+    setQueuedFor(key);
+    await matchmake.start(players);
+  }
+
+  async function cancelMatch() {
+    await matchmake.cancel();
+    setQueuedFor(null);
   }
 
   async function createPrivate(name?: string) {
@@ -112,17 +127,37 @@ export function HomePage() {
           Jouer en ligne
         </h2>
         <BigAction
-          label="1 contre 1"
-          sub="Trouve un adversaire pour un duel."
-          onClick={() => matchmake(2, "1v1")}
-          loading={busy === "1v1"}
-          tone="primary"
+          label={queuedFor === "1v1" ? "Recherche en cours…" : "1 contre 1"}
+          sub={
+            queuedFor === "1v1"
+              ? "On te trouve un adversaire. Reste sur cette page."
+              : "Trouve un adversaire pour un duel."
+          }
+          onClick={() =>
+            queuedFor === "1v1" ? cancelMatch() : findMatch(2, "1v1")
+          }
+          loading={
+            queuedFor === "1v1" && matchmake.state.status === "queueing"
+          }
+          tone={queuedFor === "1v1" ? undefined : "primary"}
+          cancellable={queuedFor === "1v1"}
         />
         <BigAction
-          label="Multijoueur"
-          sub="3 à 6 joueurs. La partie démarre dès qu'assez de monde est là."
-          onClick={() => matchmake(MULTIPLAYER_MAX_SEATS, "multi")}
-          loading={busy === "multi"}
+          label={queuedFor === "multi" ? "Recherche en cours…" : "Multijoueur"}
+          sub={
+            queuedFor === "multi"
+              ? "On accumule 3 à 6 joueurs. Reste sur cette page."
+              : "3 à 6 joueurs. La partie démarre dès qu'assez de monde est là."
+          }
+          onClick={() =>
+            queuedFor === "multi"
+              ? cancelMatch()
+              : findMatch(MULTIPLAYER_MAX_SEATS, "multi")
+          }
+          loading={
+            queuedFor === "multi" && matchmake.state.status === "queueing"
+          }
+          cancellable={queuedFor === "multi"}
         />
       </section>
 
@@ -215,12 +250,14 @@ function BigAction({
   onClick,
   loading,
   tone,
+  cancellable,
 }: {
   label: string;
   sub: string;
   onClick: () => void;
   loading?: boolean;
   tone?: "primary";
+  cancellable?: boolean;
 }) {
   const base =
     "w-full rounded-xl border px-4 py-3 text-left transition disabled:opacity-50";
@@ -228,17 +265,23 @@ function BigAction({
     "border-amber-400 bg-amber-400/10 text-amber-100 hover:bg-amber-400/20";
   const neutral =
     "border-zinc-800 bg-zinc-900/40 text-zinc-100 hover:border-zinc-600";
+  // Cancellable buttons stay enabled (the click cancels the queue);
+  // non-cancellable buttons disable while loading so users can't
+  // double-click. The label change ("Recherche en cours…") signals
+  // state regardless.
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={loading}
+      disabled={loading && !cancellable}
       className={`${base} ${tone === "primary" ? primary : neutral}`}
     >
       <div className="text-base font-medium">
         {loading ? "Recherche…" : label}
       </div>
-      <div className="mt-0.5 text-xs text-zinc-400">{sub}</div>
+      <div className="mt-0.5 text-xs text-zinc-400">
+        {cancellable ? `${sub} — clique pour annuler.` : sub}
+      </div>
     </button>
   );
 }

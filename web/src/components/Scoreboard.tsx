@@ -16,6 +16,10 @@ interface ScoreboardProps {
    *  Only surfaced for private games in waiting state — set to undefined
    *  for any other context (public games, playing, finished). */
   onAddBot?: (seatIndex: number) => void;
+  /** Invoked when the user clicks the "× Bot" button on a bot-occupied
+   *  seat. Same conditions as onAddBot (private + waiting); undefined
+   *  in any other context. */
+  onRemoveBot?: (seatIndex: number) => void;
 }
 
 const DISCONNECT_GRACE_MS = 60_000;
@@ -31,6 +35,7 @@ export function Scoreboard({
   presence = {},
   ratings,
   onAddBot,
+  onRemoveBot,
 }: ScoreboardProps) {
   const t = game.thresholds;
   const clockEnabled = t.initialTimeMs > 0;
@@ -116,6 +121,17 @@ export function Scoreboard({
                       value={`${p.capturedPairs}/${t.capturePairsWin}`}
                     />
                     <Stat label="Gemmes" value={`${p.gemsRemaining}`} />
+                  </div>
+                )}
+                {waiting && seat.occupied && seat.isBot && onRemoveBot && (
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      onClick={() => onRemoveBot(seat.index)}
+                      className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-400 transition hover:border-red-400 hover:text-red-300"
+                    >
+                      × Retirer le bot
+                    </button>
                   </div>
                 )}
                 {waiting && !seat.occupied && onAddBot && (

@@ -411,6 +411,20 @@ export function GamePage() {
                   }
                 : undefined
             }
+            onRemoveBot={
+              game.status === "waiting" &&
+              game.visibility === "private" &&
+              !!creds
+                ? async (seatIndex) => {
+                    try {
+                      const g = await api.removeBot(id, seatIndex);
+                      setLocalGame(g);
+                    } catch (err) {
+                      setError(err instanceof ApiError ? err.message : "Erreur bot");
+                    }
+                  }
+                : undefined
+            }
           />
 
           {game.status === "waiting" && !creds && (

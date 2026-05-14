@@ -145,15 +145,14 @@ func toGameDTO(rec *GameRecord) gameDTO {
 			TimeRemainingMs: p.TimeRemainingMs,
 		}
 	}
+	// Route through toSeatDTO so this stays in sync when seatDTO grows
+	// fields. The inline construction that used to live here dropped
+	// every field added after the original five, including UserID —
+	// that's how PR #20's userId surfacing silently failed everywhere
+	// except the join responses.
 	seats := make([]seatDTO, len(rec.Seats))
-	for i, st := range rec.Seats {
-		seats[i] = seatDTO{
-			Index:    st.Index,
-			Color:    st.Color,
-			Name:     st.Name,
-			Occupied: st.Occupied,
-			IsBot:    st.IsBot,
-		}
+	for i := range rec.Seats {
+		seats[i] = toSeatDTO(&rec.Seats[i])
 	}
 	turnStartedAt := ""
 	if !s.TurnStartedAt.IsZero() {

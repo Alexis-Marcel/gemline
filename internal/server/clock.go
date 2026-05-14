@@ -20,11 +20,17 @@ func newClockManager() *clockManager {
 
 // Schedule fires `onFlag` after `remaining` if no Cancel/Schedule call
 // supersedes it first. A negative or zero `remaining` invokes onFlag
-// immediately on a background goroutine.
+// immediately on a background goroutine. Safe to call concurrently for the
+// same gameID — the cancel of any prior timer and the install of the new one
+// happen atomically under cm.mu, so two concurrent Schedules can never both
+// observe an empty slot and both write into it (which would orphan one
+// cancel func and leak a goroutine).
 func (cm *clockManager) Schedule(gameID string, remaining time.Duration, onFlag func()) {
-	cm.Cancel(gameID)
 	ctx, cancel := context.WithCancel(context.Background())
 	cm.mu.Lock()
+	if prev, ok := cm.cancels[gameID]; ok {
+		prev()
+	}
 	cm.cancels[gameID] = cancel
 	cm.mu.Unlock()
 

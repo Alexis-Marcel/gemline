@@ -544,6 +544,55 @@ func TestStartTrimsToOccupiedSeats(t *testing.T) {
 	}
 }
 
+// TestStartRecomputesThresholdsForOccupiedCount: a 6-slot private game
+// started with only 3 occupied seats must play under the 3-player rulebook
+// (Align4ToWin=6, Align5ToWin=3, CapturePairsWin=10), not the 6-player one.
+// The thresholds are picked at Start, not at Create.
+func TestStartRecomputesThresholdsForOccupiedCount(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 6) // 6-slot private; would default to 6-player rules
+	// During waiting with 0 occupied seats, the preview falls back to the
+	// 2-player table (the minimum) — this is intentional: the host's
+	// thresholds preview should never claim 6-player rules with 0 seated.
+	a := joinGame(t, ts, g.ID, "Alice", nil)
+	joinGame(t, ts, g.ID, "Bob", nil)
+	joinGame(t, ts, g.ID, "Carol", nil)
+	out := postStart(t, ts, g.ID, a.Token, http.StatusOK)
+	want3 := game.DefaultConfig(3)
+	if out.Thresholds.Align4ToWin != want3.Align4ToWin ||
+		out.Thresholds.Align5ToWin != want3.Align5ToWin ||
+		out.Thresholds.CapturePairsWin != want3.CapturePairsWin {
+		t.Fatalf("started with 3/6 seats: want 3-player thresholds %+v, got %+v",
+			want3, out.Thresholds)
+	}
+}
+
+// TestWaitingPreviewsThresholdsByOccupiedCount: the thresholds surfaced on
+// the wire while the room is still waiting must reflect the *current*
+// occupancy, not the slot count. This is what the lobby UI binds to so the
+// host sees the rules they're about to commit to.
+func TestWaitingPreviewsThresholdsByOccupiedCount(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 6) // 6-slot private
+	want2 := game.DefaultConfig(2)
+	if g.Thresholds.Align4ToWin != want2.Align4ToWin ||
+		g.Thresholds.Align5ToWin != want2.Align5ToWin {
+		t.Fatalf("0 seated → preview should fall back to 2-player rules; got %+v", g.Thresholds)
+	}
+	joinGame(t, ts, g.ID, "Alice", nil)
+	joinGame(t, ts, g.ID, "Bob", nil)
+	c := joinGame(t, ts, g.ID, "Carol", nil)
+	want3 := game.DefaultConfig(3)
+	if c.Game.Thresholds.Align4ToWin != want3.Align4ToWin ||
+		c.Game.Thresholds.Align5ToWin != want3.Align5ToWin ||
+		c.Game.Thresholds.CapturePairsWin != want3.CapturePairsWin {
+		t.Fatalf("3 seated → preview should reflect 3-player rules; got %+v vs want %+v",
+			c.Game.Thresholds, want3)
+	}
+}
+
 func TestStartPreservesUserColors(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()

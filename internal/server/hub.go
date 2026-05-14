@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"sync"
 )
 
@@ -42,10 +43,17 @@ type subscriber struct {
 type Hub struct {
 	mu   sync.RWMutex
 	subs map[string]map[*subscriber]struct{}
+	log  *slog.Logger
 }
 
-func NewHub() *Hub {
-	return &Hub{subs: make(map[string]map[*subscriber]struct{})}
+func NewHub(log *slog.Logger) *Hub {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Hub{
+		subs: make(map[string]map[*subscriber]struct{}),
+		log:  log,
+	}
 }
 
 func (h *Hub) Subscribe(gameID string) *subscriber {
@@ -74,15 +82,27 @@ func (h *Hub) Unsubscribe(gameID string, sub *subscriber) {
 func (h *Hub) Broadcast(gameID string, ev Event) {
 	b, err := json.Marshal(ev)
 	if err != nil {
+		// Marshalling an event must never silently drop — that hides DTO
+		// regressions (e.g. a non-marshalable field added to a payload).
+		// Log and bail; the per-sub buffers stay untouched.
+		h.log.Error("hub broadcast: marshal event", "game", gameID, "type", ev.Type, "err", err)
 		return
 	}
+	dropped := 0
 	h.mu.RLock()
-	defer h.mu.RUnlock()
 	for sub := range h.subs[gameID] {
 		select {
 		case sub.ch <- b:
 		default:
-			// drop on full buffer: a slow client must not block the hub
+			dropped++
 		}
+	}
+	h.mu.RUnlock()
+	if dropped > 0 {
+		// Per-subscriber buffer is small (16) — a steady drop count means a
+		// client can't keep up and is missing frames. Worth logging so we
+		// can investigate, without making it an error: dropping is the
+		// documented policy.
+		h.log.Warn("hub broadcast: subscribers dropped event", "game", gameID, "type", ev.Type, "dropped", dropped)
 	}
 }

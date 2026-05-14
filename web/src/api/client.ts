@@ -83,11 +83,36 @@ export const api = {
   // Atomic: the caller is auto-joined into the matched game, so the client
   // gets back the seat token and can navigate straight in without a
   // follow-up /join call.
+  //
+  // Legacy synchronous path — superseded by enqueueMatchmake +
+  // lobbySocket. Kept here because the hermetic server tests still
+  // call it.
   matchmake(players: number) {
     return request<JoinResponse>("/api/games/matchmake", {
       method: "POST",
       body: JSON.stringify({ players }),
     });
+  },
+
+  // enqueueMatchmake puts the caller in the matchmaking queue and
+  // returns immediately (HTTP 202). The actual match comes through
+  // the lobby WebSocket as a "match_found" event. Idempotent —
+  // calling it again while still queued just refreshes the position.
+  enqueueMatchmake(players: number) {
+    return request<{ queued: boolean; players: number; mode: string }>(
+      "/api/matchmake/enqueue",
+      {
+        method: "POST",
+        body: JSON.stringify({ players }),
+      },
+    );
+  },
+
+  // cancelMatchmake removes the caller's ticket. Always 204 — safe to
+  // call when not queued (the lobby WS close handler also invokes it
+  // as a safety net so a closed tab clears the row).
+  cancelMatchmake() {
+    return request<void>("/api/matchmake/enqueue", { method: "DELETE" });
   },
 
   // leaveSeat frees the caller's seat in a still-waiting game (cancel

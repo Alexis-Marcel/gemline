@@ -739,6 +739,86 @@ func (r *PostgresRepo) FinalizeStart(ctx context.Context, gameID string, status 
 	return tx.Commit()
 }
 
+// PublicProfile aggregates the publicly-visible bits for a user. All
+// numbers are derived from the canonical tables (profiles, ratings,
+// games + seats) — no separate stats table. Counts are scoped to
+// finished games so a half-played private room doesn't pump the
+// numbers. Default rating (1200) is applied via COALESCE when a user
+// has no rated row for a given mode yet.
+func (r *PostgresRepo) PublicProfile(ctx context.Context, userID string) (PublicProfileSummary, error) {
+	// First check the profile row exists; without one the user is
+	// effectively a ghost (no display name to render).
+	row := r.pool.QueryRowContext(ctx, `SELECT display_name FROM profiles WHERE user_id = $1`, userID)
+	var displayName string
+	if err := row.Scan(&displayName); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return PublicProfileSummary{}, ErrProfileNotFound
+		}
+		return PublicProfileSummary{}, fmt.Errorf("profile lookup: %w", err)
+	}
+
+	// Aggregate counts in one round-trip. The win/lost/draw filters
+	// mirror the existing StatsForUser query — we keep them in sync
+	// by hand for now.
+	statsRow := r.pool.QueryRowContext(ctx, `
+		SELECT
+		  COUNT(*) FILTER (WHERE g.status = 'finished' AND g.winner_color = s.color) AS won,
+		  COUNT(*) FILTER (WHERE g.status = 'finished' AND g.winner_color <> s.color AND g.winner_color <> 0) AS lost,
+		  COUNT(*) FILTER (WHERE g.status = 'finished' AND g.winner_color = 0) AS draws,
+		  COALESCE((SELECT rating FROM ratings WHERE user_id = $1 AND mode = '1v1'), 1200) AS r1v1,
+		  COALESCE((SELECT games  FROM ratings WHERE user_id = $1 AND mode = '1v1'), 0)    AS g1v1,
+		  COALESCE((SELECT rating FROM ratings WHERE user_id = $1 AND mode = 'multi'), 1200) AS rmulti,
+		  COALESCE((SELECT games  FROM ratings WHERE user_id = $1 AND mode = 'multi'), 0)    AS gmulti
+		FROM seats s
+		JOIN games g ON g.id = s.game_id
+		WHERE s.user_id = $1
+	`, userID)
+	out := PublicProfileSummary{UserID: userID, DisplayName: displayName}
+	if err := statsRow.Scan(&out.Won, &out.Lost, &out.Draws, &out.RatingOneVOne, &out.GamesOneVOne, &out.RatingMulti, &out.GamesMulti); err != nil {
+		return PublicProfileSummary{}, fmt.Errorf("profile stats: %w", err)
+	}
+	return out, nil
+}
+
+// SearchProfiles returns up to `limit` profile rows whose display
+// name starts with `prefix` (case-insensitive). The join on ratings
+// brings the 1v1 elo along so the picker shows "Alice (1450)" rather
+// than a bare name — helps disambiguate two Alices.
+//
+// Empty prefix returns nothing on purpose: callers shouldn't be able
+// to scrape the whole user table by sending q=. limit is clamped at
+// 50 for the same reason.
+func (r *PostgresRepo) SearchProfiles(ctx context.Context, prefix string, limit int) ([]ProfileSearchEntry, error) {
+	if prefix == "" {
+		return []ProfileSearchEntry{}, nil
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	rows, err := r.pool.QueryContext(ctx, `
+		SELECT p.user_id, p.display_name,
+		       COALESCE(r.rating, 1200) AS r1v1
+		FROM profiles p
+		LEFT JOIN ratings r ON r.user_id = p.user_id AND r.mode = '1v1'
+		WHERE p.display_name ILIKE $1 || '%'
+		ORDER BY p.display_name
+		LIMIT $2
+	`, prefix, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search profiles: %w", err)
+	}
+	defer rows.Close()
+	out := make([]ProfileSearchEntry, 0)
+	for rows.Next() {
+		var e ProfileSearchEntry
+		if err := rows.Scan(&e.UserID, &e.DisplayName, &e.RatingOneVOne); err != nil {
+			return nil, fmt.Errorf("scan profile: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // DeleteStaleWaitingGames removes games stuck in 'waiting' for longer
 // than olderThan. Uses updated_at as the freshness signal — joining /
 // adding bots / removing bots all bump updated_at, so an active host

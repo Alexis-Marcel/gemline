@@ -4,6 +4,7 @@ import { api, ApiError } from "../api/client";
 import { useMatchmake } from "../api/matchmake";
 import { useAuth } from "../auth/AuthProvider";
 import { Button } from "../components/Button";
+import { InviteFriendModal } from "../components/InviteFriendModal";
 import { UserNav } from "../components/UserNav";
 import { saveCredentials } from "../lib/auth";
 
@@ -22,6 +23,7 @@ export function HomePage() {
   const [joinId, setJoinId] = useState("");
   const [mode, setMode] = useState<Mode>("menu");
   const [hostName, setHostName] = useState("");
+  const [inviteOpen, setInviteOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const matchmake = useMatchmake();
   // Track which button the user clicked so the spinner attaches to it
@@ -212,6 +214,24 @@ export function HomePage() {
         )}
       </section>
 
+      {user && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-medium uppercase tracking-wider text-zinc-500">
+            Inviter un ami
+          </h2>
+          <button
+            type="button"
+            onClick={() => setInviteOpen(true)}
+            className="w-full rounded-xl border border-zinc-800 bg-zinc-900/40 px-4 py-3 text-left text-base font-medium text-zinc-100 transition hover:border-amber-400 hover:text-amber-100"
+          >
+            Chercher un joueur par nom
+            <span className="mt-0.5 block text-xs font-normal text-zinc-400">
+              Crée une partie privée et copie le lien à partager.
+            </span>
+          </button>
+        </section>
+      )}
+
       <section className="space-y-2">
         <h2 className="text-sm font-medium uppercase tracking-wider text-zinc-500">
           Rejoindre par ID
@@ -240,6 +260,10 @@ export function HomePage() {
           Voir le classement →
         </Link>
       </footer>
+
+      {inviteOpen && (
+        <InviteFriendModal onClose={() => setInviteOpen(false)} />
+      )}
     </div>
   );
 }

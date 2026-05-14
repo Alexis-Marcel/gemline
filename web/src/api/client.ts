@@ -7,6 +7,8 @@ import type {
   Message,
   MoveResponse,
   Profile,
+  ProfileSearchEntry,
+  PublicProfile,
   RematchResponse,
   Replay,
   UserGame,
@@ -246,6 +248,22 @@ export const api = {
       `/api/leaderboard?mode=${mode}&limit=${limit}`,
       { skipAuth: true },
     );
+  },
+
+  // getPublicProfile fetches the read-only profile of any user.
+  // 404 surfaces as ApiError so the page can render a "user not
+  // found" state cleanly.
+  getPublicProfile(userId: string) {
+    return request<PublicProfile>(`/api/users/${encodeURIComponent(userId)}`, {
+      skipAuth: true,
+    });
+  },
+
+  // searchUsers backs the "Inviter un ami" modal. Auth-gated
+  // server-side — the modal only renders for signed-in users anyway.
+  searchUsers(query: string, limit = 20) {
+    const url = `/api/users/search?q=${encodeURIComponent(query)}&limit=${limit}`;
+    return request<ProfileSearchEntry[]>(url);
   },
 };
 

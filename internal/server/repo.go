@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/alexis/gemline/internal/game"
@@ -110,6 +111,19 @@ type Repository interface {
 	// Lives at the repo layer rather than as inline SQL in the
 	// background goroutine so it can be mocked / tested.
 	DeleteStaleWaitingGames(ctx context.Context, olderThan time.Duration) (int64, error)
+
+	// PublicProfile returns everything that should be visible on
+	// another user's profile page: display name, both ratings (with
+	// default fallback when no rated games yet), aggregate win/loss
+	// counts across finished games. Returns ErrProfileNotFound when
+	// no profile row exists for userID.
+	PublicProfile(ctx context.Context, userID string) (PublicProfileSummary, error)
+
+	// SearchProfiles returns up to `limit` profile rows whose
+	// display_name matches `prefix` (case-insensitive, prefix only).
+	// Used by the "invite a friend" modal. Empty prefix returns
+	// nothing rather than the whole table.
+	SearchProfiles(ctx context.Context, prefix string, limit int) ([]ProfileSearchEntry, error)
 
 	// AppendEvent atomically increments games.event_seq and inserts a new
 	// row into game_events, returning the assigned seq. Used by the
@@ -246,6 +260,35 @@ type Rating struct {
 	UpdatedAt string // RFC 3339; empty when no row exists yet
 }
 
+// PublicProfileSummary is the per-user payload returned by
+// GET /api/users/:userId. Everything here is meant to be publicly
+// visible — no email, no internal flags.
+type PublicProfileSummary struct {
+	UserID        string `json:"userId"`
+	DisplayName   string `json:"displayName"`
+	RatingOneVOne int    `json:"ratingOneVOne"`
+	RatingMulti   int    `json:"ratingMulti"`
+	GamesOneVOne  int    `json:"gamesOneVOne"`
+	GamesMulti    int    `json:"gamesMulti"`
+	Won           int    `json:"won"`
+	Lost          int    `json:"lost"`
+	Draws         int    `json:"draws"`
+}
+
+// ProfileSearchEntry is one row in the "invite a friend" search
+// results. Compact on purpose so a 20-result response stays small
+// over the wire.
+type ProfileSearchEntry struct {
+	UserID        string `json:"userId"`
+	DisplayName   string `json:"displayName"`
+	RatingOneVOne int    `json:"ratingOneVOne"`
+}
+
+// ErrProfileNotFound surfaces from PublicProfile when there's no
+// profile row for the queried user. The handler translates this to a
+// 404 rather than a generic 500.
+var ErrProfileNotFound = errors.New("profile not found")
+
 // RatingUpdate is what ApplyRatedGame persists per user. Result drives the
 // wins/losses/draws counter columns; NewRating overrides the rating column.
 // OldRating is the rating that was in effect at the start of the game and
@@ -378,6 +421,15 @@ func (noopRepo) RatingsForGame(context.Context, string) (GameRatings, error) {
 func (noopRepo) FinalizeStart(context.Context, string, Status, game.Config) error { return nil }
 func (noopRepo) DeleteStaleWaitingGames(context.Context, time.Duration) (int64, error) {
 	return 0, nil
+}
+
+// In noop mode there are no profiles to look up. Returning
+// ErrProfileNotFound keeps the handler's 404 path exercised in tests.
+func (noopRepo) PublicProfile(context.Context, string) (PublicProfileSummary, error) {
+	return PublicProfileSummary{}, ErrProfileNotFound
+}
+func (noopRepo) SearchProfiles(context.Context, string, int) ([]ProfileSearchEntry, error) {
+	return []ProfileSearchEntry{}, nil
 }
 
 // Without a DB the event log doesn't exist; AppendEvent reports 0 as

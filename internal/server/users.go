@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // ProfileDTO is the user-controlled portion of the profile (display name,
@@ -93,6 +95,57 @@ func (s *Server) getMyGames(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, games)
+}
+
+// getPublicProfile serves GET /api/users/:userId — a read-only view of
+// another player's profile. No auth required: everything in the
+// response (display name, ratings, win/loss counts) is meant to be
+// publicly visible, same as the leaderboard.
+func (s *Server) getPublicProfile(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("userId")
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, "userId required")
+		return
+	}
+	p, err := s.store.Repo().PublicProfile(r.Context(), userID)
+	if err != nil {
+		if errors.Is(err, ErrProfileNotFound) {
+			writeError(w, http.StatusNotFound, "profile not found")
+			return
+		}
+		s.log.Error("public profile", "user", userID, "err", err)
+		writeError(w, http.StatusInternalServerError, "could not load profile")
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+// searchProfiles serves GET /api/users/search?q=&limit=. Auth-gated
+// to stop unauthenticated scraping of the user table. Empty q
+// returns an empty list (the repo guards on this too — belt and
+// braces).
+func (s *Server) searchProfiles(w http.ResponseWriter, r *http.Request) {
+	u := requireUser(w, r)
+	if u == nil {
+		return
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 50 {
+			limit = n
+		}
+	}
+	entries, err := s.store.Repo().SearchProfiles(r.Context(), q, limit)
+	if err != nil {
+		s.log.Error("search profiles", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not search profiles")
+		return
+	}
+	if entries == nil {
+		entries = []ProfileSearchEntry{}
+	}
+	writeJSON(w, http.StatusOK, entries)
 }
 
 func (s *Server) getMyStats(w http.ResponseWriter, r *http.Request) {

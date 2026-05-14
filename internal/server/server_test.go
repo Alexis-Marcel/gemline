@@ -371,6 +371,93 @@ func TestAddBotRejectedOnTakenSeat(t *testing.T) {
 	postAddBotRaw(t, ts, g.ID, 0, http.StatusConflict)
 }
 
+func TestInviteSeat_FillsSeatAsReserved(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	out := postInviteSeat(t, ts, g.ID, 1, "alice-uuid", "Alice", http.StatusOK)
+	if out.Seats[1].Occupied || out.Seats[1].IsBot {
+		t.Fatalf("invited seat must stay unoccupied + non-bot, got %+v", out.Seats[1])
+	}
+	if out.Seats[1].Name != "Alice" {
+		t.Fatalf("invited seat must take inviteeName, got %q", out.Seats[1].Name)
+	}
+	if out.Status != StatusWaiting {
+		t.Fatalf("invite must NOT promote the game to playing (occupied stays false), got %s", out.Status)
+	}
+}
+
+func TestInviteSeat_RejectedOnPublicGame(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	pub := postMatchmake(t, ts, 2, "alice", http.StatusOK)
+	postInviteSeatRaw(t, ts, pub.Game.ID, 1, "bob-uuid", "Bob", http.StatusConflict)
+}
+
+func TestInviteSeat_RejectedOnTakenSeat(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = joinGame(t, ts, g.ID, "Alice", nil)
+	postInviteSeatRaw(t, ts, g.ID, 0, "anyone-uuid", "Anyone", http.StatusConflict)
+}
+
+func TestCancelSeatInvite_FreesSeat(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = postInviteSeat(t, ts, g.ID, 1, "alice-uuid", "Alice", http.StatusOK)
+	out := postCancelSeatInvite(t, ts, g.ID, 1, http.StatusOK)
+	if out.Seats[1].Occupied || out.Seats[1].Name != "" {
+		t.Fatalf("cancel must reset seat, got %+v", out.Seats[1])
+	}
+}
+
+func TestCancelSeatInvite_RejectedOnHumanSeat(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = joinGame(t, ts, g.ID, "Alice", nil)
+	// Alice is on seat 0 as a real player, not as an invite — cancel-invite
+	// must refuse rather than evict her.
+	postCancelSeatInviteRaw(t, ts, g.ID, 0, http.StatusConflict)
+}
+
+func TestJoin_InvitedUserGetsReservedSeat(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	// Reserve seat 1 for alice-uuid.
+	_ = postInviteSeat(t, ts, g.ID, 1, "alice-uuid", "Alice", http.StatusOK)
+	// Then alice joins (auto-pick, no seat=). The reserved seat takes
+	// priority over the empty seat 0.
+	j := joinGameAs(t, ts, g.ID, "Alice", "alice-uuid", nil)
+	if j.Seat.Index != 1 {
+		t.Fatalf("invited user must land on their reserved seat (1), got %d", j.Seat.Index)
+	}
+}
+
+func TestJoin_OtherUserCannotClaimReservedSeat(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = postInviteSeat(t, ts, g.ID, 1, "alice-uuid", "Alice", http.StatusOK)
+	// Bob explicitly asks for seat 1 → blocked (reserved for Alice).
+	one := 1
+	body, _ := json.Marshal(map[string]any{"name": "Bob", "seat": one})
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+g.ID+"/join", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-User-ID", "bob-uuid")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("want 403 forbidden on claiming reserved seat, got %d", resp.StatusCode)
+	}
+}
+
 func TestRemoveBotFreesSeat(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -955,6 +1042,79 @@ func postRemoveBotRaw(t *testing.T, ts *httptest.Server, gameID string, seatIdx,
 		t.Fatalf("removeBot: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
 	}
 	return resp
+}
+
+func postInviteSeat(t *testing.T, ts *httptest.Server, gameID string, seatIdx int, userID, name string, wantStatus int) gameDTO {
+	t.Helper()
+	return decodeGameDTO(t, postInviteSeatRaw(t, ts, gameID, seatIdx, userID, name, wantStatus))
+}
+
+func postInviteSeatRaw(t *testing.T, ts *httptest.Server, gameID string, seatIdx int, userID, name string, wantStatus int) *http.Response {
+	t.Helper()
+	url := ts.URL + "/api/games/" + gameID + "/seats/" + itoa(seatIdx) + "/invite"
+	body, _ := json.Marshal(map[string]string{"userId": userID, "displayName": name})
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != wantStatus {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("inviteSeat: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
+	}
+	return resp
+}
+
+func postCancelSeatInvite(t *testing.T, ts *httptest.Server, gameID string, seatIdx, wantStatus int) gameDTO {
+	t.Helper()
+	return decodeGameDTO(t, postCancelSeatInviteRaw(t, ts, gameID, seatIdx, wantStatus))
+}
+
+func postCancelSeatInviteRaw(t *testing.T, ts *httptest.Server, gameID string, seatIdx, wantStatus int) *http.Response {
+	t.Helper()
+	url := ts.URL + "/api/games/" + gameID + "/seats/" + itoa(seatIdx) + "/invite"
+	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != wantStatus {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("cancelInviteSeat: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
+	}
+	return resp
+}
+
+// joinGameAs is the authenticated variant of joinGame — it sends the
+// hermetic X-Test-User-ID so the server treats the join as coming
+// from a logged-in user with the given user id. Needed for the
+// reserved-seat tests: only an authed caller can land on a seat that
+// was invited for them.
+func joinGameAs(t *testing.T, ts *httptest.Server, id, name, userID string, seat *int) joinResponse {
+	t.Helper()
+	payload := map[string]any{"name": name}
+	if seat != nil {
+		payload["seat"] = *seat
+	}
+	b, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+id+"/join", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-User-ID", userID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("joinAs: status=%d body=%s", resp.StatusCode, body)
+	}
+	var j joinResponse
+	if err := json.NewDecoder(resp.Body).Decode(&j); err != nil {
+		t.Fatal(err)
+	}
+	return j
 }
 
 func postStart(t *testing.T, ts *httptest.Server, gameID, token string, wantStatus int) gameDTO {

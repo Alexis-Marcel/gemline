@@ -164,6 +164,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/rematch", s.rematchGame)
 	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/bot", s.addBot)
 	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/bot", s.removeBot)
+	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite", s.inviteSeat)
+	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/invite", s.cancelSeatInvite)
 	mux.HandleFunc("POST /api/games/{id}/leave", s.leaveSeat)
 	mux.HandleFunc("POST /api/games/{id}/start", s.startGame)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
@@ -394,6 +396,94 @@ func (s *Server) removeBot(w http.ResponseWriter, r *http.Request) {
 	rec.Unlock()
 	s.events.Publish(gameID, eventState(dto))
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// inviteSeatRequest is the body of POST /api/games/:id/seats/:idx/invite.
+// Both fields are required — the server uses userId to enforce
+// "this seat is for that user" at join time and displayName as the
+// presentation label until the user joins (and the seat name gets
+// overwritten with whatever they have on file).
+type inviteSeatRequest struct {
+	UserID      string `json:"userId"`
+	DisplayName string `json:"displayName"`
+}
+
+// inviteSeat reserves an empty seat in a private waiting game for a
+// named user. The seat shows their name with an "en attente" badge
+// in the client until they navigate to the game URL and join — at
+// which point pickSeatForUser routes them to this exact seat.
+//
+// Same auth posture as addBot: URL-shared private games allow any
+// caller with the URL to rearrange seats. Server-side guards prevent
+// abuse outside the private+waiting window.
+func (s *Server) inviteSeat(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	seatIdx, err := strconv.Atoi(r.PathValue("idx"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid seat index")
+		return
+	}
+	var req inviteSeatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	req.UserID = strings.TrimSpace(req.UserID)
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	if req.UserID == "" || req.DisplayName == "" {
+		writeError(w, http.StatusBadRequest, "userId and displayName are required")
+		return
+	}
+	rec, err := s.store.InviteSeat(r.Context(), gameID, seatIdx, req.UserID, req.DisplayName)
+	if err != nil {
+		writeError(w, statusForInviteSeatError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	s.events.Publish(gameID, eventState(dto))
+	writeJSON(w, http.StatusOK, dto)
+}
+
+// cancelSeatInvite clears the pending invitation on a seat, freeing
+// it back up. Mirrors removeBot's semantics: same guards (private +
+// waiting + seat in range) plus the seat must carry an actual
+// invitation (otherwise this endpoint can't be used to kick humans
+// or vacate bot seats — those have their own dedicated endpoints).
+func (s *Server) cancelSeatInvite(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	seatIdx, err := strconv.Atoi(r.PathValue("idx"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid seat index")
+		return
+	}
+	rec, err := s.store.CancelSeatInvite(r.Context(), gameID, seatIdx)
+	if err != nil {
+		writeError(w, statusForInviteSeatError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	s.events.Publish(gameID, eventState(dto))
+	writeJSON(w, http.StatusOK, dto)
+}
+
+func statusForInviteSeatError(err error) int {
+	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrBadSeatIndex):
+		return http.StatusBadRequest
+	case errors.Is(err, ErrSeatTaken),
+		errors.Is(err, ErrSeatNotInvited),
+		errors.Is(err, ErrNotPlaying),
+		errors.Is(err, ErrBotsOnPublic):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // startGame finalises a private game (fill empty seats with bots, flip to
@@ -783,6 +873,8 @@ func statusForJoinError(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrSeatTaken), errors.Is(err, ErrNoFreeSeat):
 		return http.StatusConflict
+	case errors.Is(err, ErrSeatReserved):
+		return http.StatusForbidden
 	case errors.Is(err, ErrNotPlaying):
 		return http.StatusConflict
 	case errors.Is(err, ErrAnonymousOnPublic):

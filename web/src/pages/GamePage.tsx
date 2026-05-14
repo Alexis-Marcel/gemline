@@ -15,6 +15,7 @@ import { useGameSocket } from "../api/ws";
 import { Board } from "../components/Board";
 import { ChatPanel } from "../components/ChatPanel";
 import { GameEndModal } from "../components/GameEndModal";
+import { SeatInviteModal } from "../components/SeatInviteModal";
 import { Objectives } from "../components/Objectives";
 import { ReplayControls } from "../components/ReplayControls";
 import { Scoreboard } from "../components/Scoreboard";
@@ -349,6 +350,10 @@ export function GamePage() {
   // player count. handleNewPrivateGame reuses the caller's seat name
   // (held in creds) so an anonymous host doesn't have to retype it.
   const [creatingNew, setCreatingNew] = useState(false);
+  // Seat index currently being invited via the SeatInviteModal. -1
+  // means the modal is closed; an integer value pins the modal to a
+  // specific empty seat in the lobby.
+  const [inviteSeatIdx, setInviteSeatIdx] = useState<number | null>(null);
   async function handleNewPrivateGame() {
     if (!game) return;
     setCreatingNew(true);
@@ -488,6 +493,27 @@ export function GamePage() {
                       setLocalGame(g);
                     } catch (err) {
                       setError(err instanceof ApiError ? err.message : "Erreur bot");
+                    }
+                  }
+                : undefined
+            }
+            onInviteSeat={
+              game.status === "waiting" &&
+              game.visibility === "private" &&
+              !!creds
+                ? (seatIndex) => setInviteSeatIdx(seatIndex)
+                : undefined
+            }
+            onCancelInvite={
+              game.status === "waiting" &&
+              game.visibility === "private" &&
+              !!creds
+                ? async (seatIndex) => {
+                    try {
+                      const g = await api.cancelSeatInvite(id, seatIndex);
+                      setLocalGame(g);
+                    } catch (err) {
+                      setError(err instanceof ApiError ? err.message : "Erreur invitation");
                     }
                   }
                 : undefined
@@ -670,6 +696,15 @@ export function GamePage() {
           }
           onClose={() => setEndModalDismissed(true)}
           onLeave={handleLeave}
+        />
+      )}
+
+      {inviteSeatIdx !== null && (
+        <SeatInviteModal
+          gameId={id}
+          seatIndex={inviteSeatIdx}
+          onInvited={(g) => setLocalGame(g)}
+          onClose={() => setInviteSeatIdx(null)}
         />
       )}
     </div>

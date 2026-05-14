@@ -50,6 +50,8 @@ var (
 	ErrDrawUnsupported  = errors.New("draw is only supported in 2-player games")
 	ErrBotsOnPublic      = errors.New("bots cannot be added to public games")
 	ErrSeatNotBot        = errors.New("seat is not occupied by a bot")
+	ErrSeatReserved      = errors.New("seat is reserved for another player")
+	ErrSeatNotInvited    = errors.New("seat has no pending invitation")
 	ErrAnonymousOnPublic = errors.New("public games require authentication to join")
 	ErrBadSeatIndex      = errors.New("seat index out of range")
 	ErrPublicCannotStart = errors.New("public games start automatically; manual start is only for private games")
@@ -887,7 +889,10 @@ func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx i
 
 	idx := seatIdx
 	if idx < 0 {
-		idx = firstFreeSeat(rec.Seats)
+		// Auto-pick: if any seat is reserved for the caller (private
+		// game invitation), claim that one first; otherwise take any
+		// seat that isn't held for someone else.
+		idx = pickSeatForUser(rec.Seats, userID)
 		if idx < 0 {
 			return nil, "", ErrNoFreeSeat
 		}
@@ -897,6 +902,12 @@ func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx i
 		}
 		if rec.Seats[idx].Occupied {
 			return nil, "", ErrSeatTaken
+		}
+		// If a specific seat is requested, enforce the reservation:
+		// authed users can claim their own reserved seat; anyone else
+		// (anon, or a different authed user) bounces.
+		if reserved := rec.Seats[idx].UserID; reserved != "" && reserved != userID {
+			return nil, "", ErrSeatReserved
 		}
 	}
 
@@ -1139,6 +1150,112 @@ func (s *Store) RemoveBot(ctx context.Context, gameID string, seatIdx int) (*Gam
 	rec.Seats[seatIdx].IsBot = false
 
 	if err := s.repo.UpdateSeat(ctx, gameID, &rec.Seats[seatIdx], rec.Status); err != nil {
+		rec.Unlock()
+		return rec, err
+	}
+	rec.Unlock()
+	return rec, nil
+}
+
+// InviteSeat reserves a seat for a named user in a private waiting
+// game. The seat takes the invitee's userID + display name but stays
+// Occupied=false until the user actually shows up and joins via the
+// game URL — the join logic prefers the user's reserved seat when
+// they arrive, and refuses to let other players claim it.
+//
+// Same auth posture as AddBot: no caller credentials needed. The
+// game URL is the shared secret for a private game; anyone who has
+// it can rearrange seats. The Store guards on visibility=private +
+// status=waiting + seat empty + valid userID/name so the endpoint
+// can't be abused for state mutation outside that surface.
+func (s *Store) InviteSeat(ctx context.Context, gameID string, seatIdx int, inviteeID, inviteeName string) (*GameRecord, error) {
+	if inviteeID == "" || inviteeName == "" {
+		return nil, ErrBadSeatIndex // reuse 400 family — body validation
+	}
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	if rec.Status != StatusWaiting {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.Visibility != VisibilityPrivate {
+		rec.Unlock()
+		return rec, ErrBotsOnPublic
+	}
+	if seatIdx < 0 || seatIdx >= len(rec.Seats) {
+		rec.Unlock()
+		return rec, ErrBadSeatIndex
+	}
+	if rec.Seats[seatIdx].Occupied {
+		rec.Unlock()
+		return rec, ErrSeatTaken
+	}
+
+	// Same shape as a bot reservation, minus IsBot. occupied stays
+	// false so AllSeated() doesn't flip the game to playing on an
+	// invite. The seat is "reserved" — token gets minted at actual
+	// join time.
+	rec.Seats[seatIdx].Name = inviteeName
+	rec.Seats[seatIdx].UserID = inviteeID
+	rec.Seats[seatIdx].TokenHash = nil
+	rec.Seats[seatIdx].Occupied = false
+	rec.Seats[seatIdx].IsBot = false
+
+	if err := s.repo.UpdateSeat(ctx, gameID, &rec.Seats[seatIdx], rec.Status); err != nil {
+		rec.Unlock()
+		return rec, err
+	}
+	rec.Unlock()
+	return rec, nil
+}
+
+// CancelSeatInvite clears a pending invitation, returning the seat
+// to its empty state. Guards on visibility + waiting + the seat
+// actually carrying an invitation (UserID set, not Occupied,
+// !IsBot — ErrSeatNotInvited otherwise so the endpoint can't be
+// used to kick humans or bots).
+func (s *Store) CancelSeatInvite(ctx context.Context, gameID string, seatIdx int) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	if rec.Status != StatusWaiting {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.Visibility != VisibilityPrivate {
+		rec.Unlock()
+		return rec, ErrBotsOnPublic
+	}
+	if seatIdx < 0 || seatIdx >= len(rec.Seats) {
+		rec.Unlock()
+		return rec, ErrBadSeatIndex
+	}
+	st := &rec.Seats[seatIdx]
+	if st.Occupied || st.IsBot || st.UserID == "" {
+		rec.Unlock()
+		return rec, ErrSeatNotInvited
+	}
+
+	st.Name = ""
+	st.UserID = ""
+	st.TokenHash = nil
+	st.Occupied = false
+	st.IsBot = false
+
+	if err := s.repo.UpdateSeat(ctx, gameID, st, rec.Status); err != nil {
 		rec.Unlock()
 		return rec, err
 	}
@@ -1794,6 +1911,32 @@ func (s *Store) Leaderboard(ctx context.Context, mode string, limit int) ([]Lead
 func firstFreeSeat(seats []Seat) int {
 	for i, s := range seats {
 		if !s.Occupied {
+			return i
+		}
+	}
+	return -1
+}
+
+// pickSeatForUser selects which seat a joining player should claim.
+// Priority:
+//  1. A seat reserved for this user via an invitation (UserID matches,
+//     Occupied is false). Reserved seats are private-game invites set
+//     via Store.InviteSeat.
+//  2. Any unoccupied seat with no reservation.
+//
+// Returns -1 if no claimable seat exists (full, or every empty seat is
+// reserved for someone else). For anonymous joiners (userID == "")
+// step 1 is skipped and only unreserved seats are eligible.
+func pickSeatForUser(seats []Seat, userID string) int {
+	if userID != "" {
+		for i, s := range seats {
+			if !s.Occupied && s.UserID == userID {
+				return i
+			}
+		}
+	}
+	for i, s := range seats {
+		if !s.Occupied && s.UserID == "" {
 			return i
 		}
 	}

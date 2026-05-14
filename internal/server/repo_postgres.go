@@ -316,13 +316,18 @@ func (r *PostgresRepo) EnsureProfile(ctx context.Context, userID, fallbackName s
 }
 
 func (r *PostgresRepo) GamesForUser(ctx context.Context, userID string, limit int) ([]UserGame, error) {
+	// Only finished games surface in the history view. Waiting/playing
+	// games are either still in progress (the user has them open in
+	// another tab) or abandoned — neither belongs on a "ce que tu as
+	// joué" list. Stale waiting games are reaped separately by the
+	// stale-game cleaner (see Store.StartStaleGameCleaner).
 	rows, err := r.pool.QueryContext(ctx, `
 		SELECT g.id, g.status, s.seat_index, s.color, g.winner_color,
 		       (SELECT COUNT(*) FROM moves m WHERE m.game_id = g.id),
 		       g.created_at, g.updated_at
 		FROM seats s
 		JOIN games g ON g.id = s.game_id
-		WHERE s.user_id = $1
+		WHERE s.user_id = $1 AND g.status = 'finished'
 		ORDER BY g.updated_at DESC
 		LIMIT $2
 	`, userID, limit)
@@ -732,6 +737,28 @@ func (r *PostgresRepo) FinalizeStart(ctx context.Context, gameID string, status 
 		return fmt.Errorf("update status: %w", err)
 	}
 	return tx.Commit()
+}
+
+// DeleteStaleWaitingGames removes games stuck in 'waiting' for longer
+// than olderThan. Uses updated_at as the freshness signal — joining /
+// adding bots / removing bots all bump updated_at, so an active host
+// who's still adjusting their lobby today won't be reaped by a 7d
+// threshold even if they created the game last week. ON DELETE
+// CASCADE handles seats + game_events + rating_history (the latter
+// shouldn't exist for waiting games anyway, but cheap insurance).
+func (r *PostgresRepo) DeleteStaleWaitingGames(ctx context.Context, olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	res, err := r.pool.ExecContext(ctx, `
+		DELETE FROM games WHERE status = 'waiting' AND updated_at < $1
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("delete stale waiting games: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return n, nil
 }
 
 func deriveOutcome(status Status, mine, winner game.Color) string {

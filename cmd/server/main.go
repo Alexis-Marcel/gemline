@@ -69,6 +69,10 @@ func main() {
 	// for that occupancy has elapsed. Tests don't call this so they stay
 	// deterministic.
 	store.StartMultiPromoter()
+	// Hourly cleaner: deletes waiting games older than StaleWaitingTTL
+	// (7 days). Safe to run on every pod — DELETE is idempotent and
+	// multiple pods just race to clean the same rows.
+	store.StartStaleGameCleaner(log)
 	defer store.Close()
 
 	// server.New registers backplane.Subscribe(ChannelGameEvents, …)

@@ -695,6 +695,43 @@ func TestLeaderboardEmptyByDefault(t *testing.T) {
 	}
 }
 
+// TestGetMe_AutoFillsDisplayName guards the leaderboard-visibility fix.
+// A user that authenticates without having gone through the explicit
+// "set display name" form must still get a usable displayName from
+// /api/auth/me — derived from their email when nothing else is on
+// record. Without the fix, the response was {displayName: ""} and the
+// matching profile row was never created.
+func TestGetMe_AutoFillsDisplayName(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/auth/me", nil)
+	// X-Test-User-ID is the hermetic auth back door: the JWT
+	// middleware turns it into AuthUser{ID, Email: id+"@test.local"}
+	// when no JWT verifier is configured.
+	req.Header.Set("X-Test-User-ID", "11111111-1111-1111-1111-111111111111")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var dto ProfileDTO
+	if err := json.NewDecoder(resp.Body).Decode(&dto); err != nil {
+		t.Fatal(err)
+	}
+	// Email is <id>@test.local, local-part = the UUID, so the fallback
+	// derives that. Anything non-empty proves we hit the EnsureProfile
+	// path; the noop repo doesn't persist, so we're really asserting
+	// the handler builds and returns a synthetic Profile when none
+	// exists in the store.
+	if dto.DisplayName == "" {
+		t.Fatalf("displayName must be auto-filled even when no profile row exists; got %+v", dto)
+	}
+}
+
 // ---- helpers ----
 
 // createGame produces a private game with every seat still empty, matching

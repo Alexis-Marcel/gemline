@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"math"
 	"sort"
 	"sync"
@@ -1551,7 +1552,21 @@ func (s *Store) applyRating1v1(gameID string, seats []Seat, winnerColor game.Col
 		{UserID: a.UserID, NewRating: elo.Update(rA, rB, outcomeA), Result: resultA},
 		{UserID: b.UserID, NewRating: elo.Update(rB, rA, outcomeB), Result: resultB},
 	}
-	_, _ = s.repo.ApplyRatedGame(ctx, gameID, RatingMode1v1, updates)
+	// Every rated player must have a profile row so the leaderboard's
+	// INNER JOIN doesn't silently drop them. The seat name is what
+	// displayNameFor produced at game-create time — already the user's
+	// best-known name (profile → email → fallback). Errors here are
+	// non-fatal: the rating still applies, the leaderboard just won't
+	// show this user until they hit /api/auth/me or set a name.
+	if err := s.repo.EnsureProfile(ctx, a.UserID, a.Name); err != nil {
+		slog.Default().Error("ensure profile (rated 1v1)", "user", a.UserID, "err", err)
+	}
+	if err := s.repo.EnsureProfile(ctx, b.UserID, b.Name); err != nil {
+		slog.Default().Error("ensure profile (rated 1v1)", "user", b.UserID, "err", err)
+	}
+	if _, err := s.repo.ApplyRatedGame(ctx, gameID, RatingMode1v1, updates); err != nil {
+		slog.Default().Error("apply rated game (1v1)", "game", gameID, "err", err)
+	}
 }
 
 // applyRatingMulti applies the zero-sum moyenne-des-adversaires extension:
@@ -1597,7 +1612,16 @@ func (s *Store) applyRatingMulti(gameID string, seats []Seat, winnerColor game.C
 	for i, r := range results {
 		updates[i] = RatingUpdate{UserID: r.UserID, NewRating: r.NewRating, Result: r.Result}
 	}
-	_, _ = s.repo.ApplyRatedGame(ctx, gameID, RatingModeMulti, updates)
+	// Same belt-and-suspenders as applyRating1v1: every rated player
+	// needs a profiles row or the leaderboard INNER JOIN drops them.
+	for _, st := range seats {
+		if err := s.repo.EnsureProfile(ctx, st.UserID, st.Name); err != nil {
+			slog.Default().Error("ensure profile (rated multi)", "user", st.UserID, "err", err)
+		}
+	}
+	if _, err := s.repo.ApplyRatedGame(ctx, gameID, RatingModeMulti, updates); err != nil {
+		slog.Default().Error("apply rated game (multi)", "game", gameID, "err", err)
+	}
 }
 
 func ratingOrDefault(r Rating) int {
@@ -1657,6 +1681,18 @@ func (s *Store) Profile(ctx context.Context, userID string) (*Profile, error) {
 
 func (s *Store) UpsertProfile(ctx context.Context, userID, displayName string) error {
 	return s.repo.UpsertProfile(ctx, userID, displayName)
+}
+
+// EnsureProfile is the no-overwrite variant. Used at rating-apply time
+// (so a user who matchmaked, played, and earned an Elo update always
+// has a profile row to JOIN against on the leaderboard) and on the
+// auth-me endpoint (lazy first-time profile creation). Never clobbers
+// a name the user already chose explicitly.
+func (s *Store) EnsureProfile(ctx context.Context, userID, fallbackName string) error {
+	if userID == "" || fallbackName == "" {
+		return nil
+	}
+	return s.repo.EnsureProfile(ctx, userID, fallbackName)
 }
 
 func (s *Store) GamesForUser(ctx context.Context, userID string, limit int) ([]UserGame, error) {

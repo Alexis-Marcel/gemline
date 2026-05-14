@@ -30,6 +30,14 @@ type Repository interface {
 	// UpsertProfile creates or updates the profile row for userID.
 	UpsertProfile(ctx context.Context, userID, displayName string) error
 
+	// EnsureProfile inserts a profile row for userID with fallbackName
+	// only if one does not already exist; otherwise no-op. Used in
+	// rated-game flow and on /api/auth/me to make sure every user who
+	// ever appears in ratings also has a profile row, so the
+	// leaderboard's INNER JOIN doesn't silently drop them. Never
+	// overwrites a user-chosen display name.
+	EnsureProfile(ctx context.Context, userID, fallbackName string) error
+
 	// GamesForUser returns the most recent games where userID held a seat,
 	// most recent first, capped at `limit`.
 	GamesForUser(ctx context.Context, userID string, limit int) ([]UserGame, error)
@@ -272,6 +280,7 @@ func (noopRepo) UpdateOutcome(context.Context, string, Status, game.Color, game.
 }
 func (noopRepo) Profile(context.Context, string) (*Profile, error)        { return nil, nil }
 func (noopRepo) UpsertProfile(context.Context, string, string) error      { return nil }
+func (noopRepo) EnsureProfile(context.Context, string, string) error       { return nil }
 func (noopRepo) GamesForUser(context.Context, string, int) ([]UserGame, error) {
 	return nil, nil
 }

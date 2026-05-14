@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
+import { useMatchmake } from "../api/matchmake";
 import { useAuth } from "../auth/AuthProvider";
 import type { Color, Game, GameRatings, Replay, WinKind } from "../api/types";
 import {
@@ -57,6 +58,14 @@ export function GamePage() {
   // to the chat + replay underneath without nagging.
   const [endModalDismissed, setEndModalDismissed] = useState(false);
 
+  // Matchmaking driver for the "Nouvelle partie" action surfaced both
+  // in the modal and in the sidebar after the game ends. On match,
+  // save creds and navigate to the new game.
+  const matchmake = useMatchmake();
+  const matchmakeBusy =
+    matchmake.state.status === "queueing" ||
+    matchmake.state.status === "queued";
+
   // Stones captured by the most recent move, kept around briefly so the
   // Board can animate them out. Each entry has a unique key so React doesn't
   // re-use a dying ghost when a subsequent capture lands on the same cell.
@@ -90,6 +99,23 @@ export function GamePage() {
       setPresence((prev) => ({ ...prev, [seatIndex]: online }));
     });
   }, [id]);
+
+  // When the matchmaking queue resolves to a match, jump into the new
+  // game with the seat token the server handed us. Errors get surfaced
+  // through the existing setError pipe.
+  useEffect(() => {
+    if (matchmake.state.status === "matched") {
+      const { match } = matchmake.state;
+      saveCredentials(match.gameId, {
+        token: match.token,
+        seatIndex: match.seatIndex,
+        name: match.name,
+      });
+      navigate(`/game/${match.gameId}`);
+    } else if (matchmake.state.status === "error") {
+      setError(matchmake.state.message);
+    }
+  }, [matchmake.state, navigate]);
 
   // Initial ratings fetch on mount, plus a refetch on the
   // playing→finished transition so the modal has data even if the WS
@@ -308,11 +334,22 @@ export function GamePage() {
   }
 
   function handleLeave() {
+    // Drop the local seat token and navigate home. We deliberately do
+    // not stay on the game page after "Quitter" — the user's intent
+    // is to leave the match, not to keep watching it. Anyone who
+    // wants to reopen the game later can do so by URL.
     clearCredentials(id);
     setLocalGame(null);
-    // Force a re-eval of creds by reloading the route — simplest.
-    window.location.reload();
+    navigate("/");
   }
+
+  // onNewGame routes the "Nouvelle partie" buttons (in the sidebar and
+  // in the modal) into the matchmaking flow with the same player count
+  // as the game that just ended. Hidden entirely for anonymous users —
+  // matchmaking requires auth server-side, so a button that just
+  // bounced to /login would be UX noise.
+  const playerCount = game?.seats.length ?? 2;
+  const onNewGame = user ? () => matchmake.start(playerCount) : null;
 
   if (!game) {
     return (
@@ -473,22 +510,54 @@ export function GamePage() {
             />
           )}
 
-          {game.status === "finished" && endModalDismissed && (
-            // Compact recap once the user has dismissed the modal:
-            // they explicitly chose to keep playing with chat/replay,
-            // so we keep a small reminder + a "Revoir le résultat"
-            // button to bring the modal back if they want.
-            <div className="space-y-2 rounded-md border border-zinc-800 bg-zinc-900/40 p-3 text-sm text-zinc-200">
-              <p className="font-medium">
-                🏆 {gemName(game.winner)} gagne par {winKindLabel(game.winKind)}
-              </p>
-              <button
-                type="button"
-                onClick={() => setEndModalDismissed(false)}
-                className="text-xs text-amber-300 hover:text-amber-200"
-              >
-                Revoir le résultat
-              </button>
+          {game.status === "finished" && (
+            // End-of-game action block. Always visible (modal or not)
+            // so the player has direct access to "what's next" without
+            // having to re-open the modal: Nouvelle partie at the top
+            // when matchmaking is in scope, then Revanche + Quitter
+            // side-by-side. The Elo deltas live in the left Scoreboard
+            // — no need for a "Revoir le résultat" affordance here.
+            <div className="space-y-2">
+              {onNewGame && (
+                <button
+                  type="button"
+                  onClick={onNewGame}
+                  disabled={matchmakeBusy}
+                  className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
+                >
+                  {matchmakeBusy ? "Recherche…" : "Nouvelle partie"}
+                </button>
+              )}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleRematch}
+                  disabled={rematching}
+                  className="flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500 disabled:opacity-50"
+                >
+                  {rematching
+                    ? "Création…"
+                    : rematchLink
+                      ? "Aller à la revanche"
+                      : "Revanche"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLeave}
+                  className="flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500"
+                >
+                  Quitter
+                </button>
+              </div>
+              {matchmakeBusy && (
+                <button
+                  type="button"
+                  onClick={() => matchmake.cancel()}
+                  className="w-full text-xs text-zinc-500 hover:text-zinc-300"
+                >
+                  Annuler la recherche
+                </button>
+              )}
             </div>
           )}
 
@@ -536,7 +605,20 @@ export function GamePage() {
           ratings={ratings}
           rematchLink={rematchLink}
           rematching={rematching}
+          matchmakeBusy={matchmakeBusy}
           onRematch={handleRematch}
+          onNewGame={
+            onNewGame
+              ? () => {
+                  // Close the modal so the queueing feedback in the
+                  // sidebar is visible. The hook continues running;
+                  // a match resolves to a navigate(...) via the effect
+                  // above.
+                  setEndModalDismissed(true);
+                  onNewGame();
+                }
+              : null
+          }
           onClose={() => setEndModalDismissed(true)}
           onLeave={handleLeave}
         />

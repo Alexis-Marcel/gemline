@@ -130,13 +130,22 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 		IncrementMs:     incrementMs,
 	}
 	state := game.NewGame(colors, cfg)
-	state.Winner = game.Color(winnerColor)
-	state.WinKind = game.WinKind(winKind)
 
 	// Replay moves through ApplyMove so captures, wins, AND chess-clock
 	// deductions are reproduced from the same rule engine that produced
 	// them at play time. played_at is passed as the move's "now" so each
 	// player's TimeRemainingMs converges to the same value it had live.
+	//
+	// We deliberately do NOT pre-seed state.Winner from the DB here:
+	// ApplyMove rejects further moves once IsOver() is true, so for any
+	// finished game the very first replay call would return ErrGameOver
+	// and LoadGame would fail. The persisted Winner/WinKind are
+	// re-applied after the loop, which:
+	//   - handles move-driven endings (alignment, capture) naturally
+	//     since the engine sets Winner during the last move's apply;
+	//   - handles externally-driven endings (resign, timeout, draw)
+	//     by overlaying the DB's recorded outcome on top of the
+	//     replayed board state.
 	moveRows, err := r.pool.QueryContext(ctx, `
 		SELECT color, q, r, played_at FROM moves WHERE game_id = $1 ORDER BY ordinal
 	`, id)
@@ -180,6 +189,14 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 	if status == StatusPlaying && lastPlayed.IsZero() && state.ClockEnabled() {
 		state.TurnStartedAt = time.Now()
 	}
+
+	// Trust the DB for the outcome: replay handles move-driven wins,
+	// but resign / timeout / draw leave the board state empty of an
+	// engine-set Winner and need this overlay. Idempotent for
+	// move-driven endings — the engine has already set the same
+	// values during the last ApplyMove.
+	state.Winner = game.Color(winnerColor)
+	state.WinKind = game.WinKind(winKind)
 
 	return &GameRecord{
 		ID:            id,

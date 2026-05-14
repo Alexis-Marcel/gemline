@@ -11,7 +11,12 @@ interface GameEndModalProps {
   ratings: GameRatings | null;
   rematchLink: string | null;
   rematching: boolean;
+  /** True while the matchmaking queue is being entered or the user is
+   *  waiting for a match. The "Nouvelle partie" button shows
+   *  "Recherche…" and disables to prevent double-enqueue. */
+  matchmakeBusy: boolean;
   onRematch: () => void;
+  onNewGame: (() => void) | null;
   onClose: () => void;
   onLeave: () => void;
 }
@@ -34,7 +39,9 @@ export function GameEndModal({
   ratings,
   rematchLink,
   rematching,
+  matchmakeBusy,
   onRematch,
+  onNewGame,
   onClose,
   onLeave,
 }: GameEndModalProps) {
@@ -121,25 +128,37 @@ export function GameEndModal({
           </section>
         )}
 
-        <footer className="mt-6 flex gap-2">
-          <Button
-            onClick={onRematch}
-            disabled={rematching}
-            className="flex-1"
-          >
-            {rematching
-              ? "Création…"
-              : rematchLink
-                ? "Aller à la revanche"
-                : "Revanche"}
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={onLeave}
-            className="flex-1"
-          >
-            Quitter
-          </Button>
+        <footer className="mt-6 space-y-2">
+          {onNewGame && (
+            <Button
+              onClick={onNewGame}
+              disabled={matchmakeBusy}
+              className="w-full"
+            >
+              {matchmakeBusy ? "Recherche…" : "Nouvelle partie"}
+            </Button>
+          )}
+          <div className="flex gap-2">
+            <Button
+              variant="secondary"
+              onClick={onRematch}
+              disabled={rematching}
+              className="flex-1"
+            >
+              {rematching
+                ? "Création…"
+                : rematchLink
+                  ? "Aller à la revanche"
+                  : "Revanche"}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={onLeave}
+              className="flex-1"
+            >
+              Quitter
+            </Button>
+          </div>
         </footer>
       </div>
     </div>

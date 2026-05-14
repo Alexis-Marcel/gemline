@@ -60,7 +60,15 @@ func (s *Server) wsGame(w http.ResponseWriter, r *http.Request) {
 	rec.Lock()
 	snapshot := toGameDTO(rec)
 	rec.Unlock()
-	s.sendEvent(conn, eventState(snapshot))
+	// Tag the initial snapshot with the current event_seq so the client
+	// can detect catch-up gaps on reconnect (compare to its last-seen
+	// seq before this open) and dedup any live events that arrive with
+	// seq <= this value.
+	seq, err := s.store.Repo().CurrentEventSeq(r.Context(), id)
+	if err != nil {
+		s.log.Warn("ws current seq", "game", id, "err", err)
+	}
+	s.sendEvent(conn, Event{Type: "state", Seq: seq, Payload: snapshot})
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()

@@ -132,13 +132,17 @@ func requireUser(w http.ResponseWriter, r *http.Request) *AuthUser {
 }
 
 // authorizationBearer extracts a JWT from the Authorization header.
-// Seat-level tokens travel in X-Player-Token; do not look there.
+// Falls back to ?access_token= for the WebSocket upgrade case, where
+// browsers can't set custom headers on the upgrade request — the lobby
+// WS in particular requires auth and has no other way to surface the
+// caller's identity. Seat-level tokens travel in X-Player-Token; do
+// not look there.
 func authorizationBearer(r *http.Request) string {
 	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, "Bearer ") {
-		return ""
+	if strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 	}
-	return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+	return r.URL.Query().Get("access_token")
 }
 
 // playerToken extracts a seat-level token. Falls back to a query param for

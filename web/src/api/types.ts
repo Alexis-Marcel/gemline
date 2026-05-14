@@ -84,11 +84,28 @@ export interface JoinResponse {
   token: string;
 }
 
+/**
+ * Each WsEvent that originates from the server-side EventPublisher carries
+ * a per-game monotonic sequence number. Events that bypass persistence
+ * (typically the initial state snapshot sent at WS open time, which is
+ * tagged with the current event_seq rather than allocating a new one)
+ * still include a seq so the client can detect catch-up gaps. Events
+ * fetched through the HTTP /events?since=N catch-up endpoint also carry
+ * a seq, which the client uses to dedup against live WS events that
+ * arrive concurrently with the catch-up fetch.
+ */
 export type WsEvent =
-  | { type: "state"; payload: Game }
-  | { type: "move"; payload: MoveResponse }
-  | { type: "chat"; payload: Message }
-  | { type: "presence"; payload: { seatIndex: number; online: boolean } };
+  | { type: "state"; seq?: number; payload: Game }
+  | { type: "move"; seq?: number; payload: MoveResponse }
+  | { type: "chat"; seq?: number; payload: Message }
+  | { type: "presence"; seq?: number; payload: { seatIndex: number; online: boolean } };
+
+/** Row shape returned by GET /api/games/:id/events?since=N. */
+export interface GameEventRow {
+  seq: number;
+  type: WsEvent["type"];
+  payload: WsEvent["payload"];
+}
 
 export interface Message {
   id: number;

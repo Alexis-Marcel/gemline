@@ -2,23 +2,31 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
+	"github.com/alexis/gemline/internal/backplane"
 	"github.com/alexis/gemline/internal/game"
 	"github.com/golang-jwt/jwt/v5"
 )
 
 type Server struct {
-	store          *Store
-	hub            *Hub
-	log            *slog.Logger
-	verifier       jwt.Keyfunc
-	allowedOrigins []string // nil/empty = dev-permissive (CORS `*`, WS skips origin)
+	store     *Store
+	hub       *Hub
+	lobby     *Hub // keyed by userID; same Hub type, different routing key semantics
+	events    *EventPublisher
+	backplane *backplane.Backplane
+	log       *slog.Logger
+	verifier  jwt.Keyfunc
+	// nil/empty = dev-permissive (CORS `*`, WS skips origin).
+	allowedOrigins []string
 }
 
 // Config holds optional dependencies that change how the server behaves.
@@ -37,13 +45,31 @@ type Config struct {
 	AllowedOrigins []string
 }
 
-// New returns a Server backed by the given store and config.
-func New(log *slog.Logger, store *Store, cfg Config) *Server {
+// New returns a Server backed by the given store and config. The bp
+// argument is the Postgres backplane used to fan game events across
+// pods; pass nil for single-process runs (tests, no DATABASE_URL) and
+// EventPublisher will fall back to direct local delivery.
+func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *Server {
+	hub := NewHub(log)
+	lobby := NewHub(log)
+	podID := newPodID()
+	log.Info("server starting", "pod_id", podID)
 	srv := &Server{
 		store:          store,
-		hub:            NewHub(log),
+		hub:            hub,
+		lobby:          lobby,
+		events:         NewEventPublisher(store.Repo(), hub, bp, log, podID, store.Invalidate),
+		backplane:      bp,
 		log:            log,
 		allowedOrigins: cfg.AllowedOrigins,
+	}
+	// When a backplane is present, register the listener handlers so
+	// notifications coming in from any pod (including ours) get fanned
+	// out to local WS subscribers. Two channels: game events and lobby
+	// match notifications.
+	if bp != nil {
+		bp.Subscribe(ChannelGameEvents, srv.events.HandleGameEventNotif)
+		bp.Subscribe(ChannelLobby, srv.handleLobbyNotif)
 	}
 	if len(cfg.AllowedOrigins) == 0 {
 		log.Warn("CORS + WS origin checks disabled — set AllowedOrigins for production")
@@ -69,13 +95,13 @@ func New(log *slog.Logger, store *Store, cfg Config) *Server {
 		rec.Lock()
 		dto := toGameDTO(rec)
 		rec.Unlock()
-		srv.hub.Broadcast(gameID, eventState(dto))
+		srv.events.Publish(gameID, eventState(dto))
 	})
 	// Presence changes (a seat just went online or offline) are broadcast
 	// as a lightweight `presence` event so the UI can flip the badge
 	// without a full state push.
 	store.SetPresenceListener(func(gameID string, seatIndex int, online bool) {
-		srv.hub.Broadcast(gameID, eventPresence(seatIndex, online))
+		srv.events.Publish(gameID, eventPresence(seatIndex, online))
 	})
 	// Draw-offer transitions are infrequent and the change shows up on the
 	// game DTO (drawOfferBy field), so we just push a full state snapshot
@@ -88,7 +114,7 @@ func New(log *slog.Logger, store *Store, cfg Config) *Server {
 		rec.Lock()
 		dto := toGameDTO(rec)
 		rec.Unlock()
-		srv.hub.Broadcast(gameID, eventState(dto))
+		srv.events.Publish(gameID, eventState(dto))
 	})
 	// Server-driven moves (bots) broadcast a move event with the same shape
 	// HTTP-driven moves use, so clients render captures + the new state
@@ -102,7 +128,7 @@ func New(log *slog.Logger, store *Store, cfg Config) *Server {
 		dto := toGameDTO(rec)
 		rec.Unlock()
 		resp := moveResponse{Game: dto, Captures: toCaptureDTOs(mv.Captures)}
-		srv.hub.Broadcast(gameID, eventMove(resp))
+		srv.events.Publish(gameID, eventMove(resp))
 	})
 	return srv
 }
@@ -126,9 +152,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/leave", s.leaveSeat)
 	mux.HandleFunc("POST /api/games/{id}/start", s.startGame)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
+	mux.HandleFunc("GET /api/games/{id}/events", s.getGameEvents)
 	mux.HandleFunc("GET /api/games/{id}/messages", s.getChat)
 	mux.HandleFunc("POST /api/games/{id}/messages", s.postChat)
 	mux.HandleFunc("GET /ws/games/{id}", s.wsGame)
+	mux.HandleFunc("GET /ws/lobby", s.wsLobby)
+
+	mux.HandleFunc("POST /api/matchmake/enqueue", s.enqueueMatchmake)
+	mux.HandleFunc("DELETE /api/matchmake/enqueue", s.cancelMatchmake)
 
 	mux.HandleFunc("GET /api/auth/me", s.getMe)
 	mux.HandleFunc("PUT /api/profile", s.putProfile)
@@ -137,6 +168,41 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
 	return loggingMiddleware(s.log, corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, mux)))
+}
+
+// StartMatcher kicks off the background matchmaker ticker on this pod.
+// Every matcherTickInterval each supported player count is processed
+// via SELECT FOR UPDATE SKIP LOCKED, so multiple pods can run their
+// own matcher in parallel without coordination. Match results are
+// fanned out via the lobby channel so each user's lobby WS (which may
+// live on a different pod) receives their match_found event.
+//
+// Cancel via ctx. Safe to call without a backplane (single-process /
+// no-DB mode): the matcher still runs but onMatched falls back to the
+// local LobbyHub.Deliver instead of NOTIFYing.
+func (s *Server) StartMatcher(ctx context.Context) {
+	s.store.StartMatcher(ctx, s.log, s.fanMatched)
+}
+
+// newPodID returns a process-unique identifier used to tag outgoing
+// NOTIFY envelopes so receiving pods can distinguish self-originated
+// events from genuine cross-pod ones.
+//
+// Hostname + a short random suffix is enough: the hostname is stable
+// per K8s pod and tells you which one you're looking at in logs, the
+// suffix makes the value unique across restarts (so if a pod restarts
+// with the same hostname its in-flight notifications don't get
+// silently absorbed). Falls back to pure random if hostname lookup
+// somehow fails.
+func newPodID() string {
+	var rnd [4]byte
+	_, _ = rand.Read(rnd[:])
+	suffix := hex.EncodeToString(rnd[:])
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return "pod-" + suffix
+	}
+	return host + "-" + suffix
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -203,7 +269,7 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 	rec.Lock()
 	dto := toGameDTO(rec)
 	rec.Unlock()
-	s.hub.Broadcast(rec.ID, eventState(dto))
+	s.events.Publish(rec.ID, eventState(dto))
 	writeJSON(w, http.StatusCreated, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
 }
 
@@ -242,7 +308,7 @@ func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
 	rec.Lock()
 	dto := toGameDTO(rec)
 	rec.Unlock()
-	s.hub.Broadcast(rec.ID, eventState(dto))
+	s.events.Publish(rec.ID, eventState(dto))
 	writeJSON(w, http.StatusOK, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
 }
 
@@ -280,7 +346,7 @@ func (s *Server) addBot(w http.ResponseWriter, r *http.Request) {
 	rec.Lock()
 	dto := toGameDTO(rec)
 	rec.Unlock()
-	s.hub.Broadcast(gameID, eventState(dto))
+	s.events.Publish(gameID, eventState(dto))
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -302,7 +368,7 @@ func (s *Server) startGame(w http.ResponseWriter, r *http.Request) {
 	rec.Lock()
 	dto := toGameDTO(rec)
 	rec.Unlock()
-	s.hub.Broadcast(gameID, eventState(dto))
+	s.events.Publish(gameID, eventState(dto))
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -339,7 +405,7 @@ func (s *Server) leaveSeat(w http.ResponseWriter, r *http.Request) {
 	rec.Lock()
 	dto := toGameDTO(rec)
 	rec.Unlock()
-	s.hub.Broadcast(gameID, eventState(dto))
+	s.events.Publish(gameID, eventState(dto))
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -455,7 +521,7 @@ func (s *Server) endByConcession(
 	rec.Lock()
 	dto := toGameDTO(rec)
 	rec.Unlock()
-	s.hub.Broadcast(gameID, eventState(dto))
+	s.events.Publish(gameID, eventState(dto))
 	s.log.Info("game ended", "op", op, "game", gameID, "winner", dto.Winner, "kind", dto.WinKind)
 	writeJSON(w, http.StatusOK, dto)
 }
@@ -500,6 +566,47 @@ func statusForRematchError(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+// catchupLimit caps how many events one /events call can return. A
+// client that's been disconnected for hours could otherwise pull
+// thousands of rows in a single request. 1000 covers a generously long
+// game (a 6P session might rack up ~200-400 events end-to-end) without
+// letting a hostile or buggy client DoS the DB.
+const catchupLimit = 1000
+
+// getGameEvents serves the WebSocket catch-up endpoint. Clients call it
+// on reconnect with their last-seen seq; the server returns every event
+// with seq > since, in ascending order. A fresh connect uses since=0
+// (or omits the parameter) and gets the full event log — usually the
+// caller will rely on the connect-time state snapshot instead.
+//
+// No authentication is required beyond what /api/games/:id already
+// expects: any game ID known to the caller is already exposed by /get,
+// so /events on the same ID surfaces nothing new in terms of access.
+func (s *Server) getGameEvents(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	since := 0
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "since must be a non-negative integer")
+			return
+		}
+		since = n
+	}
+	rows, err := s.store.Repo().EventsSince(r.Context(), id, since, catchupLimit)
+	if err != nil {
+		s.log.Error("events since", "game", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "could not load events")
+		return
+	}
+	if rows == nil {
+		// json.Marshal turns a nil slice into "null", which clients
+		// would have to special-case. Always emit "[]" on the wire.
+		rows = []EventRow{}
+	}
+	writeJSON(w, http.StatusOK, rows)
 }
 
 func (s *Server) getGame(w http.ResponseWriter, r *http.Request) {
@@ -556,7 +663,7 @@ func (s *Server) joinGame(w http.ResponseWriter, r *http.Request) {
 	rec.Unlock()
 
 	resp := joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token}
-	s.hub.Broadcast(gameID, eventState(dto))
+	s.events.Publish(gameID, eventState(dto))
 	writeJSON(w, http.StatusCreated, resp)
 }
 
@@ -584,7 +691,7 @@ func (s *Server) postMove(w http.ResponseWriter, r *http.Request) {
 	rec.Unlock()
 
 	resp := moveResponse{Game: dto, Captures: toCaptureDTOs(out.Captures)}
-	s.hub.Broadcast(gameID, eventMove(resp))
+	s.events.Publish(gameID, eventMove(resp))
 	writeJSON(w, http.StatusOK, resp)
 }
 

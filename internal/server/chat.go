@@ -29,7 +29,7 @@ func (s *Server) postChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.hub.Broadcast(gameID, eventChat(*msg))
+	s.events.Publish(gameID, eventChat(*msg))
 	writeJSON(w, http.StatusCreated, msg)
 }
 

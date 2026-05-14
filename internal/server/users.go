@@ -29,6 +29,20 @@ func (s *Server) getMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not load profile")
 		return
 	}
+	// Lazy first-time profile creation: every authenticated user that
+	// ever calls /api/auth/me ends up with a profile row, so the
+	// leaderboard's INNER JOIN doesn't drop them just because they
+	// never went through the explicit "set display name" form.
+	// EnsureProfile is no-overwrite — a user who already chose a name
+	// won't have it stomped.
+	if p == nil {
+		fallback := s.displayNameFor(r.Context(), u)
+		if err := s.store.EnsureProfile(r.Context(), u.ID, fallback); err != nil {
+			s.log.Error("ensure profile", "user", u.ID, "err", err)
+		} else {
+			p = &Profile{UserID: u.ID, DisplayName: fallback}
+		}
+	}
 	displayName := ""
 	if p != nil {
 		displayName = p.DisplayName

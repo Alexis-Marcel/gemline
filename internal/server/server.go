@@ -163,6 +163,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/draw/decline", s.declineDraw)
 	mux.HandleFunc("POST /api/games/{id}/rematch", s.rematchGame)
 	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/bot", s.addBot)
+	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/bot", s.removeBot)
 	mux.HandleFunc("POST /api/games/{id}/leave", s.leaveSeat)
 	mux.HandleFunc("POST /api/games/{id}/start", s.startGame)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
@@ -365,6 +366,31 @@ func (s *Server) addBot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dto)
 }
 
+// removeBot vacates a bot-occupied seat in a private waiting game. Same
+// auth model as addBot — no token check: any client with the game URL
+// can rearrange seats while the room is still waiting. The Store
+// guards on visibility=private + status=waiting + seat actually being
+// a bot, so this can't be used to kick a human or to touch a public
+// matchmaking room.
+func (s *Server) removeBot(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	seatIdx, err := strconv.Atoi(r.PathValue("idx"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid seat index")
+		return
+	}
+	rec, err := s.store.RemoveBot(r.Context(), gameID, seatIdx)
+	if err != nil {
+		writeError(w, statusForRemoveBotError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	s.events.Publish(gameID, eventState(dto))
+	writeJSON(w, http.StatusOK, dto)
+}
+
 // startGame finalises a private game (fill empty seats with bots, flip to
 // playing). Authentication is via the seat token — any participant can
 // kick off the start in a private game.
@@ -444,6 +470,21 @@ func statusForAddBotError(err error) int {
 	case errors.Is(err, ErrBadSeatIndex):
 		return http.StatusBadRequest
 	case errors.Is(err, ErrSeatTaken),
+		errors.Is(err, ErrNotPlaying),
+		errors.Is(err, ErrBotsOnPublic):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func statusForRemoveBotError(err error) int {
+	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrBadSeatIndex):
+		return http.StatusBadRequest
+	case errors.Is(err, ErrSeatNotBot),
 		errors.Is(err, ErrNotPlaying),
 		errors.Is(err, ErrBotsOnPublic):
 		return http.StatusConflict

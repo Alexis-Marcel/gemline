@@ -371,6 +371,46 @@ func TestAddBotRejectedOnTakenSeat(t *testing.T) {
 	postAddBotRaw(t, ts, g.ID, 0, http.StatusConflict)
 }
 
+func TestRemoveBotFreesSeat(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	// Add then remove — seat 1 ends back at empty.
+	_ = postAddBot(t, ts, g.ID, 1, http.StatusOK)
+	out := postRemoveBot(t, ts, g.ID, 1, http.StatusOK)
+	if out.Seats[1].Occupied || out.Seats[1].IsBot {
+		t.Fatalf("seat 1 must be empty after removeBot, got %+v", out.Seats[1])
+	}
+}
+
+func TestRemoveBotRejectedOnHumanSeat(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = joinGame(t, ts, g.ID, "Alice", nil)
+	// Alice is in seat 0; removeBot must refuse — it's not a bot seat.
+	postRemoveBotRaw(t, ts, g.ID, 0, http.StatusConflict)
+}
+
+func TestRemoveBotRejectedOnEmptySeat(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	postRemoveBotRaw(t, ts, g.ID, 1, http.StatusConflict)
+}
+
+func TestRemoveBotRejectedAfterStart(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = joinGame(t, ts, g.ID, "Alice", nil)
+	out := postAddBot(t, ts, g.ID, 1, http.StatusOK)
+	if out.Status != StatusPlaying {
+		t.Fatalf("test setup: expected playing after bot fill, got %s", out.Status)
+	}
+	postRemoveBotRaw(t, ts, g.ID, 1, http.StatusConflict)
+}
+
 func TestAddBotStartsGameWhenLastSeatFilled(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -892,6 +932,27 @@ func postAddBotRaw(t *testing.T, ts *httptest.Server, gameID string, seatIdx, wa
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("addBot: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
+	}
+	return resp
+}
+
+func postRemoveBot(t *testing.T, ts *httptest.Server, gameID string, seatIdx, wantStatus int) gameDTO {
+	t.Helper()
+	return decodeGameDTO(t, postRemoveBotRaw(t, ts, gameID, seatIdx, wantStatus))
+}
+
+func postRemoveBotRaw(t *testing.T, ts *httptest.Server, gameID string, seatIdx, wantStatus int) *http.Response {
+	t.Helper()
+	url := ts.URL + "/api/games/" + gameID + "/seats/" + itoa(seatIdx) + "/bot"
+	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != wantStatus {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("removeBot: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
 	}
 	return resp
 }

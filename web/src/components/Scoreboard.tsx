@@ -108,9 +108,7 @@ export function Scoreboard({
                     <span className="font-medium text-amber-400">à jouer</span>
                   )}
                   {seat.occupied && ratingsBySeat.has(i) && (
-                    <span className="font-mono tabular-nums text-zinc-400">
-                      📈 {ratingsBySeat.get(i)!.currentRating}
-                    </span>
+                    <RatingChip sr={ratingsBySeat.get(i)!} applied={ratings?.applied ?? false} />
                   )}
                   {showOffline && <DisconnectBadge />}
                 </div>
@@ -151,6 +149,41 @@ export function Scoreboard({
         );
       })}
     </ul>
+  );
+}
+
+/**
+ * RatingChip renders a player's current rating and (once the game's
+ * Elo math has been applied) the delta they took out of this match.
+ * No label: the number sits beside "à jouer" / clock / paires which
+ * already give it context, and the colored delta makes the meaning
+ * unambiguous after the game ends.
+ */
+function RatingChip({
+  sr,
+  applied,
+}: {
+  sr: { currentRating: number; delta?: number };
+  applied: boolean;
+}) {
+  const delta = applied ? sr.delta ?? 0 : undefined;
+  const deltaCls =
+    delta === undefined
+      ? ""
+      : delta > 0
+        ? "text-emerald-400"
+        : delta < 0
+          ? "text-red-400"
+          : "text-zinc-500";
+  return (
+    <span className="inline-flex items-baseline gap-1 font-mono tabular-nums text-zinc-300">
+      {sr.currentRating}
+      {delta !== undefined && (
+        <span className={`text-xs font-semibold ${deltaCls}`}>
+          {delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "±0"}
+        </span>
+      )}
+    </span>
   );
 }
 

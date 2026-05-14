@@ -35,9 +35,19 @@ func (s *Server) wsGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // origin enforced by reverse proxy / CORS for now
-	})
+	// Origin policy mirrors the HTTP CORS middleware:
+	//   - allow-list set      → use OriginPatterns so the websocket library
+	//                           rejects unknown origins.
+	//   - allow-list empty    → dev-permissive (skip the check entirely). The
+	//                           server logs a warning at boot when this is
+	//                           the case.
+	var opts websocket.AcceptOptions
+	if len(s.allowedOrigins) == 0 {
+		opts.InsecureSkipVerify = true
+	} else {
+		opts.OriginPatterns = s.allowedOrigins
+	}
+	conn, err := websocket.Accept(w, r, &opts)
 	if err != nil {
 		s.log.Warn("ws accept failed", "err", err)
 		return

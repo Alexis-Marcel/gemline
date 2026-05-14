@@ -140,6 +140,12 @@ type Store struct {
 	// feel uncannily fast. Tests set it to 0 via WithBotDelay for speed.
 	botDelay time.Duration
 
+	// disconnectGrace is the per-Store override for how long a seat may
+	// remain disconnected before forfeiting. Defaults to the package-level
+	// DisconnectGracePeriod (60s) — tests override it with WithDisconnectGrace
+	// so the grace-timeout path can be exercised without sleeping a minute.
+	disconnectGrace time.Duration
+
 	// promoterStop signals the multi-room auto-promotion goroutine to halt.
 	// nil while the promoter hasn't been started.
 	promoterStop chan struct{}
@@ -155,9 +161,19 @@ func NewStore(repo Repository) *Store {
 		clocks:    newClockManager(),
 		presence:  newPresenceManager(),
 		seatRefs:  make(map[string]map[int]int),
-		botEngine: ai.NewEngine(time.Now().UnixNano()),
-		botDelay:  600 * time.Millisecond,
+		botEngine:       ai.NewEngine(time.Now().UnixNano()),
+		botDelay:        600 * time.Millisecond,
+		disconnectGrace: DisconnectGracePeriod,
 	}
+}
+
+// WithDisconnectGrace overrides the disconnect-grace timeout. Returns the
+// receiver for chaining and is intended for tests that need to exercise the
+// presence-timeout forfeit path without waiting the production grace
+// (60 s).
+func (s *Store) WithDisconnectGrace(d time.Duration) *Store {
+	s.disconnectGrace = d
+	return s
 }
 
 // WithBotDelay overrides the artificial think-time between a bot's turn
@@ -306,7 +322,12 @@ func (s *Store) startInternal(rec *GameRecord) error {
 		colors[i] = occupied[i].Color
 	}
 	rec.Seats = occupied
-	rec.State = game.NewGame(colors, rec.State.Config)
+	// Win-condition thresholds depend on the actual player count, not the
+	// slot count we created with — a 6-seat private room launched with 3
+	// players plays under the 3-player rulebook, not the 6-player one. The
+	// clock budget is independent of player count and is carried through.
+	cfg := game.ConfigFor(len(occupied), rec.State.Config)
+	rec.State = game.NewGame(colors, cfg)
 	rec.Status = StatusPlaying
 	rec.State.StartClock(time.Now())
 	s.armClock(rec)
@@ -314,7 +335,7 @@ func (s *Store) startInternal(rec *GameRecord) error {
 	gameID := rec.ID
 	rec.Unlock()
 
-	if err := s.repo.FinalizeStart(context.Background(), gameID, status); err != nil {
+	if err := s.repo.FinalizeStart(context.Background(), gameID, status, cfg); err != nil {
 		_ = err
 	}
 	if s.onState != nil {
@@ -336,6 +357,19 @@ func (s *Store) armClock(rec *GameRecord) {
 	s.clocks.Schedule(id, time.Duration(remainingMs)*time.Millisecond, func() {
 		s.handleFlag(id)
 	})
+}
+
+// gameEnded is the shared post-finish cleanup: cancel any per-seat
+// disconnect-grace timers, drop the in-memory presence refcount entry so
+// the seatRefs map doesn't grow unbounded across the server's lifetime, and
+// give the clock manager a chance to release its slot. Idempotent — safe to
+// call from multiple game-end paths (PlayMove, Resign, Forfeit, Flag, etc.).
+func (s *Store) gameEnded(gameID string) {
+	s.presence.CancelGame(gameID)
+	s.clocks.Cancel(gameID)
+	s.mu.Lock()
+	delete(s.seatRefs, gameID)
+	s.mu.Unlock()
 }
 
 // SeatConnected is called by the WS handler after a successful hello. It
@@ -381,7 +415,7 @@ func (s *Store) SeatDisconnected(gameID string, seatIndex int) {
 	if now != 0 {
 		return
 	}
-	s.presence.Schedule(gameID, seatIndex, DisconnectGracePeriod, func() {
+	s.presence.Schedule(gameID, seatIndex, s.disconnectGrace, func() {
 		s.handleDisconnectTimeout(gameID, seatIndex)
 	})
 	if s.onPresence != nil {
@@ -427,8 +461,7 @@ func (s *Store) handleDisconnectTimeout(gameID string, seatIndex int) {
 	winKind := rec.State.WinKind
 	rec.Unlock()
 
-	s.clocks.Cancel(gameID)
-	s.presence.CancelGame(gameID)
+	s.gameEnded(gameID)
 	_ = s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind)
 	s.maybeApplyRating(rec)
 	if s.onState != nil {
@@ -467,7 +500,7 @@ func (s *Store) handleFlag(gameID string) {
 	winKind := rec.State.WinKind
 	rec.Unlock()
 
-	s.presence.CancelGame(gameID)
+	s.gameEnded(gameID)
 	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
 		// Persistence failed but the in-memory state is the truth.
 		// We do not retry; an admin can inspect the row if needed.
@@ -497,7 +530,12 @@ func (s *Store) Create(ctx context.Context, numPlayers int, vis Visibility) (*Ga
 		seats[i] = Seat{Index: i, Color: colors[i]}
 	}
 	rec := &GameRecord{
-		ID:          newID(),
+		ID: newID(),
+		// Create-time cfg is a placeholder: the *real* thresholds are
+		// committed at Start (cf. startInternal / ConfigFor) once the actual
+		// seated count is known. The DTO overrides this with a live preview
+		// while the game is still waiting, so callers never see these stale
+		// thresholds as authoritative.
 		State:       game.NewGame(colors, game.DefaultConfig(numPlayers)),
 		Seats:       seats,
 		Status:      StatusWaiting,
@@ -616,11 +654,15 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, er
 	}
 	numPlayers := len(orig.Seats)
 	vis := orig.Visibility
+	origCfg := orig.State.Config
 	orig.Unlock()
 
 	// Build the new game using the same shape as Create. We don't call Create
 	// directly because we want to atomically write the rematch_game_id link on
-	// the original game alongside the new game's row.
+	// the original game alongside the new game's row. Carry the original
+	// game's clock settings through ConfigFor so a rematch inherits the prior
+	// time control (rules are at the rematch's player count, clock is the
+	// same as last time).
 	colors := make([]game.Color, numPlayers)
 	seats := make([]Seat, numPlayers)
 	for i := 0; i < numPlayers; i++ {
@@ -629,7 +671,7 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, er
 	}
 	rec := &GameRecord{
 		ID:          newID(),
-		State:       game.NewGame(colors, game.DefaultConfig(numPlayers)),
+		State:       game.NewGame(colors, game.ConfigFor(numPlayers, origCfg)),
 		Seats:       seats,
 		Status:      StatusWaiting,
 		Visibility:  vis,
@@ -840,11 +882,18 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 	// schedule its move. We can't trigger it synchronously here: the bot's
 	// PlayMove takes rec.Lock(), which is held by the deferred Unlock above.
 	defer s.maybeScheduleBot(rec)
-	// If this move ended the game, kick off the rating update. Goroutine
-	// rather than defer because the defer LIFO order would run it BEFORE
-	// the rec.Unlock — and maybeApplyRating itself re-acquires rec.Lock.
+	// If this move ended the game, run the same post-finish cleanup as the
+	// resign/forfeit/flag paths (release presence timers + the seatRefs
+	// entry) and kick off the rating update. Both go through goroutines
+	// rather than defers because the defer LIFO order would run them
+	// BEFORE the rec.Unlock above, and gameEnded/maybeApplyRating reach
+	// for s.mu / rec.Lock respectively.
 	if rec.State.IsOver() {
-		go s.maybeApplyRating(rec)
+		gid := gameID
+		go func() {
+			s.gameEnded(gid)
+			s.maybeApplyRating(rec)
+		}()
 	}
 	return res, rec, nil
 }
@@ -1170,8 +1219,7 @@ func (s *Store) Resign(ctx context.Context, gameID, token string) (*GameRecord, 
 	rec.DrawOfferBy = -1
 	rec.Unlock()
 
-	s.clocks.Cancel(gameID)
-	s.presence.CancelGame(gameID)
+	s.gameEnded(gameID)
 	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
 		// In-memory truth wins (same policy as handleFlag) — log the persist
 		// failure but don't roll the engine back.
@@ -1275,8 +1323,7 @@ func (s *Store) AcceptDraw(ctx context.Context, gameID, token string) (*GameReco
 	winKind := rec.State.WinKind
 	rec.Unlock()
 
-	s.clocks.Cancel(gameID)
-	s.presence.CancelGame(gameID)
+	s.gameEnded(gameID)
 	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
 		_ = err
 	}

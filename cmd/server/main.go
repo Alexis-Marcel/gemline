@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,7 +48,8 @@ func main() {
 	}
 
 	cfg := server.Config{
-		SupabaseURL: os.Getenv("SUPABASE_URL"),
+		SupabaseURL:    os.Getenv("SUPABASE_URL"),
+		AllowedOrigins: parseOrigins(os.Getenv("ALLOWED_ORIGINS")),
 	}
 
 	store := server.NewStore(repo)
@@ -91,4 +93,21 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// parseOrigins turns a comma-separated env var into a trimmed slice. Empty
+// or whitespace-only values are skipped so a stray comma can't smuggle in an
+// empty entry that would silently match the empty Origin header.
+func parseOrigins(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

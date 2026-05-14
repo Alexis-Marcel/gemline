@@ -79,9 +79,11 @@ type Repository interface {
 	Leaderboard(ctx context.Context, mode string, limit int) ([]LeaderboardEntry, error)
 
 	// FinalizeStart deletes every unoccupied seat row for `gameID` (the
-	// host clicked Start and chose to play with fewer than max players)
-	// and flips the game's status to `status` in a single transaction.
-	FinalizeStart(ctx context.Context, gameID string, status Status) error
+	// host clicked Start and chose to play with fewer than max players),
+	// updates the win-condition thresholds to match the actually-seated
+	// player count (rules are decided at start time, not create time), and
+	// flips the game's status to `status` — all in a single transaction.
+	FinalizeStart(ctx context.Context, gameID string, status Status, cfg game.Config) error
 }
 
 // Profile is the user-controlled profile row.
@@ -225,4 +227,4 @@ func (noopRepo) ApplyRatedGame(context.Context, string, string, []RatingUpdate) 
 func (noopRepo) Leaderboard(context.Context, string, int) ([]LeaderboardEntry, error) {
 	return nil, nil
 }
-func (noopRepo) FinalizeStart(context.Context, string, Status) error { return nil }
+func (noopRepo) FinalizeStart(context.Context, string, Status, game.Config) error { return nil }

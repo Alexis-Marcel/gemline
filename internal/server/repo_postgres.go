@@ -568,7 +568,7 @@ func (r *PostgresRepo) Leaderboard(ctx context.Context, mode string, limit int) 
 	return out, rows.Err()
 }
 
-func (r *PostgresRepo) FinalizeStart(ctx context.Context, gameID string, status Status) error {
+func (r *PostgresRepo) FinalizeStart(ctx context.Context, gameID string, status Status, cfg game.Config) error {
 	tx, err := r.pool.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -580,8 +580,14 @@ func (r *PostgresRepo) FinalizeStart(ctx context.Context, gameID string, status 
 		return fmt.Errorf("trim seats: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE games SET status = $1, updated_at = NOW() WHERE id = $2
-	`, status, gameID); err != nil {
+		UPDATE games SET
+			status = $1,
+			capture_pairs_win = $2,
+			align4_to_win = $3,
+			align5_to_win = $4,
+			updated_at = NOW()
+		WHERE id = $5
+	`, status, cfg.CapturePairsWin, cfg.Align4ToWin, cfg.Align5ToWin, gameID); err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
 	return tx.Commit()

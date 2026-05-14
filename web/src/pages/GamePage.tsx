@@ -292,7 +292,7 @@ export function GamePage() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl p-3 lg:p-4">
+    <div className="mx-auto max-w-[88rem] p-3 lg:p-4">
       <header className="flex items-center justify-between">
         <Link
           to="/"
@@ -320,47 +320,31 @@ export function GamePage() {
 
       {/*
         Layout:
-          mobile (default) — flex-col, DOM order: scoreboard → board → panels
-          desktop (lg)     — grid, scoreboard in col-1/row-1, board col-2/row-span-2,
-                             secondary panels col-1/row-2
-        Grid placement is set on each child, so DOM order isn't constrained by desktop's shape.
+          mobile (default) — flex-col, DOM order: scoreboard → board → right rail
+          desktop (lg)     — three columns: seats | board | conditions+chat
+        Each side rail is fixed-width; the board takes the remaining 1fr.
       */}
-      <div className="mt-3 flex flex-col gap-3 lg:mt-4 lg:grid lg:grid-cols-[18rem_1fr] lg:items-start lg:gap-4">
-        <Scoreboard
-          game={game}
-          mySeatIndex={creds?.seatIndex ?? null}
-          presence={presence}
-          onAddBot={
-            game.status === "waiting" &&
-            game.visibility === "private" &&
-            !!creds
-              ? async (seatIndex) => {
-                  try {
-                    const g = await api.addBot(id, seatIndex);
-                    setLocalGame(g);
-                  } catch (err) {
-                    setError(err instanceof ApiError ? err.message : "Erreur bot");
+      <div className="mt-3 flex flex-col gap-3 lg:mt-4 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_20rem] lg:items-start lg:gap-4">
+        <aside className="flex flex-col gap-3 lg:col-start-1">
+          <Scoreboard
+            game={game}
+            mySeatIndex={creds?.seatIndex ?? null}
+            presence={presence}
+            onAddBot={
+              game.status === "waiting" &&
+              game.visibility === "private" &&
+              !!creds
+                ? async (seatIndex) => {
+                    try {
+                      const g = await api.addBot(id, seatIndex);
+                      setLocalGame(g);
+                    } catch (err) {
+                      setError(err instanceof ApiError ? err.message : "Erreur bot");
+                    }
                   }
-                }
-              : undefined
-          }
-        />
-
-        <main className="lg:col-start-2 lg:row-span-2">
-          <div className="aspect-square w-full rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 lg:aspect-auto lg:h-[min(80vh,calc(100vw-22rem))]">
-            <Board
-              side={inReplay ? replay.boardSide : game.boardSide}
-              cells={boardCells}
-              onPlay={inReplay ? undefined : onPlay}
-              disabled={inReplay || !isMyTurn || game.status !== "playing"}
-              highlight={boardHighlight}
-              ghosts={inReplay ? undefined : ghosts}
-            />
-          </div>
-        </main>
-
-        <section className="flex flex-col gap-3 lg:col-start-1 lg:row-start-2">
-          <Objectives thresholds={game.thresholds} />
+                : undefined
+            }
+          />
 
           {game.status === "waiting" && !creds && (
             <JoinPanel
@@ -389,6 +373,27 @@ export function GamePage() {
                 }}
               />
             )}
+
+          {game.status === "waiting" && (
+            <ShareCard id={id} />
+          )}
+        </aside>
+
+        <main className="lg:col-start-2">
+          <div className="aspect-square w-full rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 lg:aspect-auto lg:h-[min(80vh,calc(100vw-40rem))]">
+            <Board
+              side={inReplay ? replay.boardSide : game.boardSide}
+              cells={boardCells}
+              onPlay={inReplay ? undefined : onPlay}
+              disabled={inReplay || !isMyTurn || game.status !== "playing"}
+              highlight={boardHighlight}
+              ghosts={inReplay ? undefined : ghosts}
+            />
+          </div>
+        </main>
+
+        <aside className="flex flex-col gap-3 lg:col-start-3">
+          <Objectives thresholds={game.thresholds} />
 
           {game.status === "playing" && creds && (
             <DrawOfferAndActions
@@ -441,8 +446,6 @@ export function GamePage() {
 
           <ChatPanel gameId={id} playerToken={creds?.token ?? null} />
 
-          <ShareCard id={id} />
-
           {creds && (
             <button
               onClick={handleLeave}
@@ -457,7 +460,7 @@ export function GamePage() {
               {error}
             </p>
           )}
-        </section>
+        </aside>
       </div>
     </div>
   );

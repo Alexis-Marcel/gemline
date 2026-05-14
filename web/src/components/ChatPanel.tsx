@@ -106,19 +106,20 @@ export function ChatPanel({ gameId, playerToken }: ChatPanelProps) {
 
       {playerToken ? (
         <form onSubmit={handleSubmit} className="border-t border-zinc-800 p-2">
-          <div className="flex gap-2">
+          <div className="flex min-w-0 items-stretch gap-2">
             <input
               type="text"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               maxLength={MAX_LEN}
               placeholder="Message…"
-              className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm text-zinc-100 focus:border-amber-400 focus:outline-none"
+              className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm text-zinc-100 focus:border-amber-400 focus:outline-none"
               disabled={sending}
             />
             <Button
               type="submit"
               disabled={sending || draft.trim() === ""}
+              className="shrink-0 px-3 py-1 text-xs"
             >
               Envoyer
             </Button>

@@ -158,6 +158,24 @@ func toGameDTO(rec *GameRecord) gameDTO {
 	if vis == "" {
 		vis = VisibilityPrivate
 	}
+	// Win conditions are decided at Start time based on how many seats are
+	// actually occupied (cf. ConfigFor / startInternal). While the game is
+	// still in `waiting`, surface a *preview* of the thresholds for the
+	// current occupied count so the host sees the rules they're about to
+	// commit to. Once status flips to playing, s.Config is authoritative.
+	thr := s.Config
+	if rec.Status == StatusWaiting {
+		occupied := 0
+		for _, st := range rec.Seats {
+			if st.Occupied {
+				occupied++
+			}
+		}
+		if occupied < 2 {
+			occupied = 2
+		}
+		thr = game.ConfigFor(occupied, s.Config)
+	}
 	// Defensive copy of the cells: the dto outlives the rec.Lock scope, so
 	// after the caller Unlocks any subsequent board mutation (e.g. a bot
 	// move) would race with json.Encoder iterating dto.Cells. Holding the
@@ -180,11 +198,11 @@ func toGameDTO(rec *GameRecord) gameDTO {
 		RematchGameID: rec.RematchGameID,
 		DrawOfferBy:   rec.DrawOfferBy,
 		Thresholds: thresholdsDTO{
-			CapturePairsWin: s.Config.CapturePairsWin,
-			Align4ToWin:     s.Config.Align4ToWin,
-			Align5ToWin:     s.Config.Align5ToWin,
-			InitialTimeMs:   s.Config.InitialTimeMs,
-			IncrementMs:     s.Config.IncrementMs,
+			CapturePairsWin: thr.CapturePairsWin,
+			Align4ToWin:     thr.Align4ToWin,
+			Align5ToWin:     thr.Align5ToWin,
+			InitialTimeMs:   thr.InitialTimeMs,
+			IncrementMs:     thr.IncrementMs,
 		},
 	}
 }

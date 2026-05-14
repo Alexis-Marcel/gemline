@@ -546,11 +546,122 @@ func (r *PostgresRepo) ApplyRatedGame(ctx context.Context, gameID, mode string, 
 		if err != nil {
 			return false, fmt.Errorf("upsert rating %s/%s: %w", u.UserID, mode, err)
 		}
+		// Persist the delta in rating_history so the end-of-game UI
+		// can show "+12 / -8" without doing arithmetic on whatever
+		// the user's *current* rating happens to be later.
+		// PK (game_id, user_id) protects against double inserts; this
+		// commits with the ratings UPDATE so they're never out of sync.
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO rating_history (game_id, user_id, old_rating, new_rating, delta, result)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, gameID, u.UserID, u.OldRating, u.NewRating, u.NewRating-u.OldRating, string(u.Result)); err != nil {
+			return false, fmt.Errorf("insert rating_history %s: %w", u.UserID, err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// RatingsForGame builds the per-seat rating snapshot for one game. It
+// queries seats + games + ratings + rating_history in one round each
+// rather than one per user, because the game ID alone is sufficient
+// for every lookup. Returns Rated=false (with empty Seats) for games
+// that aren't matchmaking-eligible.
+//
+// Decision tree:
+//   - game.visibility != public OR any seat is_bot OR any seat user_id NULL
+//     → Rated=false, no seats body (UI hides the Elo section)
+//   - rated_at IS NULL → Rated=true, Applied=false, Seats with
+//     CurrentRating only
+//   - rated_at IS NOT NULL → Rated=true, Applied=true, Seats with
+//     CurrentRating + the historical Old/New/Delta/Result fields
+func (r *PostgresRepo) RatingsForGame(ctx context.Context, gameID string) (GameRatings, error) {
+	// Step 1: game metadata + ratedness gate
+	var (
+		visibility string
+		ratedAt    sql.NullTime
+		seatCount  int
+	)
+	row := r.pool.QueryRowContext(ctx, `
+		SELECT g.visibility, g.rated_at, (SELECT COUNT(*) FROM seats s WHERE s.game_id = g.id)
+		FROM games g WHERE g.id = $1
+	`, gameID)
+	if err := row.Scan(&visibility, &ratedAt, &seatCount); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return GameRatings{}, ErrGameNotFound
+		}
+		return GameRatings{}, fmt.Errorf("ratings-for-game game lookup: %w", err)
+	}
+
+	mode := RatingModeMulti
+	if seatCount == 2 {
+		mode = RatingMode1v1
+	}
+
+	// Step 2: are all seats rateable (no bot, no anon)?
+	if visibility != string(VisibilityPublic) {
+		return GameRatings{Mode: mode, Rated: false, Applied: false, Seats: []SeatRating{}}, nil
+	}
+	rateableRow := r.pool.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM seats
+		WHERE game_id = $1 AND (is_bot = TRUE OR user_id IS NULL OR occupied = FALSE)
+	`, gameID)
+	var disqualifiers int
+	if err := rateableRow.Scan(&disqualifiers); err != nil {
+		return GameRatings{}, fmt.Errorf("ratings-for-game disqualifier scan: %w", err)
+	}
+	if disqualifiers > 0 {
+		return GameRatings{Mode: mode, Rated: false, Applied: false, Seats: []SeatRating{}}, nil
+	}
+
+	// Step 3: pull seats + current ratings + history (LEFT JOIN — rows
+	// are absent for in-progress games)
+	rows, err := r.pool.QueryContext(ctx, `
+		SELECT s.seat_index, s.user_id,
+		       COALESCE(r.rating, 1200),
+		       h.old_rating, h.new_rating, h.delta, h.result
+		FROM seats s
+		LEFT JOIN ratings r ON r.user_id = s.user_id AND r.mode = $2
+		LEFT JOIN rating_history h ON h.user_id = s.user_id AND h.game_id = s.game_id
+		WHERE s.game_id = $1
+		ORDER BY s.seat_index
+	`, gameID, mode)
+	if err != nil {
+		return GameRatings{}, fmt.Errorf("ratings-for-game seats: %w", err)
+	}
+	defer rows.Close()
+
+	applied := ratedAt.Valid
+	out := GameRatings{Mode: mode, Rated: true, Applied: applied, Seats: []SeatRating{}}
+	for rows.Next() {
+		var (
+			seatIdx      int
+			userID       sql.NullString
+			currentRtg   int
+			oldRtg       sql.NullInt32
+			newRtg       sql.NullInt32
+			delta        sql.NullInt32
+			result       sql.NullString
+		)
+		if err := rows.Scan(&seatIdx, &userID, &currentRtg, &oldRtg, &newRtg, &delta, &result); err != nil {
+			return GameRatings{}, fmt.Errorf("ratings-for-game scan: %w", err)
+		}
+		sr := SeatRating{
+			SeatIndex:     seatIdx,
+			UserID:        userID.String,
+			CurrentRating: currentRtg,
+		}
+		if applied && oldRtg.Valid {
+			sr.OldRating = int(oldRtg.Int32)
+			sr.NewRating = int(newRtg.Int32)
+			sr.Delta = int(delta.Int32)
+			sr.Result = result.String
+		}
+		out.Seats = append(out.Seats, sr)
+	}
+	return out, rows.Err()
 }
 
 func (r *PostgresRepo) Leaderboard(ctx context.Context, mode string, limit int) ([]LeaderboardEntry, error) {

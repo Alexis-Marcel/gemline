@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Game } from "../api/types";
+import type { Game, GameRatings } from "../api/types";
 import { gemColor } from "../lib/colors";
 import { PlayerClock } from "./PlayerClock";
 
@@ -8,6 +8,10 @@ interface ScoreboardProps {
   mySeatIndex: number | null;
   /** Per-seat presence flags pushed by the server (key = seatIndex). */
   presence?: Record<number, boolean>;
+  /** Live ratings snapshot for the game. When ratings.rated is true,
+   *  the scoreboard surfaces each seat's current Elo as a small line
+   *  under the name. Null/rated:false hides the Elo entirely. */
+  ratings?: GameRatings | null;
   /** Invoked when the user clicks the "+ Bot" button on an empty seat.
    *  Only surfaced for private games in waiting state — set to undefined
    *  for any other context (public games, playing, finished). */
@@ -21,11 +25,22 @@ const DISCONNECT_GRACE_MS = 60_000;
 // in-play scoreboard (showing colour, name, clock, paires/gemmes). This
 // keeps the seat metadata in a single place so the user doesn't see a
 // duplicated list before play starts.
-export function Scoreboard({ game, mySeatIndex, presence = {}, onAddBot }: ScoreboardProps) {
+export function Scoreboard({
+  game,
+  mySeatIndex,
+  presence = {},
+  ratings,
+  onAddBot,
+}: ScoreboardProps) {
   const t = game.thresholds;
   const clockEnabled = t.initialTimeMs > 0;
   const gameOver = game.status === "finished";
   const waiting = game.status === "waiting";
+  // Index ratings by seatIndex so the loop below stays O(seats) instead
+  // of O(seats × ratings.seats).
+  const ratingsBySeat = new Map(
+    ratings?.rated ? ratings.seats.map((s) => [s.seatIndex, s]) : [],
+  );
   return (
     <ul className="grid grid-cols-2 gap-2 lg:flex lg:flex-col">
       {game.players.map((p, i) => {
@@ -86,6 +101,11 @@ export function Scoreboard({ game, mySeatIndex, presence = {}, onAddBot }: Score
                 <div className="mt-0.5 flex items-center gap-2 text-xs">
                   {isTurn && (
                     <span className="font-medium text-amber-400">à jouer</span>
+                  )}
+                  {seat.occupied && ratingsBySeat.has(i) && (
+                    <span className="font-mono tabular-nums text-zinc-400">
+                      📈 {ratingsBySeat.get(i)!.currentRating}
+                    </span>
                   )}
                   {showOffline && <DisconnectBadge />}
                 </div>

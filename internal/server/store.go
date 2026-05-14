@@ -133,6 +133,7 @@ type Store struct {
 	onPresence  func(gameID string, seatIndex int, online bool) // presence transition
 	onDrawOffer func(gameID string, offeredBy int)              // draw offer set (>=0) or cleared (-1)
 	onMove      func(gameID string, mv game.MoveResult)         // a move was applied (used to feed WS)
+	onRated     func(gameID string)                             // ratings successfully applied (used to push a "rated" WS event)
 
 	// botEngine is shared across all bot seats; it carries its own PRNG so
 	// concurrent BestMove calls don't fight over a global random source.
@@ -234,6 +235,16 @@ func (s *Store) SetPresenceListener(fn func(gameID string, seatIndex int, online
 // or auto-cancelled by a move).
 func (s *Store) SetDrawOfferListener(fn func(gameID string, offeredBy int)) {
 	s.onDrawOffer = fn
+}
+
+// SetRatedListener registers a callback fired once per game after the
+// Elo update has been persisted (ApplyRatedGame returned true). The
+// Server hooks it to a "rated" WS event so the end-of-game modal can
+// swap from "calcul du rating…" to the resolved deltas. Called from
+// the goroutine spawned in maybeApplyRating; the callback should not
+// block.
+func (s *Store) SetRatedListener(fn func(gameID string)) {
+	s.onRated = fn
 }
 
 // Close stops every running clock + presence timer + the multi promoter.
@@ -1549,11 +1560,11 @@ func (s *Store) applyRating1v1(gameID string, seats []Seat, winnerColor game.Col
 		resultA, resultB = 'D', 'D'
 	}
 	updates := []RatingUpdate{
-		{UserID: a.UserID, NewRating: elo.Update(rA, rB, outcomeA), Result: resultA},
-		{UserID: b.UserID, NewRating: elo.Update(rB, rA, outcomeB), Result: resultB},
+		{UserID: a.UserID, OldRating: rA, NewRating: elo.Update(rA, rB, outcomeA), Result: resultA},
+		{UserID: b.UserID, OldRating: rB, NewRating: elo.Update(rB, rA, outcomeB), Result: resultB},
 	}
-	// Every rated player must have a profile row so the leaderboard's
-	// INNER JOIN doesn't silently drop them. The seat name is what
+	// EnsureProfile first so the profile row exists before any leaderboard
+	// JOIN sees the rating that's about to land. The seat name is what
 	// displayNameFor produced at game-create time — already the user's
 	// best-known name (profile → email → fallback). Errors here are
 	// non-fatal: the rating still applies, the leaderboard just won't
@@ -1564,8 +1575,13 @@ func (s *Store) applyRating1v1(gameID string, seats []Seat, winnerColor game.Col
 	if err := s.repo.EnsureProfile(ctx, b.UserID, b.Name); err != nil {
 		slog.Default().Error("ensure profile (rated 1v1)", "user", b.UserID, "err", err)
 	}
-	if _, err := s.repo.ApplyRatedGame(ctx, gameID, RatingMode1v1, updates); err != nil {
+	applied, err := s.repo.ApplyRatedGame(ctx, gameID, RatingMode1v1, updates)
+	if err != nil {
 		slog.Default().Error("apply rated game (1v1)", "game", gameID, "err", err)
+		return
+	}
+	if applied && s.onRated != nil {
+		s.onRated(gameID)
 	}
 }
 
@@ -1608,9 +1624,21 @@ func (s *Store) applyRatingMulti(gameID string, seats []Seat, winnerColor game.C
 	}
 
 	results := elo.UpdateMulti(winnerSeat.UserID, winnerRating, oppIDs, oppRatings)
+	// Index the old ratings by user_id so we can stuff the right
+	// OldRating into each update without re-doing the
+	// winner/opponent split.
+	oldByID := make(map[string]int, len(seats))
+	for i, st := range seats {
+		oldByID[st.UserID] = ratingOrDefault(ratings[i])
+	}
 	updates := make([]RatingUpdate, len(results))
 	for i, r := range results {
-		updates[i] = RatingUpdate{UserID: r.UserID, NewRating: r.NewRating, Result: r.Result}
+		updates[i] = RatingUpdate{
+			UserID:    r.UserID,
+			OldRating: oldByID[r.UserID],
+			NewRating: r.NewRating,
+			Result:    r.Result,
+		}
 	}
 	// Same belt-and-suspenders as applyRating1v1: every rated player
 	// needs a profiles row or the leaderboard INNER JOIN drops them.
@@ -1619,8 +1647,13 @@ func (s *Store) applyRatingMulti(gameID string, seats []Seat, winnerColor game.C
 			slog.Default().Error("ensure profile (rated multi)", "user", st.UserID, "err", err)
 		}
 	}
-	if _, err := s.repo.ApplyRatedGame(ctx, gameID, RatingModeMulti, updates); err != nil {
+	applied, err := s.repo.ApplyRatedGame(ctx, gameID, RatingModeMulti, updates)
+	if err != nil {
 		slog.Default().Error("apply rated game (multi)", "game", gameID, "err", err)
+		return
+	}
+	if applied && s.onRated != nil {
+		s.onRated(gameID)
 	}
 }
 
@@ -1629,6 +1662,13 @@ func ratingOrDefault(r Rating) int {
 		return elo.DefaultRating
 	}
 	return r.Rating
+}
+
+// RatingsForGame is a thin pass-through to the repo. Kept on Store so
+// callers don't need a separate reference; consistent with how every
+// other read accessor lives here.
+func (s *Store) RatingsForGame(ctx context.Context, gameID string) (GameRatings, error) {
+	return s.repo.RatingsForGame(ctx, gameID)
 }
 
 // Leaderboard surfaces the top-rated players for the given mode, joined

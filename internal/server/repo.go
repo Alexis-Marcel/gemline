@@ -103,6 +103,14 @@ type Repository interface {
 	// flips the game's status to `status` — all in a single transaction.
 	FinalizeStart(ctx context.Context, gameID string, status Status, cfg game.Config) error
 
+	// DeleteStaleWaitingGames removes games stuck in status='waiting'
+	// older than olderThan (typically 7 days). ON DELETE CASCADE on
+	// seats/moves/game_events/rating_history wipes the related rows
+	// in one go. Returns the number of games removed for logging.
+	// Lives at the repo layer rather than as inline SQL in the
+	// background goroutine so it can be mocked / tested.
+	DeleteStaleWaitingGames(ctx context.Context, olderThan time.Duration) (int64, error)
+
 	// AppendEvent atomically increments games.event_seq and inserts a new
 	// row into game_events, returning the assigned seq. Used by the
 	// EventPublisher before a NOTIFY wake-up. Concurrent inserts for the
@@ -368,6 +376,9 @@ func (noopRepo) RatingsForGame(context.Context, string) (GameRatings, error) {
 	return GameRatings{Rated: false, Applied: false, Seats: []SeatRating{}}, nil
 }
 func (noopRepo) FinalizeStart(context.Context, string, Status, game.Config) error { return nil }
+func (noopRepo) DeleteStaleWaitingGames(context.Context, time.Duration) (int64, error) {
+	return 0, nil
+}
 
 // Without a DB the event log doesn't exist; AppendEvent reports 0 as
 // the seq and the EventPublisher will refuse to wake up the bus.

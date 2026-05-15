@@ -237,12 +237,45 @@ export function GamePage() {
         name: res.seat.name,
       });
       setLocalGame(res.game);
+      return true;
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Erreur inconnue");
+      return false;
     } finally {
       setJoining(false);
     }
   }
+
+  // Auto-join when a viewer lands on a still-waiting game without
+  // creds. Authenticated users skip straight to /join (the server
+  // resolves their name from the profile); anonymous users get a
+  // modal asking for a one-time display name and join on submit.
+  // Either way we never dangle a "Rejoindre" button — being a
+  // spectator is reserved for games that are already in progress
+  // or finished.
+  //
+  // autoJoinAttempted is a ref so the effect re-fires safely across
+  // game state pushes without re-firing the actual join. If the auto
+  // attempt fails (full game, all seats reserved for others, …) the
+  // user falls back to spectator mode silently — they can refresh
+  // to retry.
+  const [nameModalOpen, setNameModalOpen] = useState(false);
+  const autoJoinAttempted = useRef(false);
+  useEffect(() => {
+    if (!game) return;
+    if (creds) return;
+    if (game.status !== "waiting") return;
+    if (autoJoinAttempted.current) return;
+    if (joining) return;
+    if (user) {
+      autoJoinAttempted.current = true;
+      void handleJoin(undefined);
+    } else if (!nameModalOpen) {
+      // Defer to the modal — once the user submits a name we'll
+      // record the attempt below.
+      setNameModalOpen(true);
+    }
+  }, [game, creds, user, joining, nameModalOpen]);
 
   // handleCancelMatchmaking: vacate a seat in a still-waiting game and go
   // home. Clear local creds eagerly so a stale WS state event doesn't put
@@ -610,16 +643,11 @@ export function GamePage() {
             }
           />
 
-          {game.status === "waiting" && !creds && (
-            <JoinPanel
-              isAuthed={!!user}
-              name={name}
-              onChange={setName}
-              onJoin={(asName) => handleJoin(asName)}
-              disabled={joining}
-              seatsFree={seatsFree}
-            />
-          )}
+          {/* JoinPanel is gone — auto-join handles authed users and the
+             AnonymousJoinModal handles anonymous ones. A viewer who
+             can't get a seat (full game, no reserved seat for them)
+             stays here as a spectator without seeing any "Rejoindre"
+             affordance, since the server already refused. */}
 
           {game.status === "waiting" &&
             game.visibility === "private" &&
@@ -798,6 +826,24 @@ export function GamePage() {
           onClose={() => setInviteSeatIdx(null)}
         />
       )}
+
+      {nameModalOpen && (
+        <AnonymousJoinModal
+          seatsFree={seatsFree}
+          initialName={name}
+          submitting={joining}
+          onSubmit={async (asName) => {
+            autoJoinAttempted.current = true;
+            setName(asName);
+            const ok = await handleJoin(asName);
+            // Only close on success. On failure we keep the modal so
+            // the user can correct their name or back out; the error
+            // message already surfaces under the input via the
+            // shared `error` state which the modal mirrors.
+            if (ok) setNameModalOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -805,6 +851,75 @@ export function GamePage() {
 function Center({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-full items-center justify-center p-6">{children}</div>
+  );
+}
+
+// AnonymousJoinModal is the one-time "what's your name?" prompt for
+// anonymous visitors landing on a waiting game. Authenticated users
+// auto-join silently with their profile name, so this is only ever
+// seen by guests. Required because the server has no other way to
+// identify an anon seat. The form is blocking (no backdrop close,
+// no X) — the alternative is "click around an empty game you can't
+// interact with", which is worse.
+function AnonymousJoinModal({
+  seatsFree,
+  initialName,
+  submitting,
+  onSubmit,
+}: {
+  seatsFree: number;
+  initialName: string;
+  submitting: boolean;
+  onSubmit: (name: string) => void | Promise<void>;
+}) {
+  const [name, setName] = useState(initialName);
+  const trimmed = name.trim();
+  const disabled = submitting || trimmed.length === 0;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (disabled) return;
+          void onSubmit(trimmed);
+        }}
+        className="w-full max-w-sm space-y-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl"
+      >
+        <header>
+          <h2 className="text-lg font-semibold text-zinc-100">
+            Rejoindre la partie
+          </h2>
+          <p className="mt-1 text-xs text-zinc-400">
+            {seatsFree > 0
+              ? `${seatsFree} place${seatsFree > 1 ? "s" : ""} libre${seatsFree > 1 ? "s" : ""}. Choisis un pseudo.`
+              : "Plus de place — tu pourras observer la partie."}
+          </p>
+        </header>
+        <input
+          autoFocus
+          className="block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
+          placeholder="Ton nom"
+          value={name}
+          maxLength={32}
+          onChange={(e) => setName(e.target.value)}
+          disabled={seatsFree === 0}
+        />
+        <button
+          type="submit"
+          disabled={disabled || seatsFree === 0}
+          className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
+        >
+          {submitting ? "…" : "Rejoindre"}
+        </button>
+        <p className="text-[11px] text-zinc-500">
+          Ou{" "}
+          <a href="/login" className="text-amber-400 hover:underline">
+            connecte-toi
+          </a>{" "}
+          pour jouer sous ton nom de profil.
+        </p>
+      </form>
+    </div>
   );
 }
 
@@ -854,74 +969,6 @@ function statusMeta(
           "Échec après plusieurs tentatives — recharge la page ou vérifie la connexion",
       };
   }
-}
-
-// JoinPanel hides the legacy "type your name" form for authenticated users —
-// the server pulls the display name from their profile, so a single
-// "Rejoindre" button is enough. Anonymous users still get the name input,
-// since the server has no way to identify them otherwise.
-function JoinPanel({
-  isAuthed,
-  name,
-  onChange,
-  onJoin,
-  disabled,
-  seatsFree,
-}: {
-  isAuthed: boolean;
-  name: string;
-  onChange: (v: string) => void;
-  onJoin: (name?: string) => void;
-  disabled: boolean;
-  seatsFree: number;
-}) {
-  if (seatsFree === 0) return null;
-  if (isAuthed) {
-    return (
-      <button
-        type="button"
-        onClick={() => onJoin(undefined)}
-        disabled={disabled}
-        className="w-full rounded-xl border border-amber-400 bg-amber-400/10 px-3 py-3 text-left transition hover:bg-amber-400/20 disabled:opacity-50"
-      >
-        <div className="text-sm font-medium text-amber-100">
-          {disabled ? "…" : "Rejoindre la partie"}
-        </div>
-        <div className="mt-0.5 text-xs text-zinc-400">
-          Tu joues sous ton nom de profil.
-        </div>
-      </button>
-    );
-  }
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (!name.trim()) return;
-        onJoin(name.trim());
-      }}
-      className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-900/40 p-3"
-    >
-      <h2 className="text-sm font-medium text-zinc-200">
-        Rejoindre ({seatsFree} place{seatsFree > 1 ? "s" : ""} libre
-        {seatsFree > 1 ? "s" : ""})
-      </h2>
-      <input
-        autoFocus
-        className="block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100"
-        placeholder="Ton nom"
-        value={name}
-        onChange={(e) => onChange(e.target.value)}
-      />
-      <button
-        type="submit"
-        disabled={disabled || !name.trim()}
-        className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
-      >
-        {disabled ? "..." : "Rejoindre"}
-      </button>
-    </form>
-  );
 }
 
 // SearchingForOpponent is the chess.com-style waiting room for matchmade

@@ -81,21 +81,6 @@ export const api = {
     });
   },
 
-  // matchmake requires a signed-in user — the server 401s otherwise.
-  // Atomic: the caller is auto-joined into the matched game, so the client
-  // gets back the seat token and can navigate straight in without a
-  // follow-up /join call.
-  //
-  // Legacy synchronous path — superseded by enqueueMatchmake +
-  // lobbySocket. Kept here because the hermetic server tests still
-  // call it.
-  matchmake(players: number) {
-    return request<JoinResponse>("/api/games/matchmake", {
-      method: "POST",
-      body: JSON.stringify({ players }),
-    });
-  },
-
   // enqueueMatchmake puts the caller in the matchmaking queue and
   // returns immediately (HTTP 202). The actual match comes through
   // the lobby WebSocket as a "match_found" event. Idempotent —

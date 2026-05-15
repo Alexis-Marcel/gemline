@@ -41,27 +41,32 @@ func TestWithinBand_WidensOverTime(t *testing.T) {
 	}
 }
 
-func TestMultiPromotionThreshold_Schedule(t *testing.T) {
+func TestMultiWaitThreshold_Schedule(t *testing.T) {
+	// 6+ players → start immediately; thresholds widen as the queue
+	// shrinks. The exact numbers are part of the matchmaking UX so
+	// they're pinned here.
 	cases := []struct {
 		occupied int
 		want     time.Duration
 	}{
-		{6, matchPromoter6P},
-		{5, matchPromoter5P},
-		{4, matchPromoter4P},
-		{3, matchPromoter3P},
+		{6, 0},
+		{5, 5 * time.Second},
+		{4, 10 * time.Second},
+		{3, 20 * time.Second},
 	}
 	for _, c := range cases {
-		if got := multiPromotionThreshold(c.occupied); got != c.want {
+		if got := multiWaitThreshold(c.occupied); got != c.want {
 			t.Errorf("occupied=%d: want %v, got %v", c.occupied, c.want, got)
 		}
 	}
 }
 
-func TestMultiPromotionThreshold_BelowFloorIsSentinel(t *testing.T) {
-	// Fewer than 3 occupied → return a very large duration so the caller
-	// treats it as "don't promote".
-	if got := multiPromotionThreshold(2); got < time.Hour {
-		t.Fatalf("≤2 occupants should never auto-promote, got %v", got)
+func TestMultiWaitThreshold_BelowFloorIsSentinel(t *testing.T) {
+	// Fewer than minMultiSeats → return a very large duration so any
+	// `age < threshold` check trivially refuses to start. Callers should
+	// short-circuit on the count before consulting the threshold, but
+	// the sentinel is here as a safety net.
+	if got := multiWaitThreshold(2); got < time.Hour {
+		t.Fatalf("≤2 occupants should never trigger a start, got %v", got)
 	}
 }

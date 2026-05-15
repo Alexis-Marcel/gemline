@@ -74,10 +74,11 @@ func (s *Store) matcherTick(ctx context.Context, log *slog.Logger, onMatched fun
 		}
 		players := p
 		seats, err := s.repo.MatchmakeTick(ctx, players, mode, func(qs []QueuedUser) [][]QueuedUser {
+			now := time.Now()
 			if players == 2 {
-				return pair1v1(qs, time.Now())
+				return pair1v1(qs, now)
 			}
-			return pairMulti(qs, players)
+			return pairMulti(qs, players, now)
 		})
 		if err != nil {
 			log.Error("matcher tick", "players", players, "err", err)
@@ -139,23 +140,62 @@ func pair1v1(qs []QueuedUser, now time.Time) [][]QueuedUser {
 	return out
 }
 
-// pairMulti forms groups of exactly `players` users in FIFO order. We
-// don't apply rating bands to 3+ player matches today — getting four
-// people into a room at all is the binding constraint at this scale,
-// not rating closeness. The oldest waiters land in the first group;
-// later groups inherit the remaining order.
+// pairMulti groups multi-player queuers into a single room of dynamic
+// size (3..players). Rating bands are not applied to 3+ player matches —
+// rating closeness matters less when the binding constraint is "get a
+// group of humans onto the board at all".
 //
-// Anyone left over (fewer than `players` unmatched at the tail) is
-// rolled back into the queue for the next tick.
-func pairMulti(qs []QueuedUser, players int) [][]QueuedUser {
-	if len(qs) < players {
+// Trigger conditions:
+//   - If `players` or more are queued → form a group of exactly `players`
+//     (max-out the room, start immediately).
+//   - Else if at least minMultiSeats queuers are present AND the oldest
+//     has waited past multiWaitThreshold(len(qs)) → form a group of
+//     len(qs). The threshold shrinks as the queue grows so a near-full
+//     queue starts faster than a barely-quorate one (see thresholds).
+//   - Otherwise → wait.
+//
+// At most one group per tick: we never split the queue into multiple
+// concurrent rooms. If 8 users queue simultaneously, the first 6 go in
+// and the remaining 2 stay (they'll need a third before they match).
+func pairMulti(qs []QueuedUser, players int, now time.Time) [][]QueuedUser {
+	n := len(qs)
+	if n < minMultiSeats {
 		return nil
 	}
-	var out [][]QueuedUser
-	for i := 0; i+players <= len(qs); i += players {
+	if n >= players {
 		group := make([]QueuedUser, players)
-		copy(group, qs[i:i+players])
-		out = append(out, group)
+		copy(group, qs[:players])
+		return [][]QueuedUser{group}
 	}
-	return out
+	oldestAge := now.Sub(qs[0].EnqueuedAt)
+	if oldestAge < multiWaitThreshold(n) {
+		return nil
+	}
+	group := make([]QueuedUser, n)
+	copy(group, qs)
+	return [][]QueuedUser{group}
+}
+
+// Multi-player matchmaking thresholds. The minimum quorum (3) is the
+// floor below which we never start; the per-size waits taper from 0s at
+// six (start instantly when full) up to 20s at three (give the queue a
+// chance to grow before committing to a small room).
+const minMultiSeats = 3
+
+func multiWaitThreshold(occupied int) time.Duration {
+	switch {
+	case occupied >= 6:
+		return 0
+	case occupied == 5:
+		return 5 * time.Second
+	case occupied == 4:
+		return 10 * time.Second
+	case occupied == 3:
+		return 20 * time.Second
+	default:
+		// Sentinel for "never start at this size" — used as a guard so
+		// callers can compare age < threshold without special-casing
+		// "below quorum".
+		return 24 * time.Hour
+	}
 }

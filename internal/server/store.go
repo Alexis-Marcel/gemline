@@ -170,9 +170,6 @@ type Store struct {
 	// so the grace-timeout path can be exercised without sleeping a minute.
 	disconnectGrace time.Duration
 
-	// promoterStop signals the multi-room auto-promotion goroutine to halt.
-	// nil while the promoter hasn't been started.
-	promoterStop chan struct{}
 	// cleanerStop signals the stale-game cleaner goroutine to halt.
 	// nil while the cleaner hasn't been started.
 	cleanerStop chan struct{}
@@ -272,15 +269,11 @@ func (s *Store) SetRatedListener(fn func(gameID string)) {
 	s.onRated = fn
 }
 
-// Close stops every running clock + presence timer + the multi promoter +
-// the stale-game cleaner. Call on shutdown.
+// Close stops every running clock + presence timer + the stale-game
+// cleaner. Call on shutdown.
 func (s *Store) Close() {
 	s.clocks.CancelAll()
 	s.presence.CancelAll()
-	if s.promoterStop != nil {
-		close(s.promoterStop)
-		s.promoterStop = nil
-	}
 	if s.cleanerStop != nil {
 		close(s.cleanerStop)
 		s.cleanerStop = nil
@@ -342,84 +335,12 @@ func (s *Store) runStaleCleaner(log *slog.Logger) {
 	}
 }
 
-// StartMultiPromoter spins up the background goroutine that promotes
-// public multi-player rooms to `playing` once enough seats are occupied
-// and the room has waited long enough. Idempotent — calling twice does
-// nothing. Tests skip this entirely (deterministic via Store.Start
-// calls instead).
-func (s *Store) StartMultiPromoter() {
-	if s.promoterStop != nil {
-		return
-	}
-	s.promoterStop = make(chan struct{})
-	stop := s.promoterStop
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				s.checkMultiPromotions()
-			}
-		}
-	}()
-}
-
-func (s *Store) checkMultiPromotions() {
-	s.mu.Lock()
-	ids := make([]string, 0, len(s.games))
-	for id := range s.games {
-		ids = append(ids, id)
-	}
-	s.mu.Unlock()
-	for _, id := range ids {
-		rec, ok, err := s.Get(context.Background(), id)
-		if err != nil || !ok {
-			continue
-		}
-		s.promoteMultiIfReady(rec)
-	}
-}
-
-// promoteMultiIfReady starts a public multi-player game when the room has
-// at least 3 occupied seats and has waited the threshold for its current
-// occupancy. Idempotent + safe under concurrent Joins — the actual
-// promotion goes through Store.startInternal which re-acquires rec.Lock
-// and re-validates state.
-func (s *Store) promoteMultiIfReady(rec *GameRecord) {
-	rec.Lock()
-	if rec.Status != StatusWaiting || rec.Visibility != VisibilityPublic {
-		rec.Unlock()
-		return
-	}
-	if len(rec.Seats) < 3 {
-		rec.Unlock()
-		return
-	}
-	occupied := 0
-	for _, st := range rec.Seats {
-		if st.Occupied {
-			occupied++
-		}
-	}
-	age := time.Since(rec.CreatedAt)
-	rec.Unlock()
-	if occupied < 3 {
-		return
-	}
-	if age < multiPromotionThreshold(occupied) {
-		return
-	}
-	_ = s.startInternal(rec)
-}
-
 // startInternal is the auth-less common path for transitioning a waiting
 // game to playing. Trims unoccupied seats, rebuilds the engine for the
 // remaining colours, persists, and schedules the first bot move if
-// applicable. Used by both Store.Start (private, token-auth) and the
-// auto-promoter (public multi).
+// applicable. Used by Store.Start (private, token-auth) — the public
+// multi path doesn't need it any more: matched games are created by the
+// matcher directly in `playing` state.
 func (s *Store) startInternal(rec *GameRecord) error {
 	rec.Lock()
 	if rec.Status != StatusWaiting {
@@ -1463,17 +1384,20 @@ func (s *Store) DeclineSeatInvite(ctx context.Context, gameID string, seatIdx in
 	return rec, nil
 }
 
-// Matchmake returns a public waiting game of the requested player count
-// with at least one free seat that `excludeUserID` is *not* already seated
-// in. For 2-player (1v1) games we score candidates by Elo proximity: the
-// closest-rated candidate that falls within the room's age-widened
-// tolerance band wins. For 3+ player (multi) we keep the simpler "join the
-// most-filled room" model — the auto-promoter starts those when enough
-// players have accumulated, so rating-pairing within a multi room would
-// only delay the start without changing who plays.
+// Matchmake — TEST FIXTURE ONLY. Production matchmaking goes through the
+// async queue + matcher tick path (POST /api/matchmake/enqueue +
+// /ws/lobby match_found). This synchronous "find-or-create a public
+// waiting game" routine is preserved as a convenience for the server
+// tests that need "two authenticated users seated in a public game"
+// without spinning up a real Postgres queue. The companion HTTP
+// endpoint POST /api/games/matchmake exists for the same reason.
 //
-// If no candidate matches, a fresh public game is created and the caller
-// becomes its first seat-holder.
+// Behaviour: returns a public waiting game of the requested player
+// count with at least one free seat that `excludeUserID` is *not*
+// already seated in. For 2-player (1v1) games we score candidates by
+// Elo proximity (age-widened band). For 3+ player (multi) we score by
+// "most filled, oldest first". If no candidate matches, a fresh public
+// game is created.
 func (s *Store) Matchmake(ctx context.Context, players int, excludeUserID string) (*GameRecord, error) {
 	candidates, err := s.repo.LobbyGames(ctx, 50)
 	if err != nil {

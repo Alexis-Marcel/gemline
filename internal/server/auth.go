@@ -27,11 +27,15 @@ import (
 type userCtxKey struct{}
 
 // AuthUser is what the JWT middleware attaches to the request context for
-// authenticated requests. It holds only what the JWT claims: the Supabase
-// user UUID and the email.
+// authenticated requests. It holds what the JWT claims expose about the
+// caller: the Supabase user UUID, the email, and the display name they
+// chose at signup (lifted from user_metadata.display_name). The display
+// name is the first-visit fallback for displayNameFor — once the user
+// has a row in our `profiles` table that takes precedence.
 type AuthUser struct {
-	ID    string
-	Email string
+	ID          string
+	Email       string
+	DisplayName string
 }
 
 func userFromContext(ctx context.Context) (*AuthUser, bool) {
@@ -40,10 +44,34 @@ func userFromContext(ctx context.Context) (*AuthUser, bool) {
 }
 
 // supabaseClaims models the subset of the Supabase JWT we care about.
+// UserMetadata mirrors the `user_metadata` object Supabase serialises
+// from the auth.users row; we only read `display_name` from it (set
+// at signup via auth.signUp({ options: { data: { display_name } } }))
+// but keep the field shape open so future fields are easy to lift.
 type supabaseClaims struct {
-	Email string `json:"email,omitempty"`
-	Role  string `json:"role,omitempty"`
+	Email        string                 `json:"email,omitempty"`
+	Role         string                 `json:"role,omitempty"`
+	UserMetadata map[string]interface{} `json:"user_metadata,omitempty"`
 	jwt.RegisteredClaims
+}
+
+// displayNameFromMetadata extracts a non-empty trimmed `display_name`
+// from Supabase's user_metadata map. Returns "" when missing, non-
+// string, or whitespace-only — callers fall through to their own
+// fallback chain.
+func displayNameFromMetadata(md map[string]interface{}) string {
+	if md == nil {
+		return ""
+	}
+	raw, ok := md["display_name"]
+	if !ok {
+		return ""
+	}
+	str, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(str)
 }
 
 // jwksKeyfunc returns a Keyfunc that validates tokens against the JWKS
@@ -114,8 +142,9 @@ func jwtMiddleware(verifier jwt.Keyfunc, next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), userCtxKey{}, &AuthUser{
-			ID:    claims.Subject,
-			Email: claims.Email,
+			ID:          claims.Subject,
+			Email:       claims.Email,
+			DisplayName: displayNameFromMetadata(claims.UserMetadata),
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

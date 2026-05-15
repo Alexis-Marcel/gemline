@@ -336,13 +336,28 @@ func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
 }
 
-// displayNameFor resolves the user's preferred display name, falling back to
-// the email's local-part and finally to a generic "Joueur" if everything is
-// blank. Used by paths that auto-join (matchmake, signed-in join without a
-// body) — never asks the user to retype something we already know.
+// displayNameFor resolves the user's preferred display name. Priority:
+//
+//   1. The `profiles.display_name` row — the user explicitly chose
+//      this via PUT /api/profile, so it always wins.
+//   2. user_metadata.display_name from the Supabase JWT — captured at
+//      signup (`supabase.auth.signUp({ options: { data: { display_name } } })`)
+//      and the most reliable name we have before the user touches the
+//      profile endpoint. Without this fallback a fresh signup would
+//      surface as "alice" for "alice@example.com" even when the user
+//      explicitly entered "Alice Marcel" on the form.
+//   3. Email local-part as a last-resort.
+//   4. Generic "Joueur" if every field is blank.
+//
+// Used by every auto-join path (matchmake, signed-in join without a
+// body, invitation acceptance) so the user never has to retype a name
+// the system already knows.
 func (s *Server) displayNameFor(ctx context.Context, u *AuthUser) string {
 	if p, err := s.store.Profile(ctx, u.ID); err == nil && p != nil && p.DisplayName != "" {
 		return p.DisplayName
+	}
+	if u.DisplayName != "" {
+		return u.DisplayName
 	}
 	if at := strings.IndexByte(u.Email, '@'); at > 0 {
 		return u.Email[:at]

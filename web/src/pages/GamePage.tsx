@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import { useMatchmake } from "../api/matchmake";
@@ -299,6 +299,30 @@ export function GamePage() {
       setRematching(false);
     }
   }
+
+  // Auto-redirect both players to the rematch the moment it's created.
+  // The acceptor who triggered the unanimous flip already navigates from
+  // handleOfferRematch above; this effect handles the *other* accepters
+  // who learn about the new game via the WS state event. We track the
+  // last-seen rematchGameId via a ref so a fresh page load on a finished
+  // game that already has a rematch doesn't kidnap the viewer — only a
+  // genuine empty → set transition triggers the jump.
+  const lastRematchIdRef = useRef<string | undefined>(undefined);
+  const sawRematchRef = useRef(false);
+  useEffect(() => {
+    if (!game) return;
+    const curr = game.rematchGameId;
+    if (!sawRematchRef.current) {
+      sawRematchRef.current = true;
+      lastRematchIdRef.current = curr;
+      return;
+    }
+    const prev = lastRematchIdRef.current;
+    lastRematchIdRef.current = curr;
+    if (curr && !prev && creds) {
+      navigate(`/game/${curr}`);
+    }
+  }, [game, creds, navigate]);
 
   const handleResign = useCallback(async () => {
     if (!creds) return;

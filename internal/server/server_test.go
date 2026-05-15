@@ -154,6 +154,122 @@ func TestRematchOfferDecline(t *testing.T) {
 	_ = postRematchDecline(t, ts, g.ID, j1.Token, http.StatusConflict)
 }
 
+// TestRematchOffer_RequiresToken locks in the auth posture: the propose /
+// accept path runs through a player's seat token, not a JWT, so calling it
+// without an X-Player-Token must 401.
+func TestRematchOffer_RequiresToken(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	j2 := joinGame(t, ts, g.ID, "Bob", nil)
+	finishGame(t, ts, g.ID, j1.Token, j2.Token)
+	_ = postRematchOffer(t, ts, g.ID, "", http.StatusUnauthorized)
+}
+
+// TestRematchOffer_ThreePlayers_NeedsAllThreeAccepts exercises the multi-N
+// case: with three humans seated, the rematch only fires after every one of
+// them has accepted. The pendingSeats projection shrinks at each step.
+func TestRematchOffer_ThreePlayers_NeedsAllThreeAccepts(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 3)
+	a := joinGame(t, ts, g.ID, "Alice", nil)
+	b := joinGame(t, ts, g.ID, "Bob", nil)
+	c := joinGame(t, ts, g.ID, "Carol", nil)
+	// Quickest finish for a 3P game: one player resigns. Game flips to
+	// finished regardless of how many humans are left.
+	postResign(t, ts, g.ID, a.Token, http.StatusOK)
+
+	d1 := postRematchOffer(t, ts, g.ID, a.Token, http.StatusOK)
+	if d1.RematchGameID != "" {
+		t.Fatalf("rematch must not exist after only 1/3 accepts")
+	}
+	if d1.RematchOffer == nil || len(d1.RematchOffer.PendingSeats) != 2 {
+		t.Fatalf("want 2 pending after Alice, got %#v", d1.RematchOffer)
+	}
+	d2 := postRematchOffer(t, ts, g.ID, b.Token, http.StatusOK)
+	if d2.RematchGameID != "" {
+		t.Fatalf("rematch must not exist after 2/3 accepts")
+	}
+	if d2.RematchOffer == nil || len(d2.RematchOffer.PendingSeats) != 1 {
+		t.Fatalf("want 1 pending after Alice+Bob, got %#v", d2.RematchOffer)
+	}
+	d3 := postRematchOffer(t, ts, g.ID, c.Token, http.StatusOK)
+	if d3.RematchGameID == "" {
+		t.Fatalf("rematch must exist once all 3 humans have accepted")
+	}
+}
+
+// TestRematchOffer_BotIsPreAccepted documents the bot shortcut: with a bot
+// at the table, only the human needs to click "Revanche" — the bot's
+// acceptance is implicit since there's nobody to ask. This keeps the UX
+// instant for the "play vs bot" loop.
+func TestRematchOffer_BotIsPreAccepted(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	a := joinGame(t, ts, g.ID, "Alice", nil)
+	// Bot fills seat 1; AllSeated flips status to playing. The bot's
+	// scheduled goroutine may attempt a move before Alice's resign acquires
+	// the lock, but either ordering ends with the bot Occupied + IsBot, so
+	// the offer's pre-acceptance check still picks it up.
+	_ = postAddBot(t, ts, g.ID, 1, http.StatusOK)
+	postResign(t, ts, g.ID, a.Token, http.StatusOK)
+
+	d := postRematchOffer(t, ts, g.ID, a.Token, http.StatusOK)
+	if d.RematchGameID == "" {
+		t.Fatalf("rematch must be created on Alice's single accept (bot pre-accepted), got %#v", d)
+	}
+}
+
+func TestDeclineSeatInvite_HappyPath(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	const aliceID = "alice-uuid"
+	_ = postInviteSeat(t, ts, g.ID, 1, aliceID, "Alice", http.StatusOK)
+	out := postDeclineInviteAs(t, ts, g.ID, 1, aliceID, http.StatusOK)
+	if out.Seats[1].Occupied || out.Seats[1].Name != "" || out.Seats[1].UserID != "" {
+		t.Fatalf("decline must reset the seat, got %+v", out.Seats[1])
+	}
+}
+
+func TestDeclineSeatInvite_RejectsNonInvitee(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = postInviteSeat(t, ts, g.ID, 1, "alice-uuid", "Alice", http.StatusOK)
+	// Bob tries to decline Alice's invitation → 403.
+	_ = postDeclineInviteAs(t, ts, g.ID, 1, "bob-uuid", http.StatusForbidden)
+}
+
+func TestDeclineSeatInvite_RejectsEmptySeat(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	// No invitation on seat 1 → ErrSeatNotInvited → 409.
+	_ = postDeclineInviteAs(t, ts, g.ID, 1, "alice-uuid", http.StatusConflict)
+}
+
+func TestDeclineSeatInvite_RequiresAuth(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	_ = postInviteSeat(t, ts, g.ID, 1, "alice-uuid", "Alice", http.StatusOK)
+	// No X-Test-User-ID → JWT middleware leaves the context unauthenticated,
+	// and the handler 401s before reaching the store.
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+g.ID+"/seats/1/invite/decline", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("want 401 without auth, got %d", resp.StatusCode)
+	}
+}
+
 func TestJoinAndMove(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -1219,6 +1335,33 @@ func postRematchOffer(t *testing.T, ts *httptest.Server, id, token string, wantS
 func postRematchDecline(t *testing.T, ts *httptest.Server, id, token string, wantStatus int) gameDTO {
 	t.Helper()
 	return postWithToken(t, ts, "/api/games/"+id+"/rematch/decline", token, wantStatus)
+}
+
+// postDeclineInviteAs sends the invitee-side decline call with the
+// hermetic X-Test-User-ID header — the handler uses userFromContext
+// (not a player token) to identify the caller, so this mirrors the
+// joinGameAs auth path.
+func postDeclineInviteAs(t *testing.T, ts *httptest.Server, gameID string, seatIdx int, userID string, wantStatus int) gameDTO {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+gameID+"/seats/"+itoa(seatIdx)+"/invite/decline", nil)
+	req.Header.Set("X-Test-User-ID", userID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("decline invite: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
+	}
+	if wantStatus != http.StatusOK {
+		return gameDTO{}
+	}
+	var g gameDTO
+	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
+		t.Fatal(err)
+	}
+	return g
 }
 
 func postWithToken(t *testing.T, ts *httptest.Server, path, token string, wantStatus int) gameDTO {

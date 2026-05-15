@@ -178,6 +178,14 @@ type Repository interface {
 	// by enqueued_at ASC (same as MatchmakeTick) so the caller can
 	// derive ETA from the oldest entry.
 	MatchmakeQueueSnapshot(ctx context.Context, players int, mode string) ([]QueuedUser, error)
+
+	// SaveRematchOffer writes the rematch_offer JSONB column for a
+	// finished game. Pass a JSON-encoded RematchOffer body to set the
+	// offer; pass nil to clear it. Must be called whenever Store
+	// mutates rec.RematchOffer so the change is visible to other pods
+	// (which invalidate their in-memory copy on every state event and
+	// re-read from DB on the next access).
+	SaveRematchOffer(ctx context.Context, gameID string, offer []byte) error
 }
 
 // EventRow is a persisted row in game_events. Payload stays as
@@ -464,3 +472,4 @@ func (noopRepo) MatchmakeTick(context.Context, int, string, func([]QueuedUser) [
 func (noopRepo) MatchmakeQueueSnapshot(context.Context, int, string) ([]QueuedUser, error) {
 	return nil, nil
 }
+func (noopRepo) SaveRematchOffer(context.Context, string, []byte) error { return nil }

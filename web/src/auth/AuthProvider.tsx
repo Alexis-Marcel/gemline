@@ -8,6 +8,7 @@ import {
 } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { supabase } from "../api/supabase";
+import { userSocket } from "../api/userSocket";
 
 interface AuthContextValue {
   user: User | null;
@@ -39,6 +40,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       data.subscription.unsubscribe();
     };
   }, []);
+
+  // Mirror the current session into the persistent user socket. The
+  // socket opens on first authenticated render and reconnects in the
+  // background if the network blips; it closes on sign-out so a logged-
+  // out viewer doesn't keep an authenticated WS hanging around.
+  useEffect(() => {
+    const token = session?.access_token;
+    if (token) {
+      userSocket.open(token);
+    } else {
+      userSocket.close();
+    }
+  }, [session?.access_token]);
 
   const value = useMemo<AuthContextValue>(
     () => ({

@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthProvider";
+import { InvitationToast } from "./components/InvitationToast";
 import { HomePage } from "./pages/HomePage";
 import { GamePage } from "./pages/GamePage";
 import { LeaderboardPage } from "./pages/LeaderboardPage";
@@ -22,6 +23,7 @@ export default function App() {
             <Route path="/game/:id" element={<GamePage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          <InvitationToast />
         </div>
       </AuthProvider>
     </BrowserRouter>

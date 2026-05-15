@@ -276,6 +276,91 @@ func TestDeclineSeatInvite_RejectsEmptySeat(t *testing.T) {
 	_ = postDeclineInviteAs(t, ts, g.ID, 1, "alice-uuid", http.StatusConflict)
 }
 
+// TestInviteSeat_PushesInviteReceivedOverLobbyWS pins the cross-page
+// notification path: the host's POST /seats/{idx}/invite must wake up
+// the invitee's lobby WS (the persistent per-user connection that
+// AuthProvider keeps open) with an `invite_received` event so the
+// global toast can render even when the invitee is not on the game
+// page yet.
+func TestInviteSeat_PushesInviteReceivedOverLobbyWS(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	const aliceID = "alice-uuid"
+	g := createGame(t, ts, 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws/lobby"
+	hdr := http.Header{}
+	hdr.Set("X-Test-User-ID", aliceID)
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: hdr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	// Fire the invite from another goroutine; we'll block on Read
+	// until the event lands.
+	go func() {
+		_ = postInviteSeat(t, ts, g.ID, 1, aliceID, "Alice", http.StatusOK)
+	}()
+
+	ev := readEvent(t, ctx, conn)
+	if ev.Type != "invite_received" {
+		t.Fatalf("want invite_received, got %s", ev.Type)
+	}
+	// Payload arrives as json.RawMessage on the wire — decode and
+	// verify the routable fields. We don't assert FromName because
+	// the inviter goes through anonymous in the hermetic test.
+	raw, ok := ev.Payload.(map[string]any)
+	if !ok {
+		// readEvent decodes Payload as interface{}; a JSON object lands
+		// as map[string]any when unmarshalled into Event.
+		t.Fatalf("want object payload, got %T", ev.Payload)
+	}
+	if got, _ := raw["gameId"].(string); got != g.ID {
+		t.Fatalf("want gameId=%s, got %v", g.ID, raw["gameId"])
+	}
+	if got, _ := raw["seatIndex"].(float64); int(got) != 1 {
+		t.Fatalf("want seatIndex=1, got %v", raw["seatIndex"])
+	}
+}
+
+// TestCancelSeatInvite_PushesInviteCancelledOverLobbyWS covers the
+// inverse: a host clicking "× Annuler" while the invitee's toast is
+// open must dismiss it cleanly via an `invite_cancelled` push.
+func TestCancelSeatInvite_PushesInviteCancelledOverLobbyWS(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	const aliceID = "alice-uuid"
+	g := createGame(t, ts, 2)
+	// Reserve the seat before opening the WS so the invitee subscribes
+	// in time for the cancel notification.
+	_ = postInviteSeat(t, ts, g.ID, 1, aliceID, "Alice", http.StatusOK)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws/lobby"
+	hdr := http.Header{}
+	hdr.Set("X-Test-User-ID", aliceID)
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: hdr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	go func() {
+		postCancelSeatInvite(t, ts, g.ID, 1, http.StatusOK)
+	}()
+
+	ev := readEvent(t, ctx, conn)
+	if ev.Type != "invite_cancelled" {
+		t.Fatalf("want invite_cancelled, got %s", ev.Type)
+	}
+}
+
 func TestDeclineSeatInvite_RequiresAuth(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()

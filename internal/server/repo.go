@@ -171,6 +171,13 @@ type Repository interface {
 	// for the next one. Anyone left in queue stays locked-and-released for
 	// the next tick to retry.
 	MatchmakeTick(ctx context.Context, players int, mode string, pairFn func([]QueuedUser) [][]QueuedUser) ([]MatchedSeat, error)
+
+	// MatchmakeQueueSnapshot returns the current queue for (players,
+	// mode) without locking — used by the matcher to push queue_update
+	// notifications to waiting users after each tick. Rows are ordered
+	// by enqueued_at ASC (same as MatchmakeTick) so the caller can
+	// derive ETA from the oldest entry.
+	MatchmakeQueueSnapshot(ctx context.Context, players int, mode string) ([]QueuedUser, error)
 }
 
 // EventRow is a persisted row in game_events. Payload stays as
@@ -452,5 +459,8 @@ func (noopRepo) CurrentEventSeq(context.Context, string) (int, error) { return 0
 func (noopRepo) EnqueueMatchmake(context.Context, string, int, string, int) error { return nil }
 func (noopRepo) CancelMatchmake(context.Context, string) error                    { return nil }
 func (noopRepo) MatchmakeTick(context.Context, int, string, func([]QueuedUser) [][]QueuedUser) ([]MatchedSeat, error) {
+	return nil, nil
+}
+func (noopRepo) MatchmakeQueueSnapshot(context.Context, int, string) ([]QueuedUser, error) {
 	return nil, nil
 }

@@ -66,7 +66,19 @@ const (
 	LobbyEventMatchFound      = "match_found"
 	LobbyEventInviteReceived  = "invite_received"
 	LobbyEventInviteCancelled = "invite_cancelled"
+	LobbyEventQueueUpdate     = "queue_update"
 )
+
+// LobbyQueueUpdatePayload is the wire shape of the per-tick "you have
+// company" signal pushed to every user still in queue. Count is the
+// bucket's current size; ETASeconds is the remaining wait before a
+// multi room of that size auto-starts (omitted for 1v1 and for under-
+// quorum multi buckets, where no deterministic countdown applies).
+type LobbyQueueUpdatePayload struct {
+	Players    int  `json:"players"`
+	Count      int  `json:"count"`
+	ETASeconds *int `json:"etaSeconds,omitempty"`
+}
 
 // lobbyEnvelope is the JSON shape sent through ChannelLobby. UserID is
 // the routing key the LobbyHub keys on; Type discriminates between
@@ -93,6 +105,20 @@ func (s *Server) fanMatched(seats []MatchedSeat) {
 			Token:     seat.Token,
 			SeatIndex: seat.SeatIndex,
 			Name:      seat.Name,
+		})
+	}
+}
+
+// fanQueueUpdate is the matcher's onQueueUpdate callback. After every
+// tick we get one entry per still-queued user; we forward each as a
+// queue_update event so the HomePage's matchmaking spinner can show a
+// live count + ETA rather than an opaque "Recherche en cours…".
+func (s *Server) fanQueueUpdate(updates []QueueUpdate) {
+	for _, u := range updates {
+		s.publishLobby(u.UserID, LobbyEventQueueUpdate, LobbyQueueUpdatePayload{
+			Players:    u.Players,
+			Count:      u.Count,
+			ETASeconds: u.ETASeconds,
 		})
 	}
 }

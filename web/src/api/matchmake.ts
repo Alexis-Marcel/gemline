@@ -13,14 +13,25 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "./client";
+import { playNotificationSound } from "../lib/notificationSound";
 import { userSocket, type MatchFoundPayload } from "./userSocket";
 
 export type LobbyMatch = MatchFoundPayload;
 
+/** Live queue snapshot pushed by the server every matcher tick while
+ *  the user is queued. count = how many in the bucket; etaSeconds =
+ *  seconds until a multi room of that size auto-starts (absent for
+ *  1v1 and under-quorum multi). Surfaced so HomePage can render a
+ *  live "3/6 joueurs — démarre dans 14s" indicator. */
+export interface QueueProgress {
+  count: number;
+  etaSeconds?: number;
+}
+
 export type MatchmakeState =
   | { status: "idle" }
   | { status: "queueing" }
-  | { status: "queued"; players: number }
+  | { status: "queued"; players: number; progress?: QueueProgress }
   | { status: "matched"; match: LobbyMatch }
   | { status: "error"; message: string };
 
@@ -61,14 +72,32 @@ export function useMatchmake(): {
     }
   }, []);
 
-  // Listen for match_found on the persistent user socket. We
-  // subscribe unconditionally so we don't miss the race where the
-  // matcher pairs us before `start()` finishes returning; the
-  // listener no-ops on event types we don't care about.
+  // Listen for match_found + queue_update on the persistent user
+  // socket. We subscribe unconditionally so we don't miss the race
+  // where the matcher pairs us before `start()` finishes returning.
   useEffect(() => {
     return userSocket.subscribe((ev) => {
-      if (ev.type !== "match_found") return;
-      setState({ status: "matched", match: ev.payload });
+      if (ev.type === "match_found") {
+        playNotificationSound();
+        setState({ status: "matched", match: ev.payload });
+        return;
+      }
+      if (ev.type === "queue_update") {
+        // Only meaningful while queued — folding the live count + ETA
+        // into the state lets HomePage render a live spinner. If a
+        // tick lands while we're idle (race after a cancel), drop it.
+        setState((prev) => {
+          if (prev.status !== "queued") return prev;
+          if (prev.players !== ev.payload.players) return prev;
+          return {
+            ...prev,
+            progress: {
+              count: ev.payload.count,
+              etaSeconds: ev.payload.etaSeconds,
+            },
+          };
+        });
+      }
     });
   }, []);
 

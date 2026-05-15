@@ -1,17 +1,51 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
-import { useMatchmake } from "../api/matchmake";
+import { useMatchmake, type MatchmakeState } from "../api/matchmake";
 import { useAuth } from "../auth/AuthProvider";
 import { Button } from "../components/Button";
 import { UserNav } from "../components/UserNav";
 import { saveCredentials } from "../lib/auth";
 
-// Multi rooms open with the engine's max so the server can promote them
-// at any size 3..6 depending on how many players accumulate. The actual
-// playing-time size is decided server-side by the multi auto-promoter.
+// Multi rooms open at the engine's max — the matcher decides the
+// actual room size (3..6) at start time based on how many people are
+// queued.
 const MULTIPLAYER_MAX_SEATS = 6;
 const PRIVATE_SEATS = 6;
+
+// oneVOneStatus / multiStatus render the live queue indicator under the
+// matchmaking buttons while we're queued. They read from the matchmake
+// state's `progress` field (populated by queue_update WS events) and
+// fall back to a neutral message when no tick has reported yet.
+function oneVOneStatus(state: MatchmakeState): string {
+  if (state.status !== "queued") {
+    return "On te trouve un adversaire. Reste sur cette page.";
+  }
+  const count = state.progress?.count;
+  if (count == null || count <= 1) {
+    return "On te trouve un adversaire. Reste sur cette page.";
+  }
+  return `${count} joueurs en file. Pairing par classement en cours…`;
+}
+
+function multiStatus(state: MatchmakeState): string {
+  if (state.status !== "queued") {
+    return "On accumule 3 à 6 joueurs. Reste sur cette page.";
+  }
+  const count = state.progress?.count ?? 1;
+  const eta = state.progress?.etaSeconds;
+  const label = `${count}/${MULTIPLAYER_MAX_SEATS} joueurs en attente`;
+  if (count < 3) {
+    return `${label} — il faut au moins 3 pour démarrer.`;
+  }
+  if (eta == null) {
+    return label;
+  }
+  if (eta <= 1) {
+    return `${label} — démarrage imminent…`;
+  }
+  return `${label} — démarre dans ${eta}s`;
+}
 
 type Mode = "menu" | "private-name";
 
@@ -130,7 +164,7 @@ export function HomePage() {
           label={queuedFor === "1v1" ? "Recherche en cours…" : "1 contre 1"}
           sub={
             queuedFor === "1v1"
-              ? "On te trouve un adversaire. Reste sur cette page."
+              ? oneVOneStatus(matchmake.state)
               : "Trouve un adversaire pour un duel."
           }
           onClick={() =>
@@ -146,7 +180,7 @@ export function HomePage() {
           label={queuedFor === "multi" ? "Recherche en cours…" : "Multijoueur"}
           sub={
             queuedFor === "multi"
-              ? "On accumule 3 à 6 joueurs. Reste sur cette page."
+              ? multiStatus(matchmake.state)
               : "3 à 6 joueurs. La partie démarre dès qu'assez de monde est là."
           }
           onClick={() =>

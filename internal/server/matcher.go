@@ -35,17 +35,30 @@ func (s *Store) CancelMatchmake(ctx context.Context, userID string) error {
 	return s.repo.CancelMatchmake(ctx, userID)
 }
 
+// QueueUpdate is published by the matcher to each user still in queue
+// after a tick. Count is the bucket's current size; ETASeconds is the
+// remaining wait before a multi room of that size auto-starts (nil for
+// 1v1 or when the bucket is below quorum and has no deterministic ETA).
+type QueueUpdate struct {
+	UserID     string
+	Players    int
+	Mode       string
+	Count      int
+	ETASeconds *int
+}
+
 // StartMatcher launches the background goroutine that runs one
 // matcher pass every matcherTickInterval. Returns immediately; the
 // ticker stops when ctx is cancelled. Each match is reported to
-// onMatched, which is responsible for fanning a 'match_found' event
-// to each seated user via the lobby channel.
+// onMatched (fans match_found over lobby WS); each post-tick queue
+// snapshot is reported to onQueueUpdate (fans queue_update so waiting
+// users see a live count + ETA on the matchmaking screen).
 //
 // Every pod calls StartMatcher independently: SKIP LOCKED on the
 // queue rows means concurrent ticks pick disjoint batches without
 // any coordination. There is no "the matcher" — there are N matchers,
 // each happily doing their share.
-func (s *Store) StartMatcher(ctx context.Context, log *slog.Logger, onMatched func([]MatchedSeat)) {
+func (s *Store) StartMatcher(ctx context.Context, log *slog.Logger, onMatched func([]MatchedSeat), onQueueUpdate func([]QueueUpdate)) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -57,7 +70,7 @@ func (s *Store) StartMatcher(ctx context.Context, log *slog.Logger, onMatched fu
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.matcherTick(ctx, log, onMatched)
+				s.matcherTick(ctx, log, onMatched, onQueueUpdate)
 			}
 		}
 	}()
@@ -65,8 +78,11 @@ func (s *Store) StartMatcher(ctx context.Context, log *slog.Logger, onMatched fu
 
 // matcherTick runs one round of matching across every supported player
 // count. Errors on one count don't prevent the others from running —
-// we want a transient hiccup on 1v1 to leave multi unaffected.
-func (s *Store) matcherTick(ctx context.Context, log *slog.Logger, onMatched func([]MatchedSeat)) {
+// we want a transient hiccup on 1v1 to leave multi unaffected. After
+// each tick we re-read the bucket (non-locking) to fan a queue_update
+// event to anyone still waiting; pairing and notifying are decoupled
+// so a slow snapshot read can't delay the match itself.
+func (s *Store) matcherTick(ctx context.Context, log *slog.Logger, onMatched func([]MatchedSeat), onQueueUpdate func([]QueueUpdate)) {
 	for _, p := range matcherPlayerCounts {
 		mode := RatingModeMulti
 		if p == 2 {
@@ -87,7 +103,51 @@ func (s *Store) matcherTick(ctx context.Context, log *slog.Logger, onMatched fun
 		if len(seats) > 0 && onMatched != nil {
 			onMatched(seats)
 		}
+		if onQueueUpdate != nil {
+			snap, snapErr := s.repo.MatchmakeQueueSnapshot(ctx, players, mode)
+			if snapErr != nil {
+				log.Warn("matcher snapshot", "players", players, "err", snapErr)
+				continue
+			}
+			if updates := buildQueueUpdates(snap, players, mode, time.Now()); len(updates) > 0 {
+				onQueueUpdate(updates)
+			}
+		}
 	}
+}
+
+// buildQueueUpdates turns a bucket snapshot into one QueueUpdate per
+// user. For multi, ETA is the remaining wait before the room of the
+// current size auto-starts (clamped to 0); for 1v1 ETA stays nil
+// (pairing depends on rating proximity, not a wall-clock countdown).
+// Anyone in an under-quorum multi bucket gets a nil ETA too — there's
+// nothing meaningful to display until at least minMultiSeats arrive.
+func buildQueueUpdates(snap []QueuedUser, players int, mode string, now time.Time) []QueueUpdate {
+	count := len(snap)
+	if count == 0 {
+		return nil
+	}
+	var eta *int
+	if mode == RatingModeMulti && count >= minMultiSeats {
+		threshold := multiWaitThreshold(count)
+		remaining := threshold - now.Sub(snap[0].EnqueuedAt)
+		if remaining < 0 {
+			remaining = 0
+		}
+		secs := int(remaining.Seconds())
+		eta = &secs
+	}
+	out := make([]QueueUpdate, 0, count)
+	for _, u := range snap {
+		out = append(out, QueueUpdate{
+			UserID:     u.UserID,
+			Players:    players,
+			Mode:       mode,
+			Count:      count,
+			ETASeconds: eta,
+		})
+	}
+	return out
 }
 
 // pair1v1 greedily pairs users by rating proximity, widening each

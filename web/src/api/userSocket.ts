@@ -20,7 +20,8 @@
 export type LobbyEventType =
   | "match_found"
   | "invite_received"
-  | "invite_cancelled";
+  | "invite_cancelled"
+  | "queue_update";
 
 export interface MatchFoundPayload {
   gameId: string;
@@ -36,10 +37,21 @@ export interface InvitePayload {
   fromUserId?: string;
 }
 
+export interface QueueUpdatePayload {
+  /** Player-count bucket the caller is queued in (2 for 1v1, 6 for multi). */
+  players: number;
+  /** Number of users currently waiting in that bucket. */
+  count: number;
+  /** Seconds until a multi room of the current size auto-starts. Omitted
+   *  for 1v1 and for under-quorum multi (no deterministic countdown). */
+  etaSeconds?: number;
+}
+
 export type LobbyEvent =
   | { type: "match_found"; payload: MatchFoundPayload }
   | { type: "invite_received"; payload: InvitePayload }
-  | { type: "invite_cancelled"; payload: InvitePayload };
+  | { type: "invite_cancelled"; payload: InvitePayload }
+  | { type: "queue_update"; payload: QueueUpdatePayload };
 
 type Listener = (ev: LobbyEvent) => void;
 

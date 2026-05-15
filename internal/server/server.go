@@ -444,6 +444,24 @@ func (s *Server) inviteSeat(w http.ResponseWriter, r *http.Request) {
 	dto := toGameDTO(rec)
 	rec.Unlock()
 	s.events.Publish(gameID, eventState(dto))
+	// Cross-page notification: the invitee may not be on this game's
+	// page yet, so we push to their per-user lobby WS. The toast UI
+	// turns this into a "X t'invite à jouer" banner that navigates to
+	// the game on click. FromName is the host's display name when we
+	// can identify them, empty for anonymous hosts (the URL is the
+	// shared secret in private games, no auth required to invite).
+	fromName := ""
+	fromUserID := ""
+	if u, ok := userFromContext(r.Context()); ok {
+		fromUserID = u.ID
+		fromName = s.displayNameFor(r.Context(), u)
+	}
+	s.publishLobby(req.UserID, LobbyEventInviteReceived, LobbyInvitePayload{
+		GameID:     gameID,
+		SeatIndex:  seatIdx,
+		FromName:   fromName,
+		FromUserID: fromUserID,
+	})
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -459,6 +477,19 @@ func (s *Server) cancelSeatInvite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid seat index")
 		return
 	}
+	// Grab the invitee userID before the store clears it, so the
+	// invite_cancelled event lands on the right inbox.
+	inviteeID := ""
+	if rec, ok, err := s.store.Get(r.Context(), gameID); err == nil && ok {
+		rec.Lock()
+		if seatIdx >= 0 && seatIdx < len(rec.Seats) {
+			seat := rec.Seats[seatIdx]
+			if !seat.Occupied && !seat.IsBot {
+				inviteeID = seat.UserID
+			}
+		}
+		rec.Unlock()
+	}
 	rec, err := s.store.CancelSeatInvite(r.Context(), gameID, seatIdx)
 	if err != nil {
 		writeError(w, statusForInviteSeatError(err), err.Error())
@@ -468,6 +499,12 @@ func (s *Server) cancelSeatInvite(w http.ResponseWriter, r *http.Request) {
 	dto := toGameDTO(rec)
 	rec.Unlock()
 	s.events.Publish(gameID, eventState(dto))
+	if inviteeID != "" {
+		s.publishLobby(inviteeID, LobbyEventInviteCancelled, LobbyInvitePayload{
+			GameID:    gameID,
+			SeatIndex: seatIdx,
+		})
+	}
 	writeJSON(w, http.StatusOK, dto)
 }
 

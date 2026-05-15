@@ -45,12 +45,39 @@ type LobbyMatchPayload struct {
 	Name      string `json:"name"`
 }
 
-// lobbyEnvelope is the JSON shape sent through ChannelLobby. UserID
-// is the routing key the LobbyHub keys on; payload is forwarded as
-// the WS event payload.
+// LobbyInvitePayload is sent to a user when someone reserves a seat for
+// them in a private game (invite_received) or when that reservation is
+// withdrawn (invite_cancelled). The client turns the former into a
+// global toast — clicking it navigates the invitee to the game page
+// where the existing in-page Accepter/Refuser flow takes over.
+type LobbyInvitePayload struct {
+	GameID    string `json:"gameId"`
+	SeatIndex int    `json:"seatIndex"`
+	// FromName / FromUserID identify the host so the toast can render
+	// "Alice t'invite à jouer" rather than just "someone". Empty when
+	// the source user can't be identified (e.g. anonymous host).
+	FromName   string `json:"fromName,omitempty"`
+	FromUserID string `json:"fromUserId,omitempty"`
+}
+
+// Lobby event type discriminators. Kept as constants so backplane
+// envelopes and the WS write side use the exact same strings.
+const (
+	LobbyEventMatchFound      = "match_found"
+	LobbyEventInviteReceived  = "invite_received"
+	LobbyEventInviteCancelled = "invite_cancelled"
+)
+
+// lobbyEnvelope is the JSON shape sent through ChannelLobby. UserID is
+// the routing key the LobbyHub keys on; Type discriminates between
+// match_found / invite_received / invite_cancelled; Payload is the
+// event-specific body that the WS will forward verbatim. We use
+// RawMessage on the receiving side so a payload shape change doesn't
+// require updating intermediaries.
 type lobbyEnvelope struct {
-	UserID  string            `json:"userId"`
-	Payload LobbyMatchPayload `json:"payload"`
+	UserID  string          `json:"userId"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
 }
 
 // fanMatched is the matcher's onMatched callback. For every matched
@@ -60,31 +87,48 @@ type lobbyEnvelope struct {
 // game regardless, and on next lobby WS open they'll see the dangling
 // state cleaned up (a refresh / page nav will hit the new game).
 func (s *Server) fanMatched(seats []MatchedSeat) {
+	for _, seat := range seats {
+		s.publishLobby(seat.UserID, LobbyEventMatchFound, LobbyMatchPayload{
+			GameID:    seat.GameID,
+			Token:     seat.Token,
+			SeatIndex: seat.SeatIndex,
+			Name:      seat.Name,
+		})
+	}
+}
+
+// publishLobby fans an arbitrary lobby event to one user. Routes via
+// the backplane when present (multi-pod NOTIFY) or directly through the
+// in-process LobbyHub otherwise (single-pod dev / test setups).
+func (s *Server) publishLobby(userID, eventType string, payload any) {
+	if userID == "" {
+		return
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		s.log.Error("lobby publish: marshal payload", "type", eventType, "err", err)
+		return
+	}
 	if s.backplane == nil {
-		// No backplane in single-process / no-DB mode. Deliver locally
-		// so a dev with one server + one client can still test the flow.
-		for _, seat := range seats {
-			s.lobby.Deliver(seat.UserID, Event{
-				Type:    "match_found",
-				Payload: LobbyMatchPayload{GameID: seat.GameID, Token: seat.Token, SeatIndex: seat.SeatIndex, Name: seat.Name},
-			})
-		}
+		// Single-process: skip the wire format and go straight to the
+		// hub. Wrapping `body` back into json.RawMessage keeps the
+		// type symmetric with the multi-pod path.
+		s.lobby.Deliver(userID, Event{Type: eventType, Payload: json.RawMessage(body)})
+		return
+	}
+	env, err := json.Marshal(lobbyEnvelope{
+		UserID:  userID,
+		Type:    eventType,
+		Payload: body,
+	})
+	if err != nil {
+		s.log.Error("lobby publish: marshal envelope", "type", eventType, "err", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
-	for _, seat := range seats {
-		env, err := json.Marshal(lobbyEnvelope{
-			UserID:  seat.UserID,
-			Payload: LobbyMatchPayload{GameID: seat.GameID, Token: seat.Token, SeatIndex: seat.SeatIndex, Name: seat.Name},
-		})
-		if err != nil {
-			s.log.Error("lobby fan: marshal", "err", err)
-			continue
-		}
-		if err := s.backplane.Publish(ctx, ChannelLobby, env); err != nil {
-			s.log.Error("lobby fan: notify", "user", seat.UserID, "err", err)
-		}
+	if err := s.backplane.Publish(ctx, ChannelLobby, env); err != nil {
+		s.log.Error("lobby publish: notify", "user", userID, "type", eventType, "err", err)
 	}
 }
 
@@ -97,10 +141,17 @@ func (s *Server) handleLobbyNotif(payload []byte) {
 		s.log.Warn("lobby notif: bad envelope", "err", err)
 		return
 	}
+	if env.Type == "" {
+		// Backwards-compat path: older envelopes that only carried a
+		// LobbyMatchPayload with no type field. The pod that produced
+		// it has already been upgraded out by the time this code ships,
+		// but we don't want a half-deployed cluster to drop matches.
+		env.Type = LobbyEventMatchFound
+	}
 	if !s.lobby.HasSubs(env.UserID) {
 		return
 	}
-	s.lobby.Deliver(env.UserID, Event{Type: "match_found", Payload: env.Payload})
+	s.lobby.Deliver(env.UserID, Event{Type: env.Type, Payload: env.Payload})
 }
 
 // enqueueMatchmake puts the caller in the matchmaking queue. The
@@ -158,17 +209,18 @@ func (s *Server) cancelMatchmake(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// wsLobby serves the user's lobby WebSocket. The connection stays
-// open while the user is in queue; when the matcher pairs them, a
-// "match_found" event flows down and the client navigates to the
-// freshly-created game.
+// wsLobby serves the user's persistent per-user WebSocket. The
+// connection opens at sign-in and stays open across pages, carrying
+// every cross-page notification: match_found from the matchmaker,
+// invite_received / invite_cancelled from the seat-invite flow.
 //
-// On any close (matched, cancelled, navigated away), we call
-// CancelMatchmake. After a successful match the queue row is already
-// gone (the matcher DELETEd it in its tx), so the call is a no-op —
-// but it's the safety net for "user closed their tab while still in
-// queue", which would otherwise leave a stuck row until the future
-// cleanup job runs.
+// We deliberately do NOT cancel a pending matchmaking ticket on close
+// any more: with the socket persistent, "close" usually means a
+// network blip rather than "user gave up". The matchmake hook calls
+// the HTTP cancel endpoint explicitly when the user clicks Annuler or
+// unmounts the matchmaking UI; orphaned queue rows are caught by the
+// next matcher tick (it locks rows then drops them on a successful
+// match) and, in the rare missed case, the periodic stale cleaner.
 func (s *Server) wsLobby(w http.ResponseWriter, r *http.Request) {
 	u := requireUser(w, r)
 	if u == nil {
@@ -190,15 +242,6 @@ func (s *Server) wsLobby(w http.ResponseWriter, r *http.Request) {
 
 	sub := s.lobby.Subscribe(u.ID)
 	defer s.lobby.Unsubscribe(u.ID, sub)
-	// Best-effort cleanup. If the user navigated away with a pending
-	// ticket, this drops it so the next tick doesn't try to pair a
-	// phantom user. Use Background — we don't want the request ctx
-	// (already cancelled by the close) to abort the cleanup query.
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
-		defer cancel()
-		_ = s.store.CancelMatchmake(ctx, u.ID)
-	}()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()

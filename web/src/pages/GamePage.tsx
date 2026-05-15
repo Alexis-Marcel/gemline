@@ -75,12 +75,18 @@ export function GamePage() {
     Array<{ q: number; r: number; color: Color; key: string }>
   >([]);
 
-  // Prefer the most recent snapshot from either the WS stream or a local
-  // mutation (e.g. our own move) so the UI never appears stale.
+  // Pick the freshest snapshot. localGame only beats liveGame when it
+  // has strictly more moves — i.e. when our optimistic mutation (our
+  // own postMove) hasn't been confirmed by the WS state event yet.
+  // On ties we MUST defer to liveGame: many server-side transitions
+  // (waiting → playing on AllSeated, draw offers, seat invitations,
+  // rematch state, etc.) change the DTO without bumping moveCount,
+  // and a `>=` here would let a stale localGame mask those updates
+  // until the user refreshed.
   const game = useMemo(() => {
     if (!localGame) return liveGame;
     if (!liveGame) return localGame;
-    return localGame.moveCount >= liveGame.moveCount ? localGame : liveGame;
+    return localGame.moveCount > liveGame.moveCount ? localGame : liveGame;
   }, [liveGame, localGame]);
 
   const creds = useMemo(() => loadCredentials(id), [id, game]);
@@ -617,7 +623,12 @@ export function GamePage() {
 
           {game.status === "waiting" &&
             game.visibility === "private" &&
-            creds && (
+            creds &&
+            creds.seatIndex === 0 && (
+              // Host-only: the creator (seat 0) is the single source of
+              // "start now" decisions. Guests just wait; the server
+              // enforces the same rule with ErrNotHost, this guard is
+              // for affordance — don't dangle a button that 403s.
               <StartButton
                 game={game}
                 onStart={async () => {

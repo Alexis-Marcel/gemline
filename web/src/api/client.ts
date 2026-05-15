@@ -9,7 +9,6 @@ import type {
   Profile,
   ProfileSearchEntry,
   PublicProfile,
-  RematchResponse,
   Replay,
   UserGame,
   UserStats,
@@ -162,9 +161,37 @@ export const api = {
     });
   },
 
-  rematch(id: string) {
-    return request<RematchResponse>(`/api/games/${id}/rematch`, {
+  // declineSeatInvite is the invitee-side refusal. Auth via JWT (the
+  // invitee doesn't hold a seat token yet); the server checks that the
+  // caller is the invited userID. To *accept* an invitation, the
+  // invitee calls joinGame — pickSeatForUser routes them to the
+  // reserved seat automatically.
+  declineSeatInvite(id: string, seatIndex: number) {
+    return request<Game>(`/api/games/${id}/seats/${seatIndex}/invite/decline`, {
       method: "POST",
+    });
+  },
+
+  // offerRematch is the propose-or-accept call. The first caller
+  // creates the offer; each subsequent caller adds their seat to the
+  // acceptance set. When every needed human seat has accepted, the new
+  // game is created and the returned DTO carries rematchGameId — the
+  // frontend uses that as the redirect signal. Idempotent: re-clicking
+  // by an already-accepted player is a no-op success.
+  offerRematch(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/rematch/offer`, {
+      method: "POST",
+      playerToken,
+    });
+  },
+
+  // declineRematch clears any pending rematch offer — either the
+  // proposer cancels or another player refuses, the outcome is the
+  // same: offer disappears.
+  declineRematch(id: string, playerToken: string) {
+    return request<Game>(`/api/games/${id}/rematch/decline`, {
+      method: "POST",
+      playerToken,
     });
   },
 

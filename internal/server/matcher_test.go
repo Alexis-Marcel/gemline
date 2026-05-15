@@ -121,55 +121,97 @@ func TestPair1v1_OnceMatchedNotReusedInSameTick(t *testing.T) {
 	}
 }
 
-func TestPairMulti_NotEnoughUsers(t *testing.T) {
-	qs := []QueuedUser{{UserID: "a"}, {UserID: "b"}}
-	if got := pairMulti(qs, 4); len(got) != 0 {
-		t.Fatalf("2 users for a 4-player game: want no group, got %+v", got)
+// pairMulti now decides:
+//   - below quorum (<3) → wait
+//   - full or over (≥players) → immediate group of `players`
+//   - in between → wait until oldest queuer has aged past threshold(N)
+//
+// The tests below pin each branch.
+
+func now0() time.Time { return time.Unix(0, 0).UTC() }
+
+func queued(now time.Time, ids ...string) []QueuedUser {
+	out := make([]QueuedUser, len(ids))
+	for i, id := range ids {
+		out[i] = QueuedUser{UserID: id, EnqueuedAt: now}
+	}
+	return out
+}
+
+func TestPairMulti_BelowQuorumWaits(t *testing.T) {
+	qs := queued(now0(), "a", "b")
+	if got := pairMulti(qs, 6, now0().Add(time.Hour)); len(got) != 0 {
+		t.Fatalf("2 users with quorum=3: no group should form even after long wait, got %+v", got)
 	}
 }
 
-func TestPairMulti_ExactlyOneGroup(t *testing.T) {
-	qs := []QueuedUser{{UserID: "a"}, {UserID: "b"}, {UserID: "c"}, {UserID: "d"}}
-	got := pairMulti(qs, 4)
-	if len(got) != 1 || len(got[0]) != 4 {
-		t.Fatalf("want exactly one group of 4, got %+v", got)
+func TestPairMulti_FullQueueStartsImmediately(t *testing.T) {
+	qs := queued(now0(), "a", "b", "c", "d", "e", "f")
+	got := pairMulti(qs, 6, now0())
+	if len(got) != 1 || len(got[0]) != 6 {
+		t.Fatalf("6 users / players=6: want immediate group of 6, got %+v", got)
 	}
 }
 
-func TestPairMulti_MultipleGroups(t *testing.T) {
-	qs := []QueuedUser{
-		{UserID: "a"}, {UserID: "b"}, {UserID: "c"},
-		{UserID: "d"}, {UserID: "e"}, {UserID: "f"},
-	}
-	got := pairMulti(qs, 3)
-	if len(got) != 2 || len(got[0]) != 3 || len(got[1]) != 3 {
-		t.Fatalf("6 users / players=3: want 2 groups of 3, got %+v", got)
+func TestPairMulti_OverflowCapsAtPlayers(t *testing.T) {
+	// pairMulti never returns more than `players` per group. With 8 in
+	// queue and players=6, the first 6 leave together; the remaining 2
+	// stay queued (below quorum next tick).
+	qs := queued(now0(), "a", "b", "c", "d", "e", "f", "g", "h")
+	got := pairMulti(qs, 6, now0())
+	if len(got) != 1 || len(got[0]) != 6 {
+		t.Fatalf("8 users / players=6: want one group of 6, got %+v", got)
 	}
 }
 
-func TestPairMulti_LeftoversStayInQueue(t *testing.T) {
-	qs := []QueuedUser{
-		{UserID: "a"}, {UserID: "b"}, {UserID: "c"}, {UserID: "d"},
+func TestPairMulti_ThreePlayersWaitUntilThreshold(t *testing.T) {
+	enq := now0()
+	qs := queued(enq, "a", "b", "c")
+	// Below threshold: 3 users at quorum need 20s wait.
+	if got := pairMulti(qs, 6, enq.Add(19*time.Second)); len(got) != 0 {
+		t.Fatalf("3 users at 19s: still below 20s threshold, got %+v", got)
 	}
-	got := pairMulti(qs, 3)
+	// At threshold: group forms with exactly 3.
+	got := pairMulti(qs, 6, enq.Add(20*time.Second))
 	if len(got) != 1 || len(got[0]) != 3 {
-		t.Fatalf("4 users / players=3: want 1 group of 3 (d left over), got %+v", got)
-	}
-	for _, u := range got[0] {
-		if u.UserID == "d" {
-			t.Fatalf("d should not be in the first group, got %+v", got)
-		}
+		t.Fatalf("3 users at 20s: want group of 3, got %+v", got)
 	}
 }
 
-func TestPairMulti_FIFOOrder(t *testing.T) {
-	// Caller passes rows sorted by enqueued_at ASC (the SQL does it).
-	// pairMulti should preserve that order in the resulting groups.
-	qs := []QueuedUser{
-		{UserID: "a"}, {UserID: "b"}, {UserID: "c"},
+func TestPairMulti_FivePlayersWaitFiveSeconds(t *testing.T) {
+	enq := now0()
+	qs := queued(enq, "a", "b", "c", "d", "e")
+	if got := pairMulti(qs, 6, enq.Add(4*time.Second)); len(got) != 0 {
+		t.Fatalf("5 users at 4s: still below 5s threshold, got %+v", got)
 	}
-	got := pairMulti(qs, 3)
+	got := pairMulti(qs, 6, enq.Add(5*time.Second))
+	if len(got) != 1 || len(got[0]) != 5 {
+		t.Fatalf("5 users at 5s: want group of 5, got %+v", got)
+	}
+}
+
+func TestPairMulti_FIFOOrderPreserved(t *testing.T) {
+	// SQL feeds rows ORDER BY enqueued_at ASC; pairMulti must keep that
+	// order so seat indices are stable.
+	enq := now0()
+	qs := queued(enq, "a", "b", "c")
+	got := pairMulti(qs, 6, enq.Add(30*time.Second))
 	if got[0][0].UserID != "a" || got[0][1].UserID != "b" || got[0][2].UserID != "c" {
 		t.Fatalf("want FIFO order a,b,c, got %+v", got[0])
+	}
+}
+
+func TestPairMulti_AgeMeasuredFromOldest(t *testing.T) {
+	// "a" enqueued at T=0, "b" at T=15s, "c" at T=18s. At T=20s, oldest
+	// (a) has waited 20s. With 3 users the threshold is 20s → start.
+	a := now0()
+	qs := []QueuedUser{
+		{UserID: "a", EnqueuedAt: a},
+		{UserID: "b", EnqueuedAt: a.Add(15 * time.Second)},
+		{UserID: "c", EnqueuedAt: a.Add(18 * time.Second)},
+	}
+	got := pairMulti(qs, 6, a.Add(20*time.Second))
+	if len(got) != 1 || len(got[0]) != 3 {
+		t.Fatalf("3 users with oldest aged 20s: want group of 3, got %+v", got)
 	}
 }

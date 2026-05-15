@@ -73,49 +73,85 @@ func TestCreateGameRejectsAnonymousWithoutName(t *testing.T) {
 	_ = createGameWithBody(t, ts, `{"players":2}`, http.StatusBadRequest)
 }
 
-func TestRematchRequiresFinishedGame(t *testing.T) {
+func TestRematchOfferRequiresFinishedGame(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	g := createGame(t, ts, 2)
-	resp, err := http.Post(ts.URL+"/api/games/"+g.ID+"/rematch", "application/json", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("want 409 on rematch of waiting game, got %d", resp.StatusCode)
-	}
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	// Game still waiting → /rematch/offer must 409 even with a valid token.
+	_ = postRematchOffer(t, ts, g.ID, j1.Token, http.StatusConflict)
 }
 
-func TestRematchIsIdempotent(t *testing.T) {
+func TestRematchOfferUnanimous(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	// Use a private game so we can still anonymous-join; public games now
-	// require auth, which would force this test to go through the X-Test-
-	// User-ID back door for both players. The behaviour we care about
-	// here (rematch idempotency + visibility preservation) is the same.
+	// Private 2-player so we can join anonymously. The acceptance flow is
+	// what we're testing; visibility carries through identically to before.
 	g := createGame(t, ts, 2)
 	j1 := joinGame(t, ts, g.ID, "Alice", nil)
 	j2 := joinGame(t, ts, g.ID, "Bob", nil)
 	finishGame(t, ts, g.ID, j1.Token, j2.Token)
 
-	r1 := postRematch(t, ts, g.ID, http.StatusCreated)
-	r2 := postRematch(t, ts, g.ID, http.StatusCreated)
-	if r1.GameID != r2.GameID {
-		t.Fatalf("rematch must be idempotent; got %s then %s", r1.GameID, r2.GameID)
+	// Alice proposes — offer is created, no rematch game yet.
+	d1 := postRematchOffer(t, ts, g.ID, j1.Token, http.StatusOK)
+	if d1.RematchGameID != "" {
+		t.Fatalf("rematch should not exist yet after one acceptance, got %q", d1.RematchGameID)
 	}
-	if r1.Game.Status != StatusWaiting {
-		t.Fatalf("rematch should start in waiting, got %s", r1.Game.Status)
+	if d1.RematchOffer == nil || len(d1.RematchOffer.PendingSeats) != 1 || d1.RematchOffer.PendingSeats[0] != 1 {
+		t.Fatalf("want Bob (seat 1) pending after Alice accepts, got %#v", d1.RematchOffer)
 	}
-	if len(r1.Game.Seats) != len(g.Seats) {
-		t.Fatalf("rematch player count must match original")
+	// Alice clicking again is idempotent: still pending Bob.
+	d1b := postRematchOffer(t, ts, g.ID, j1.Token, http.StatusOK)
+	if d1b.RematchGameID != "" {
+		t.Fatalf("re-accept by Alice must not create rematch, got %q", d1b.RematchGameID)
 	}
-	if r1.Game.Visibility != g.Visibility {
-		t.Fatalf("rematch visibility must match original (got %q vs %q)", r1.Game.Visibility, g.Visibility)
+	// Bob accepts → rematch is created. The response is the original game's
+	// DTO with RematchGameID populated; the new game has its own ID.
+	d2 := postRematchOffer(t, ts, g.ID, j2.Token, http.StatusOK)
+	if d2.RematchGameID == "" {
+		t.Fatalf("rematch must be created once both seats have accepted")
 	}
-	if r1.GameID == g.ID {
+	if d2.RematchGameID == g.ID {
 		t.Fatalf("rematch must spawn a *new* game, got the original ID back")
 	}
+	// Subsequent calls remain successful and resolve to the same rematch.
+	d3 := postRematchOffer(t, ts, g.ID, j1.Token, http.StatusOK)
+	if d3.RematchGameID != d2.RematchGameID {
+		t.Fatalf("rematch ID must stay stable on repeat accept; got %s then %s", d2.RematchGameID, d3.RematchGameID)
+	}
+	// Sanity: the rematch game itself exists, is waiting, and matches the
+	// original's player count + visibility.
+	rematch := getGameViaHTTP(t, ts, d2.RematchGameID)
+	if rematch.Status != StatusWaiting {
+		t.Fatalf("rematch should start in waiting, got %s", rematch.Status)
+	}
+	if len(rematch.Seats) != len(g.Seats) {
+		t.Fatalf("rematch player count must match original")
+	}
+	if rematch.Visibility != g.Visibility {
+		t.Fatalf("rematch visibility must match original (got %q vs %q)", rematch.Visibility, g.Visibility)
+	}
+}
+
+func TestRematchOfferDecline(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	j2 := joinGame(t, ts, g.ID, "Bob", nil)
+	finishGame(t, ts, g.ID, j1.Token, j2.Token)
+
+	// Alice offers, then Bob declines → offer cleared, no rematch.
+	_ = postRematchOffer(t, ts, g.ID, j1.Token, http.StatusOK)
+	d := postRematchDecline(t, ts, g.ID, j2.Token, http.StatusOK)
+	if d.RematchOffer != nil {
+		t.Fatalf("offer should be cleared after decline, got %#v", d.RematchOffer)
+	}
+	if d.RematchGameID != "" {
+		t.Fatalf("decline must not create a rematch, got %q", d.RematchGameID)
+	}
+	// Declining when no offer is pending → 409.
+	_ = postRematchDecline(t, ts, g.ID, j1.Token, http.StatusConflict)
 }
 
 func TestJoinAndMove(t *testing.T) {
@@ -1175,25 +1211,39 @@ func postMatchmake(t *testing.T, ts *httptest.Server, players int, userID string
 	return j
 }
 
-func postRematch(t *testing.T, ts *httptest.Server, id string, wantStatus int) rematchResponse {
+func postRematchOffer(t *testing.T, ts *httptest.Server, id, token string, wantStatus int) gameDTO {
 	t.Helper()
-	resp, err := http.Post(ts.URL+"/api/games/"+id+"/rematch", "application/json", nil)
+	return postWithToken(t, ts, "/api/games/"+id+"/rematch/offer", token, wantStatus)
+}
+
+func postRematchDecline(t *testing.T, ts *httptest.Server, id, token string, wantStatus int) gameDTO {
+	t.Helper()
+	return postWithToken(t, ts, "/api/games/"+id+"/rematch/decline", token, wantStatus)
+}
+
+func postWithToken(t *testing.T, ts *httptest.Server, path, token string, wantStatus int) gameDTO {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+path, nil)
+	if token != "" {
+		req.Header.Set("X-Player-Token", token)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != wantStatus {
 		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("rematch: want=%d got=%d body=%s", wantStatus, resp.StatusCode, b)
+		t.Fatalf("%s: want=%d got=%d body=%s", path, wantStatus, resp.StatusCode, b)
 	}
-	if wantStatus != http.StatusCreated {
-		return rematchResponse{}
+	if wantStatus != http.StatusOK {
+		return gameDTO{}
 	}
-	var r rematchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+	var g gameDTO
+	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
 		t.Fatal(err)
 	}
-	return r
+	return g
 }
 
 // finishGame plays an 11-move sequence in `gameID` that lands a 6-alignment

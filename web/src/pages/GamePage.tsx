@@ -17,6 +17,7 @@ import { ChatPanel } from "../components/ChatPanel";
 import { GameEndModal } from "../components/GameEndModal";
 import { SeatInviteModal } from "../components/SeatInviteModal";
 import { Objectives } from "../components/Objectives";
+import { RematchControls } from "../components/RematchControls";
 import { ReplayControls } from "../components/ReplayControls";
 import { Scoreboard } from "../components/Scoreboard";
 import { UserNav } from "../components/UserNav";
@@ -253,16 +254,45 @@ export function GamePage() {
     navigate("/");
   }
 
-  // If a rematch was created for this game (either by us or someone else),
-  // the server exposes the linked ID on the snapshot. Offer a direct jump.
-  const rematchLink = game?.rematchGameId ?? null;
+  // Seat index of the local user in this finished game, derived from
+  // saved credentials. null means "spectator" — the rematch controls
+  // render in read-only mode for these viewers.
+  const mySeatIndex = creds?.seatIndex ?? null;
 
-  async function handleRematch() {
+  function handleGoToRematch() {
+    if (!game?.rematchGameId) return;
+    navigate(`/game/${game.rematchGameId}`);
+  }
+
+  // handleOfferRematch is the "Propose" / "Accept" call — the server
+  // disambiguates by whether an offer is already pending. When this
+  // call is the *last* acceptance, the response carries rematchGameId
+  // and we navigate straight in (the other accepted players see the
+  // link via the WS state event and click "Aller à la revanche").
+  async function handleOfferRematch() {
+    if (!creds) return;
     setRematching(true);
     setError(null);
     try {
-      const res = await api.rematch(id);
-      navigate(`/game/${res.gameId}`);
+      const g = await api.offerRematch(id, creds.token);
+      setLocalGame(g);
+      if (g.rematchGameId) {
+        navigate(`/game/${g.rematchGameId}`);
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Erreur revanche");
+    } finally {
+      setRematching(false);
+    }
+  }
+
+  async function handleDeclineRematch() {
+    if (!creds) return;
+    setRematching(true);
+    setError(null);
+    try {
+      const g = await api.declineRematch(id, creds.token);
+      setLocalGame(g);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Erreur revanche");
     } finally {
@@ -467,6 +497,7 @@ export function GamePage() {
           <Scoreboard
             game={game}
             mySeatIndex={creds?.seatIndex ?? null}
+            myUserId={user?.id ?? null}
             presence={presence}
             ratings={ratings}
             onAddBot={
@@ -512,6 +543,29 @@ export function GamePage() {
                     try {
                       const g = await api.cancelSeatInvite(id, seatIndex);
                       setLocalGame(g);
+                    } catch (err) {
+                      setError(err instanceof ApiError ? err.message : "Erreur invitation");
+                    }
+                  }
+                : undefined
+            }
+            onAcceptInvite={
+              // Invitee accepting their own reservation — goes through
+              // the standard join path; pickSeatForUser routes to the
+              // reserved seat. Only meaningful while waiting + I'm not
+              // already seated.
+              game.status === "waiting" && !creds
+                ? () => handleJoin(undefined)
+                : undefined
+            }
+            onDeclineInvite={
+              game.status === "waiting" && !creds && !!user
+                ? async (seatIndex) => {
+                    setError(null);
+                    try {
+                      const g = await api.declineSeatInvite(id, seatIndex);
+                      setLocalGame(g);
+                      navigate("/");
                     } catch (err) {
                       setError(err instanceof ApiError ? err.message : "Erreur invitation");
                     }
@@ -583,10 +637,10 @@ export function GamePage() {
           {game.status === "finished" && (
             // End-of-game action block. Always visible (modal or not)
             // so the player has direct access to "what's next" without
-            // having to re-open the modal: Nouvelle partie at the top
-            // when matchmaking is in scope, then Revanche + Quitter
-            // side-by-side. The Elo deltas live in the left Scoreboard
-            // — no need for a "Revoir le résultat" affordance here.
+            // having to re-open the modal. RematchControls renders the
+            // chess.com-style state machine (propose / waiting / accept
+            // or decline / go to rematch). The Elo deltas live in the
+            // left Scoreboard — no "Revoir le résultat" needed here.
             <div className="space-y-2">
               {onNewGame && (
                 <button
@@ -602,27 +656,21 @@ export function GamePage() {
                       : "Nouvelle partie"}
                 </button>
               )}
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={handleRematch}
-                  disabled={rematching}
-                  className="flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500 disabled:opacity-50"
-                >
-                  {rematching
-                    ? "Création…"
-                    : rematchLink
-                      ? "Aller à la revanche"
-                      : "Revanche"}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleLeave}
-                  className="flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500"
-                >
-                  Quitter
-                </button>
-              </div>
+              <RematchControls
+                game={game}
+                mySeatIndex={mySeatIndex}
+                busy={rematching}
+                onOffer={handleOfferRematch}
+                onDecline={handleDeclineRematch}
+                onGoToRematch={handleGoToRematch}
+              />
+              <button
+                type="button"
+                onClick={handleLeave}
+                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500"
+              >
+                Quitter
+              </button>
               {matchmakeBusy && (
                 <button
                   type="button"
@@ -677,11 +725,13 @@ export function GamePage() {
         <GameEndModal
           game={game}
           ratings={ratings}
-          rematchLink={rematchLink}
+          mySeatIndex={mySeatIndex}
           rematching={rematching}
           newGameBusy={newGameBusy}
           newGameBusyLabel={creatingNew ? "Création…" : matchmakeBusy ? "Recherche…" : null}
-          onRematch={handleRematch}
+          onOfferRematch={handleOfferRematch}
+          onDeclineRematch={handleDeclineRematch}
+          onGoToRematch={handleGoToRematch}
           onNewGame={
             onNewGame
               ? () => {

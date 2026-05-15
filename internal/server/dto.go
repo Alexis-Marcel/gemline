@@ -77,18 +77,27 @@ type gameDTO struct {
 	Visibility    Visibility `json:"visibility"`
 	RematchGameID string     `json:"rematchGameId,omitempty"`
 
+	// RematchOffer is set on a finished game while a rematch proposal is
+	// pending. Nil when no offer is active and once RematchGameID is set
+	// (the new game then takes precedence in the UI).
+	RematchOffer *rematchOfferDTO `json:"rematchOffer,omitempty"`
+
 	// DrawOfferBy is the seat index that currently has a draw offer
 	// pending, or -1 when no offer is active. Only meaningful while
 	// status == "playing".
 	DrawOfferBy int `json:"drawOfferBy"`
 }
 
-// rematchResponse is what POST /api/games/{id}/rematch returns: the new game's
-// full state, plus the new ID broken out so the frontend can navigate without
-// needing to crack open the game payload.
-type rematchResponse struct {
-	GameID string  `json:"gameId"`
-	Game   gameDTO `json:"game"`
+// rematchOfferDTO is the wire shape of a pending rematch proposal. The
+// arrays are seat indices in the *finished* game (not the rematch). Bots
+// never appear in either array — they're invisible to the acceptance flow.
+type rematchOfferDTO struct {
+	// AcceptedSeats lists human seats that have already accepted (including
+	// the proposer, who is just "first to accept").
+	AcceptedSeats []int `json:"acceptedSeats"`
+	// PendingSeats lists human seats whose acceptance is still required for
+	// the rematch to be created. Empty means the offer is about to resolve.
+	PendingSeats []int `json:"pendingSeats"`
 }
 
 type thresholdsDTO struct {
@@ -200,6 +209,7 @@ func toGameDTO(rec *GameRecord) gameDTO {
 		MoveCount:     len(s.History),
 		Visibility:    vis,
 		RematchGameID: rec.RematchGameID,
+		RematchOffer:  toRematchOfferDTO(rec),
 		DrawOfferBy:   rec.DrawOfferBy,
 		Thresholds: thresholdsDTO{
 			CapturePairsWin: thr.CapturePairsWin,
@@ -209,6 +219,33 @@ func toGameDTO(rec *GameRecord) gameDTO {
 			IncrementMs:     thr.IncrementMs,
 		},
 	}
+}
+
+// toRematchOfferDTO projects rec.RematchOffer onto the wire shape. Returns
+// nil when there's no offer or once a rematch game has been created (the
+// frontend reads rematchGameId in that case). Caller must hold rec's lock.
+func toRematchOfferDTO(rec *GameRecord) *rematchOfferDTO {
+	if rec.RematchOffer == nil || rec.RematchGameID != "" {
+		return nil
+	}
+	var accepted, pending []int
+	for i, st := range rec.Seats {
+		if !st.Occupied || st.IsBot {
+			continue
+		}
+		if rec.RematchOffer.AcceptedSeats[i] {
+			accepted = append(accepted, i)
+		} else {
+			pending = append(pending, i)
+		}
+	}
+	if accepted == nil {
+		accepted = []int{}
+	}
+	if pending == nil {
+		pending = []int{}
+	}
+	return &rematchOfferDTO{AcceptedSeats: accepted, PendingSeats: pending}
 }
 
 func toSeatDTO(s *Seat) seatDTO {

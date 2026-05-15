@@ -7,6 +7,10 @@ import { PlayerClock } from "./PlayerClock";
 interface ScoreboardProps {
   game: Game;
   mySeatIndex: number | null;
+  /** Supabase user id of the local viewer, or null if anonymous. Used to
+   *  detect "this seat's invitation is for me" so the Accept/Refuse
+   *  buttons render on the invitee's own row. */
+  myUserId: string | null;
   /** Per-seat presence flags pushed by the server (key = seatIndex). */
   presence?: Record<number, boolean>;
   /** Live ratings snapshot for the game. When ratings.rated is true,
@@ -24,10 +28,16 @@ interface ScoreboardProps {
   /** Invoked when the user clicks "+ Inviter" on an empty seat. Same
    *  conditions as onAddBot. */
   onInviteSeat?: (seatIndex: number) => void;
-  /** Invoked when the user clicks "× Annuler" on a seat that's
-   *  reserved-but-not-joined (invitation pending). Same conditions
-   *  as onAddBot. */
+  /** Invoked when the user (host) clicks "× Annuler" on a seat that's
+   *  reserved-but-not-joined. Same conditions as onAddBot. */
   onCancelInvite?: (seatIndex: number) => void;
+  /** Invoked when the invited user clicks "Accepter" on their own
+   *  reservation. The accept path goes through joinGame on the server
+   *  side (pickSeatForUser routes to the reserved seat). */
+  onAcceptInvite?: (seatIndex: number) => void;
+  /** Invoked when the invited user clicks "Refuser" on their own
+   *  reservation. Frees the seat. */
+  onDeclineInvite?: (seatIndex: number) => void;
 }
 
 const DISCONNECT_GRACE_MS = 60_000;
@@ -40,12 +50,15 @@ const DISCONNECT_GRACE_MS = 60_000;
 export function Scoreboard({
   game,
   mySeatIndex,
+  myUserId,
   presence = {},
   ratings,
   onAddBot,
   onRemoveBot,
   onInviteSeat,
   onCancelInvite,
+  onAcceptInvite,
+  onDeclineInvite,
 }: ScoreboardProps) {
   const t = game.thresholds;
   const clockEnabled = t.initialTimeMs > 0;
@@ -73,6 +86,10 @@ export function Scoreboard({
         // seat.
         const isInvited =
           !seat.occupied && !seat.isBot && !!seat.userId && seat.name !== "";
+        // "Cette invitation me concerne" — only the matching user sees
+        // Accepter / Refuser; everyone else sees the host's "× Annuler"
+        // affordance (when they hold the host capability).
+        const isMyInvite = isInvited && !!myUserId && seat.userId === myUserId;
         return (
           <li
             key={p.color}
@@ -171,7 +188,29 @@ export function Scoreboard({
                     </button>
                   </div>
                 )}
-                {waiting && isInvited && onCancelInvite && (
+                {waiting && isMyInvite && (onAcceptInvite || onDeclineInvite) && (
+                  <div className="mt-2 flex gap-2">
+                    {onAcceptInvite && (
+                      <button
+                        type="button"
+                        onClick={() => onAcceptInvite(seat.index)}
+                        className="rounded-md bg-amber-400 px-2 py-1 text-xs font-medium text-zinc-950 transition hover:bg-amber-300"
+                      >
+                        Accepter
+                      </button>
+                    )}
+                    {onDeclineInvite && (
+                      <button
+                        type="button"
+                        onClick={() => onDeclineInvite(seat.index)}
+                        className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-400 transition hover:border-red-400 hover:text-red-300"
+                      >
+                        Refuser
+                      </button>
+                    )}
+                  </div>
+                )}
+                {waiting && isInvited && !isMyInvite && onCancelInvite && (
                   <div className="mt-2">
                     <button
                       type="button"

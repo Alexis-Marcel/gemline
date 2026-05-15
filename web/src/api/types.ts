@@ -83,13 +83,18 @@ export interface Game {
   visibility: Visibility;
   /** ID of the rematch game spawned from this one, if any. */
   rematchGameId?: string;
+  /** Pending rematch proposal on a finished game. Undefined when no offer
+   *  is active or once rematchGameId is set (the new game takes over). */
+  rematchOffer?: RematchOffer;
   /** Seat index that currently has a draw offer pending, -1 when no offer is active. */
   drawOfferBy: number;
 }
 
-export interface RematchResponse {
-  gameId: string;
-  game: Game;
+/** Per-seat acceptance state for a pending rematch. Indices are seats in
+ *  the *finished* game. Bots never appear; they're pre-accepted. */
+export interface RematchOffer {
+  acceptedSeats: number[];
+  pendingSeats: number[];
 }
 
 export interface Capture {

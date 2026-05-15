@@ -57,7 +57,7 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 	row := r.pool.QueryRowContext(ctx, `
 		SELECT status, board_side, capture_pairs_win, align4_to_win, align5_to_win,
 		       winner_color, win_kind, initial_time_ms, increment_ms, created_at,
-		       visibility, rematch_game_id
+		       visibility, rematch_game_id, rematch_offer
 		FROM games WHERE id = $1
 	`, id)
 	var (
@@ -73,8 +73,9 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 		createdAt     time.Time
 		visibility    string
 		rematchID     sql.NullString
+		rematchOffer  []byte
 	)
-	if err := row.Scan(&status, &boardSide, &captureWin, &align4, &align5, &winnerColor, &winKind, &initialTimeMs, &incrementMs, &createdAt, &visibility, &rematchID); err != nil {
+	if err := row.Scan(&status, &boardSide, &captureWin, &align4, &align5, &winnerColor, &winKind, &initialTimeMs, &incrementMs, &createdAt, &visibility, &rematchID, &rematchOffer); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -198,6 +199,19 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 	state.Winner = game.Color(winnerColor)
 	state.WinKind = game.WinKind(winKind)
 
+	// Deserialise rematch_offer if the row has one. Errors are non-fatal:
+	// the offer is recoverable (the proposer can just re-click) but a
+	// corrupt blob shouldn't block loading the game itself.
+	var offer *RematchOffer
+	if len(rematchOffer) > 0 {
+		var parsed RematchOffer
+		if err := json.Unmarshal(rematchOffer, &parsed); err == nil {
+			if parsed.AcceptedSeats == nil {
+				parsed.AcceptedSeats = make(map[int]bool)
+			}
+			offer = &parsed
+		}
+	}
 	return &GameRecord{
 		ID:            id,
 		State:         state,
@@ -205,6 +219,7 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 		Status:        status,
 		Visibility:    Visibility(visibility),
 		RematchGameID: rematchID.String,
+		RematchOffer:  offer,
 		CreatedAt:     createdAt,
 		DrawOfferBy:   -1, // draw offers don't survive restarts; players can re-offer
 	}, nil
@@ -959,6 +974,32 @@ func (r *PostgresRepo) CancelMatchmake(ctx context.Context, userID string) error
 // enough to give the pairing logic something to work with, small enough
 // that the row-level locks don't sit on the table for noticeable time.
 const matchmakeBatchSize = 100
+
+// SaveRematchOffer persists (or clears) the rematch_offer JSONB column
+// for a finished game. The column is opaque to the DB; the encoding
+// schema lives next to the in-memory RematchOffer struct in store.go.
+//
+// Pass nil to clear (NULL is "no offer pending"); pass an encoded body
+// otherwise. The write is unconditional — callers compute the new
+// value in memory under the rec lock before persisting, so a missed
+// row (game deleted) is a real surprise we want to surface rather
+// than silently swallow.
+func (r *PostgresRepo) SaveRematchOffer(ctx context.Context, gameID string, offer []byte) error {
+	var blob interface{}
+	if offer != nil {
+		blob = offer
+	}
+	res, err := r.pool.ExecContext(ctx, `
+		UPDATE games SET rematch_offer = $2 WHERE id = $1
+	`, gameID, blob)
+	if err != nil {
+		return fmt.Errorf("save rematch offer: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrGameNotFound
+	}
+	return nil
+}
 
 // MatchmakeQueueSnapshot returns the current queue rows without locking
 // or mutating them. Used by the matcher after each tick to publish

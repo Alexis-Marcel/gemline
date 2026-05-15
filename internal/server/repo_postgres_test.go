@@ -146,3 +146,70 @@ func TestPostgresRepo_CaptureSurvivesReload(t *testing.T) {
 		t.Fatalf("post-reload: captured cell (0,0) should be Empty")
 	}
 }
+
+// TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation simulates the
+// multi-pod scenario that broke production: pod A receives the
+// proposer's "Propose rematch" click, mutates the in-memory record,
+// publishes a state event. Pod B's listener invalidates its (empty
+// or populated) cache and the next request from the acceptor lands
+// there. Pod B reads the game fresh from Postgres — and the offer
+// must come with it. Otherwise pod B would create a brand-new offer
+// with only the acceptor in AcceptedSeats and the original proposer
+// would see "the other player is now proposing a rematch" instead of
+// completing the existing one.
+func TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation(t *testing.T) {
+	pool := openTestDB(t)
+	repo := NewPostgresRepo(pool)
+	ctx := context.Background()
+
+	podA := NewStore(repo)
+	rec, err := podA.Create(ctx, 2, VisibilityPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gameID := rec.ID
+
+	_, aliceTok, err := podA.Join(ctx, gameID, "Alice", "", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, bobTok, err := podA.Join(ctx, gameID, "Bob", "", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// End the game so OfferRematch's StatusFinished gate passes.
+	if _, err := podA.Resign(ctx, gameID, aliceTok); err != nil {
+		t.Fatalf("Resign: %v", err)
+	}
+
+	// Alice (on pod A) proposes.
+	if _, err := podA.OfferRematch(ctx, gameID, aliceTok); err != nil {
+		t.Fatalf("Alice's OfferRematch on pod A: %v", err)
+	}
+
+	// A *separate* Store represents pod B's process. It shares the DB
+	// but has its own in-memory cache. This is the post-NOTIFY world
+	// for pod B — the cache invalidation would have it freshly fetch
+	// the game on the next access.
+	podB := NewStore(repo)
+	if _, err := podB.OfferRematch(ctx, gameID, bobTok); err != nil {
+		t.Fatalf("Bob's OfferRematch on pod B: %v", err)
+	}
+
+	// On pod B, the game record should now carry the rematch link —
+	// Bob's acceptance completed the offer that Alice opened on pod A.
+	got, ok, err := podB.Get(ctx, gameID)
+	if err != nil || !ok {
+		t.Fatalf("reload: ok=%v err=%v", ok, err)
+	}
+	got.Lock()
+	rematchID := got.RematchGameID
+	hasOffer := got.RematchOffer != nil
+	got.Unlock()
+	if rematchID == "" {
+		t.Fatalf("rematch must be created once both players have accepted across pods; got empty RematchGameID")
+	}
+	if hasOffer {
+		t.Fatalf("offer must be cleared after the rematch is created, still got %+v", got.RematchOffer)
+	}
+}

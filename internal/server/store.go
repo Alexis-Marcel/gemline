@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"math"
@@ -102,12 +103,18 @@ type GameRecord struct {
 // on a finished game. The rematch new game is only created once every needed
 // human seat has accepted (unanimous). Bots are pre-marked accepted at offer
 // creation time; seats that finished the game with Occupied=false are skipped.
+//
+// Persisted as games.rematch_offer JSONB so it survives cache invalidation
+// across pods — without that, a 2-pod deploy would see the second player's
+// acceptance land on a fresh load of the game from DB (no offer in memory)
+// and create a new offer with only that player accepted, instead of
+// completing the existing one.
 type RematchOffer struct {
 	// AcceptedSeats maps seat index (in the *finished* game) to true.
 	// Bots are pre-marked at offer creation; humans are added as they
 	// accept. A seat being absent means "still pending".
-	AcceptedSeats map[int]bool
-	CreatedAt     time.Time
+	AcceptedSeats map[int]bool `json:"acceptedSeats"`
+	CreatedAt     time.Time    `json:"createdAt"`
 }
 
 func (r *GameRecord) Lock()   { r.mu.Lock() }
@@ -740,7 +747,19 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 	}
 	rec.RematchOffer.AcceptedSeats[seat.Index] = true
 	complete := rematchOfferComplete(rec)
+	// Snapshot the offer for persistence while we still hold the lock.
+	// Multi-pod safety: without this write the second player's
+	// acceptance on a different pod would land on a cache-miss reload
+	// of the game and create a fresh offer with only their seat.
+	offerBlob, _ := json.Marshal(rec.RematchOffer)
 	rec.Unlock()
+
+	if err := s.repo.SaveRematchOffer(ctx, gameID, offerBlob); err != nil {
+		// Best-effort: log via the listener path is overkill, and the
+		// caller will get a fresh state via WS anyway. Surface up so
+		// the HTTP response is consistent.
+		return rec, err
+	}
 
 	if !complete {
 		return rec, nil
@@ -748,7 +767,7 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 	// Unanimous acceptance — create the rematch game. Rematch() does its own
 	// locking + race handling against parallel callers, so we drop rec.Lock
 	// before calling. On success the link is committed both in the repo and on
-	// rec.RematchGameID. Clear the now-moot offer state for hygiene.
+	// rec.RematchGameID. Clear the now-moot offer state in memory + DB.
 	newRec, err := s.Rematch(ctx, gameID)
 	if err != nil {
 		return rec, err
@@ -756,6 +775,7 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 	rec.Lock()
 	rec.RematchOffer = nil
 	rec.Unlock()
+	_ = s.repo.SaveRematchOffer(ctx, gameID, nil)
 	_ = newRec
 	return rec, nil
 }
@@ -774,17 +794,23 @@ func (s *Store) DeclineRematch(ctx context.Context, gameID, token string) (*Game
 	}
 
 	rec.Lock()
-	defer rec.Unlock()
 	if rec.Status != StatusFinished {
+		rec.Unlock()
 		return rec, ErrNotFinished
 	}
 	if _, ok := rec.SeatByToken(token); !ok {
+		rec.Unlock()
 		return rec, ErrBadToken
 	}
 	if rec.RematchOffer == nil {
+		rec.Unlock()
 		return rec, ErrNoRematchOffer
 	}
 	rec.RematchOffer = nil
+	rec.Unlock()
+	// Clear in DB so other pods don't resurrect the offer on their
+	// next reload.
+	_ = s.repo.SaveRematchOffer(ctx, gameID, nil)
 	return rec, nil
 }
 

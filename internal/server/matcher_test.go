@@ -201,6 +201,56 @@ func TestPairMulti_FIFOOrderPreserved(t *testing.T) {
 	}
 }
 
+func TestBuildQueueUpdates_MultiQuorumComputesEta(t *testing.T) {
+	enq := now0()
+	snap := queued(enq, "a", "b", "c")
+	got := buildQueueUpdates(snap, 6, RatingModeMulti, enq.Add(8*time.Second))
+	if len(got) != 3 {
+		t.Fatalf("want 1 update per user, got %d", len(got))
+	}
+	// 3 users threshold = 20s, oldest age = 8s → 12s remaining.
+	if got[0].ETASeconds == nil || *got[0].ETASeconds != 12 {
+		t.Fatalf("want eta=12s, got %v", got[0].ETASeconds)
+	}
+	// All entries share the same eta + count.
+	for _, u := range got {
+		if u.Count != 3 {
+			t.Fatalf("want count=3, got %d", u.Count)
+		}
+	}
+}
+
+func TestBuildQueueUpdates_MultiBelowQuorumNoEta(t *testing.T) {
+	snap := queued(now0(), "a", "b") // < minMultiSeats
+	got := buildQueueUpdates(snap, 6, RatingModeMulti, now0().Add(time.Hour))
+	if len(got) != 2 {
+		t.Fatalf("want 2 updates, got %d", len(got))
+	}
+	for _, u := range got {
+		if u.ETASeconds != nil {
+			t.Fatalf("below quorum should have no eta, got %v", u.ETASeconds)
+		}
+	}
+}
+
+func TestBuildQueueUpdates_OneVOneCarriesCountOnly(t *testing.T) {
+	snap := queued(now0(), "a")
+	got := buildQueueUpdates(snap, 2, RatingMode1v1, now0())
+	if len(got) != 1 || got[0].Count != 1 || got[0].ETASeconds != nil {
+		t.Fatalf("1v1 update should be count-only, got %+v", got)
+	}
+}
+
+func TestBuildQueueUpdates_PastThresholdClampsToZero(t *testing.T) {
+	enq := now0()
+	snap := queued(enq, "a", "b", "c", "d")
+	// 4 users threshold = 10s; oldest waited 30s.
+	got := buildQueueUpdates(snap, 6, RatingModeMulti, enq.Add(30*time.Second))
+	if got[0].ETASeconds == nil || *got[0].ETASeconds != 0 {
+		t.Fatalf("past-threshold ETA should clamp to 0, got %v", got[0].ETASeconds)
+	}
+}
+
 func TestPairMulti_AgeMeasuredFromOldest(t *testing.T) {
 	// "a" enqueued at T=0, "b" at T=15s, "c" at T=18s. At T=20s, oldest
 	// (a) has waited 20s. With 3 users the threshold is 20s → start.

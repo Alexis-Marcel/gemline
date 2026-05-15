@@ -960,6 +960,32 @@ func (r *PostgresRepo) CancelMatchmake(ctx context.Context, userID string) error
 // that the row-level locks don't sit on the table for noticeable time.
 const matchmakeBatchSize = 100
 
+// MatchmakeQueueSnapshot returns the current queue rows without locking
+// or mutating them. Used by the matcher after each tick to publish
+// queue_update events so waiting users see a live count + ETA.
+func (r *PostgresRepo) MatchmakeQueueSnapshot(ctx context.Context, players int, mode string) ([]QueuedUser, error) {
+	rows, err := r.pool.QueryContext(ctx, `
+		SELECT q.user_id, q.rating, q.enqueued_at, COALESCE(p.display_name, '')
+		FROM matchmake_queue q
+		LEFT JOIN profiles p ON p.user_id = q.user_id
+		WHERE q.players = $1 AND q.mode = $2
+		ORDER BY q.enqueued_at
+	`, players, mode)
+	if err != nil {
+		return nil, fmt.Errorf("queue snapshot: %w", err)
+	}
+	defer rows.Close()
+	var out []QueuedUser
+	for rows.Next() {
+		var qu QueuedUser
+		if err := rows.Scan(&qu.UserID, &qu.Rating, &qu.EnqueuedAt, &qu.DisplayName); err != nil {
+			return nil, fmt.Errorf("scan queue snapshot row: %w", err)
+		}
+		out = append(out, qu)
+	}
+	return out, rows.Err()
+}
+
 func (r *PostgresRepo) MatchmakeTick(
 	ctx context.Context,
 	players int,

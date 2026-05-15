@@ -58,6 +58,7 @@ var (
 	ErrTooFewToStart     = errors.New("at least 2 seats must be occupied to start")
 	ErrNoRematchOffer    = errors.New("no rematch offer pending")
 	ErrNotInvitee        = errors.New("only the invited user can act on this invitation")
+	ErrNotHost           = errors.New("only the host can start this game")
 )
 
 // Seat is a play slot in a game. Once claimed, only the SHA-256 of the
@@ -1113,9 +1114,20 @@ func (s *Store) Start(ctx context.Context, gameID, token string) (*GameRecord, e
 		rec.Unlock()
 		return rec, ErrNotPlaying
 	}
-	if _, ok := rec.SeatByToken(token); !ok {
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
 		rec.Unlock()
 		return rec, ErrBadToken
+	}
+	// Host-only start: only seat 0 (the creator, set when POST /api/games
+	// auto-joined them) may kick off the game. Stops a guest from racing
+	// the host on Start before the host has finished filling the lobby
+	// (adding bots, inviting a friend, etc.). If the host has left their
+	// seat the game can't be started until they come back — that's the
+	// intended behaviour, not an oversight.
+	if seat.Index != 0 {
+		rec.Unlock()
+		return rec, ErrNotHost
 	}
 	rec.Unlock()
 	if err := s.startInternal(rec); err != nil {

@@ -552,6 +552,8 @@ func statusForStartError(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrBadToken):
 		return http.StatusUnauthorized
+	case errors.Is(err, ErrNotHost):
+		return http.StatusForbidden
 	case errors.Is(err, ErrNotPlaying),
 		errors.Is(err, ErrPublicCannotStart),
 		errors.Is(err, ErrTooFewToStart):

@@ -985,19 +985,38 @@ func TestStartPreservesUserColors(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	g := createGame(t, ts, 6)
-	// Alice in seat 2 (C3), Bob in seat 4 (C5) — non-contiguous.
-	two := 2
+	// Alice on seat 0 (the host slot — only that one may call Start),
+	// Bob on seat 4 (C5) so the pair is non-contiguous and the trim
+	// has actual gaps to close.
+	zero := 0
 	four := 4
-	a := joinGame(t, ts, g.ID, "Alice", &two)
+	a := joinGame(t, ts, g.ID, "Alice", &zero)
 	b := joinGame(t, ts, g.ID, "Bob", &four)
 	out := postStart(t, ts, g.ID, a.Token, http.StatusOK)
-	// After trim, Alice keeps C3 and Bob keeps C5 — the engine doesn't
+	// After trim, Alice keeps C1 and Bob keeps C5 — the engine doesn't
 	// re-colour them, just re-orders. Names follow the colour.
 	colors := []game.Color{out.Seats[0].Color, out.Seats[1].Color}
 	if colors[0] != a.Seat.Color || colors[1] != b.Seat.Color {
 		t.Fatalf("trim should preserve original colours, got %v (wanted Alice=%v, Bob=%v)",
 			colors, a.Seat.Color, b.Seat.Color)
 	}
+}
+
+func TestStart_OnlyHostMayStart(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 4)
+	zero := 0
+	one := 1
+	host := joinGame(t, ts, g.ID, "Host", &zero)
+	guest := joinGame(t, ts, g.ID, "Guest", &one)
+
+	// A guest's token must NOT start the game even though they hold a
+	// valid seat token — otherwise anyone who joined could race the
+	// host on Start before the lobby is fully arranged.
+	postStartRaw(t, ts, g.ID, guest.Token, http.StatusForbidden)
+	// The host can.
+	_ = postStart(t, ts, g.ID, host.Token, http.StatusOK)
 }
 
 func TestStartRejectsWithFewerThanTwo(t *testing.T) {

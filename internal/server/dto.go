@@ -77,6 +77,12 @@ type gameDTO struct {
 	Visibility    Visibility `json:"visibility"`
 	RematchGameID string     `json:"rematchGameId,omitempty"`
 
+	// LastMove is the axial coordinate of the most recently placed stone,
+	// or nil for a game that has had no moves yet. Surfaced so the client
+	// can paint a chess.com-style "last move" ring on the board during
+	// live play (replay mode computes its own indicator from the step).
+	LastMove *cellPosDTO `json:"lastMove,omitempty"`
+
 	// RematchOffer is set on a finished game while a rematch proposal is
 	// pending. Nil when no offer is active and once RematchGameID is set
 	// (the new game then takes precedence in the UI).
@@ -98,6 +104,13 @@ type rematchOfferDTO struct {
 	// PendingSeats lists human seats whose acceptance is still required for
 	// the rematch to be created. Empty means the offer is about to resolve.
 	PendingSeats []int `json:"pendingSeats"`
+}
+
+// cellPosDTO is a tiny axial coordinate wrapper. Lives at the package
+// level so optional gameDTO fields can carry a pointer to it.
+type cellPosDTO struct {
+	Q int `json:"q"`
+	R int `json:"r"`
 }
 
 type thresholdsDTO struct {
@@ -195,6 +208,11 @@ func toGameDTO(rec *GameRecord) gameDTO {
 	// slice header by value isn't enough — the backing array is shared.
 	cells := make([]game.Color, len(s.Board.Cells))
 	copy(cells, s.Board.Cells)
+	var lastMove *cellPosDTO
+	if n := len(s.History); n > 0 {
+		m := s.History[n-1]
+		lastMove = &cellPosDTO{Q: m.Pos.Q, R: m.Pos.R}
+	}
 	return gameDTO{
 		ID:            rec.ID,
 		Status:        rec.Status,
@@ -209,6 +227,7 @@ func toGameDTO(rec *GameRecord) gameDTO {
 		MoveCount:     len(s.History),
 		Visibility:    vis,
 		RematchGameID: rec.RematchGameID,
+		LastMove:      lastMove,
 		RematchOffer:  toRematchOfferDTO(rec),
 		DrawOfferBy:   rec.DrawOfferBy,
 		Thresholds: thresholdsDTO{

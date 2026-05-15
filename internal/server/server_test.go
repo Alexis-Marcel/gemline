@@ -223,6 +223,30 @@ func TestRematchOffer_BotIsPreAccepted(t *testing.T) {
 	}
 }
 
+func TestLastMove_PopulatedOnDTOAfterMove(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	if g.LastMove != nil {
+		t.Fatalf("fresh game must have no lastMove, got %+v", g.LastMove)
+	}
+	j1 := joinGame(t, ts, g.ID, "Alice", nil)
+	_ = joinGame(t, ts, g.ID, "Bob", nil)
+	mr := postMove(t, ts, g.ID, j1.Token, 0, 0, http.StatusOK)
+	if mr.Game.LastMove == nil {
+		t.Fatalf("after a move, lastMove must be set")
+	}
+	if mr.Game.LastMove.Q != 0 || mr.Game.LastMove.R != 0 {
+		t.Fatalf("lastMove must point at the played coord, got %+v", mr.Game.LastMove)
+	}
+	// /api/games/{id} carries the same shape (the WS state event reuses
+	// toGameDTO), so verify it survives the round-trip.
+	again := getGameViaHTTP(t, ts, g.ID)
+	if again.LastMove == nil || again.LastMove.Q != 0 || again.LastMove.R != 0 {
+		t.Fatalf("HTTP get must surface lastMove identically, got %+v", again.LastMove)
+	}
+}
+
 func TestDeclineSeatInvite_HappyPath(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()

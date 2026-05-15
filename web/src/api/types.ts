@@ -83,6 +83,11 @@ export interface Game {
   visibility: Visibility;
   /** ID of the rematch game spawned from this one, if any. */
   rematchGameId?: string;
+  /** Axial coordinate of the most recently placed stone. Undefined for
+   *  a game that has had no moves yet. Used to render the chess.com-style
+   *  last-move ring during live play; replay mode derives its own from
+   *  the step cursor. */
+  lastMove?: { q: number; r: number };
   /** Pending rematch proposal on a finished game. Undefined when no offer
    *  is active or once rematchGameId is set (the new game takes over). */
   rematchOffer?: RematchOffer;

@@ -456,7 +456,13 @@ export function GamePage() {
   const boardCells = inReplay
     ? cellsAtStep(replay.boardSide, replay.steps, replayStep)
     : game.cells;
-  const boardHighlight = inReplay ? lastMoveAt(replay.steps, replayStep) : null;
+  // In replay mode the highlight tracks the step cursor; in live play it
+  // follows the server-reported last move (mirrors the chess.com "last
+  // played" ring so a returning player can spot where the action just
+  // happened). A waiting game with no moves has no lastMove → no ring.
+  const boardHighlight = inReplay
+    ? lastMoveAt(replay.steps, replayStep)
+    : (game.lastMove ?? null);
 
   const seatsFree = game.seats.filter((s) => !s.occupied).length;
   const seatsOccupied = game.seats.length - seatsFree;

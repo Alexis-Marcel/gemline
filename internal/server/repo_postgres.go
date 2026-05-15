@@ -1007,12 +1007,11 @@ func (r *PostgresRepo) MatchmakeTick(
 		return nil, err
 	}
 
-	if len(queued) < players {
-		// Not enough for even one pairing this tick. Commit (releases
-		// our locks) and wait for the next interval.
-		return nil, tx.Commit()
-	}
-
+	// pairFn decides whether a group can be formed: 1v1 needs ≥2 with
+	// rating proximity, multi needs ≥3 plus an age threshold. We DON'T
+	// pre-filter on len < players here — that used to short-circuit
+	// before pairFn was consulted, which broke partial multi rooms
+	// (a 3-user queue for players=6 never made it to pairMulti).
 	groups := pairFn(queued)
 	if len(groups) == 0 {
 		return nil, tx.Commit()
@@ -1020,12 +1019,16 @@ func (r *PostgresRepo) MatchmakeTick(
 
 	var seats []MatchedSeat
 	for _, g := range groups {
-		if len(g) != players {
-			// pairFn contract violation — skip rather than crash.
+		// pairFn decides the room size: 1v1 always returns groups of 2;
+		// multi can return groups of 3..players depending on quorum and
+		// wait time. Reject only an under-quorum group (defensive — pairFn
+		// should never emit one, but we'd rather drop than crash).
+		if len(g) < 2 || len(g) > players {
 			continue
 		}
 		gameID := newID()
-		cfg := game.DefaultConfig(players)
+		actualPlayers := len(g)
+		cfg := game.DefaultConfig(actualPlayers)
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO games (id, status, board_side, capture_pairs_win, align4_to_win, align5_to_win, initial_time_ms, increment_ms, visibility)
 			VALUES ($1, 'playing', $2, $3, $4, $5, $6, $7, 'public')

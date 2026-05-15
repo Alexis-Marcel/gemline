@@ -298,12 +298,11 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
 }
 
-// matchmakeGame returns the public waiting game the caller should join — an
-// existing one with a free seat (oldest first), or a freshly-created public
-// game if no candidate is matchable. Atomically auto-joins the caller so
-// the client can navigate straight into the game without a follow-up /join.
-// Requires authentication — matchmade games feed the rating system, and
-// rating needs a stable identity.
+// matchmakeGame — TEST FIXTURE ONLY. Production matchmaking is the
+// async queue at POST /api/matchmake/enqueue + /ws/lobby. This
+// synchronous endpoint stays wired up so the existing server tests
+// can seat two authenticated users in a public game without spinning
+// up the queue + matcher tick + a real Postgres backend.
 func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
 	u := requireUser(w, r)
 	if u == nil {

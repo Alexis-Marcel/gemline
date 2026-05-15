@@ -206,7 +206,7 @@ func (s *Server) Routes() http.Handler {
 // no-DB mode): the matcher still runs but onMatched falls back to the
 // local LobbyHub.Deliver instead of NOTIFYing.
 func (s *Server) StartMatcher(ctx context.Context) {
-	s.store.StartMatcher(ctx, s.log, s.fanMatched)
+	s.store.StartMatcher(ctx, s.log, s.fanMatched, s.fanQueueUpdate)
 }
 
 // newPodID returns a process-unique identifier used to tag outgoing

@@ -56,6 +56,8 @@ var (
 	ErrBadSeatIndex      = errors.New("seat index out of range")
 	ErrPublicCannotStart = errors.New("public games start automatically; manual start is only for private games")
 	ErrTooFewToStart     = errors.New("at least 2 seats must be occupied to start")
+	ErrNoRematchOffer    = errors.New("no rematch offer pending")
+	ErrNotInvitee        = errors.New("only the invited user can act on this invitation")
 )
 
 // Seat is a play slot in a game. Once claimed, only the SHA-256 of the
@@ -88,6 +90,23 @@ type GameRecord struct {
 	// it is not part of the engine's pure rule logic and is not persisted —
 	// an offer cancels naturally on server restart (the player can re-offer).
 	DrawOfferBy int
+
+	// RematchOffer tracks per-seat acceptances of a proposed rematch on a
+	// finished game. nil means no offer pending. Not persisted (same posture
+	// as DrawOfferBy): on server restart the proposer simply re-clicks.
+	RematchOffer *RematchOffer
+}
+
+// RematchOffer captures the per-seat acceptance state of a rematch proposal
+// on a finished game. The rematch new game is only created once every needed
+// human seat has accepted (unanimous). Bots are pre-marked accepted at offer
+// creation time; seats that finished the game with Occupied=false are skipped.
+type RematchOffer struct {
+	// AcceptedSeats maps seat index (in the *finished* game) to true.
+	// Bots are pre-marked at offer creation; humans are added as they
+	// accept. A seat being absent means "still pending".
+	AcceptedSeats map[int]bool
+	CreatedAt     time.Time
 }
 
 func (r *GameRecord) Lock()   { r.mu.Lock() }
@@ -719,6 +738,134 @@ func (s *Store) scanLobbyCache(limit int) []LobbyEntry {
 	return out
 }
 
+// neededRematchSeats returns the set of seat indices that must accept a
+// rematch offer before the new game is created. Bots are pre-accepted at
+// offer-creation time, so they are not included. Disconnected seats
+// (Occupied=false at game finish) are deliberately ignored — otherwise an
+// offer would hang on someone who left before the game even ended.
+//
+// Caller must hold rec's lock.
+func neededRematchSeats(rec *GameRecord) []int {
+	out := make([]int, 0, len(rec.Seats))
+	for i, st := range rec.Seats {
+		if st.Occupied && !st.IsBot {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// newRematchOffer builds a fresh offer with bot seats pre-marked accepted.
+// Caller must hold rec's lock.
+func newRematchOffer(rec *GameRecord) *RematchOffer {
+	accepted := make(map[int]bool)
+	for i, st := range rec.Seats {
+		if st.Occupied && st.IsBot {
+			accepted[i] = true
+		}
+	}
+	return &RematchOffer{AcceptedSeats: accepted, CreatedAt: time.Now()}
+}
+
+// rematchOfferComplete reports whether every needed (human-occupied) seat has
+// accepted the current offer. Caller must hold rec's lock.
+func rematchOfferComplete(rec *GameRecord) bool {
+	if rec.RematchOffer == nil {
+		return false
+	}
+	for _, idx := range neededRematchSeats(rec) {
+		if !rec.RematchOffer.AcceptedSeats[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+// OfferRematch records that the seat behind `token` accepts a rematch on a
+// finished game. If no offer is active yet, this call creates one (with bot
+// seats pre-accepted) and marks the caller as the first acceptor. Subsequent
+// calls add their seat to the acceptance set. When every needed human seat
+// has accepted, the new game is created via Rematch and rec.RematchGameID
+// gets set — clients see that on the next state event and navigate over.
+//
+// Idempotent: a player who has already accepted gets a no-op success.
+func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	if rec.Status != StatusFinished {
+		rec.Unlock()
+		return rec, ErrNotFinished
+	}
+	if rec.RematchGameID != "" {
+		// Already created — caller can just navigate to it.
+		rec.Unlock()
+		return rec, nil
+	}
+	seat, ok := rec.SeatByToken(token)
+	if !ok {
+		rec.Unlock()
+		return rec, ErrBadToken
+	}
+	if rec.RematchOffer == nil {
+		rec.RematchOffer = newRematchOffer(rec)
+	}
+	rec.RematchOffer.AcceptedSeats[seat.Index] = true
+	complete := rematchOfferComplete(rec)
+	rec.Unlock()
+
+	if !complete {
+		return rec, nil
+	}
+	// Unanimous acceptance — create the rematch game. Rematch() does its own
+	// locking + race handling against parallel callers, so we drop rec.Lock
+	// before calling. On success the link is committed both in the repo and on
+	// rec.RematchGameID. Clear the now-moot offer state for hygiene.
+	newRec, err := s.Rematch(ctx, gameID)
+	if err != nil {
+		return rec, err
+	}
+	rec.Lock()
+	rec.RematchOffer = nil
+	rec.Unlock()
+	_ = newRec
+	return rec, nil
+}
+
+// DeclineRematch clears any pending rematch offer on a finished game. Either
+// the proposer (withdrawing) or any invited acceptor (refusing) may call it —
+// we don't distinguish them, the outcome is the same: the offer disappears
+// and everyone returns to the "propose rematch" state.
+func (s *Store) DeclineRematch(ctx context.Context, gameID, token string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	defer rec.Unlock()
+	if rec.Status != StatusFinished {
+		return rec, ErrNotFinished
+	}
+	if _, ok := rec.SeatByToken(token); !ok {
+		return rec, ErrBadToken
+	}
+	if rec.RematchOffer == nil {
+		return rec, ErrNoRematchOffer
+	}
+	rec.RematchOffer = nil
+	return rec, nil
+}
+
 // Rematch creates a fresh game with the same player count, config and
 // visibility as `originalID`, and links the two via rematch_game_id. The
 // operation is idempotent: a second caller after the link is set is sent to
@@ -1247,6 +1394,59 @@ func (s *Store) CancelSeatInvite(ctx context.Context, gameID string, seatIdx int
 	if st.Occupied || st.IsBot || st.UserID == "" {
 		rec.Unlock()
 		return rec, ErrSeatNotInvited
+	}
+
+	st.Name = ""
+	st.UserID = ""
+	st.TokenHash = nil
+	st.Occupied = false
+	st.IsBot = false
+
+	if err := s.repo.UpdateSeat(ctx, gameID, st, rec.Status); err != nil {
+		rec.Unlock()
+		return rec, err
+	}
+	rec.Unlock()
+	return rec, nil
+}
+
+// DeclineSeatInvite is the invitee-side counterpart to CancelSeatInvite:
+// the invited user themselves refuses the seat. Same end-state as cancel
+// (seat returns to empty), but auth differs — only the invited userID may
+// call this. Used by the "Refuser" button on the invitee's game page.
+func (s *Store) DeclineSeatInvite(ctx context.Context, gameID string, seatIdx int, callerUserID string) (*GameRecord, error) {
+	if callerUserID == "" {
+		return nil, ErrNotInvitee
+	}
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+
+	rec.Lock()
+	if rec.Status != StatusWaiting {
+		rec.Unlock()
+		return rec, ErrNotPlaying
+	}
+	if rec.Visibility != VisibilityPrivate {
+		rec.Unlock()
+		return rec, ErrBotsOnPublic
+	}
+	if seatIdx < 0 || seatIdx >= len(rec.Seats) {
+		rec.Unlock()
+		return rec, ErrBadSeatIndex
+	}
+	st := &rec.Seats[seatIdx]
+	if st.Occupied || st.IsBot || st.UserID == "" {
+		rec.Unlock()
+		return rec, ErrSeatNotInvited
+	}
+	if st.UserID != callerUserID {
+		rec.Unlock()
+		return rec, ErrNotInvitee
 	}
 
 	st.Name = ""

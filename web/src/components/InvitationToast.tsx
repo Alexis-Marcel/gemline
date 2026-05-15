@@ -1,64 +1,43 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { api, ApiError } from "../api/client";
-import { useAuth } from "../auth/AuthProvider";
-import { userSocket, type InvitePayload } from "../api/userSocket";
+import {
+  useInvitations,
+  type PendingInvitation,
+} from "../notifications/InvitationsProvider";
 
-// InvitationToast renders a global "X t'invite à jouer" banner pinned
-// to the bottom-right whenever the local user receives an
-// invite_received event from the persistent user socket. Two actions:
-//   - Accepter → navigate to /game/{gameId}; the GamePage's in-page
-//     Accepter/Refuser controls take over (the in-place accept goes
-//     through join + pickSeatForUser, which routes to the reserved
-//     seat).
-//   - Refuser  → POST decline-invite directly from the toast so the
-//     invitee never has to navigate just to decline.
+// InvitationToast renders the pending-invitations stack pinned to the
+// bottom-right of the viewport. State lives in InvitationsProvider (so
+// the UserNav badge can read the same list); this component is purely
+// presentational + dispatches accept / decline to the provider.
 //
-// The toast also auto-dismisses on invite_cancelled (host withdrew the
-// invitation) and hides itself if the user is already on the invited
-// game's page (the in-page controls are visible there).
+// Newest invitation sits at the top of the column. Toasts auto-hide
+// when the viewer is already on the invited game's page (the inline
+// Accepter/Refuser controls take over there).
 export function InvitationToast() {
-  const { user } = useAuth();
+  const { invitations } = useInvitations();
+  if (invitations.length === 0) return null;
+  return (
+    <div className="fixed bottom-4 right-4 z-50 flex w-80 max-w-[90vw] flex-col-reverse gap-2">
+      {invitations.map((invite) => (
+        <InvitationCard
+          key={`${invite.gameId}::${invite.seatIndex}`}
+          invite={invite}
+        />
+      ))}
+    </div>
+  );
+}
+
+function InvitationCard({ invite }: { invite: PendingInvitation }) {
+  const { dismiss, decline } = useInvitations();
   const navigate = useNavigate();
   const location = useLocation();
-  const [invite, setInvite] = useState<InvitePayload | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  // Subscribe to invite events on the shared socket. We replace any
-  // current invitation with the latest — showing a stack of multiple
-  // pending invitations is a refinement we don't need yet.
-  useEffect(() => {
-    return userSocket.subscribe((ev) => {
-      if (ev.type === "invite_received") {
-        setInvite(ev.payload);
-        setError(null);
-      } else if (ev.type === "invite_cancelled") {
-        setInvite((prev) => {
-          if (!prev) return prev;
-          if (
-            prev.gameId === ev.payload.gameId &&
-            prev.seatIndex === ev.payload.seatIndex
-          ) {
-            return null;
-          }
-          return prev;
-        });
-      }
-    });
-  }, []);
-
-  // Auto-dismiss on logout. If the user signs out while a toast is
-  // open, the socket closes and no further events will arrive — but
-  // the existing invitation state would stick around without this.
-  useEffect(() => {
-    if (!user) setInvite(null);
-  }, [user]);
-
-  if (!invite || !user) return null;
-
-  // Hide on the invited game's page: the inline buttons are visible
-  // there, no need for a duplicate prompt.
+  // Hide the card when the user is already on the invited game's page —
+  // the in-page Accepter/Refuser controls handle it. We still keep the
+  // entry in the provider's stack so the header badge stays accurate
+  // and navigating away brings the card back.
   if (location.pathname === `/game/${invite.gameId}`) return null;
 
   const hostLabel = invite.fromName?.trim()
@@ -66,26 +45,19 @@ export function InvitationToast() {
     : "Quelqu'un";
 
   async function handleAccept() {
-    if (!invite) return;
     setBusy(true);
-    setError(null);
     try {
       navigate(`/game/${invite.gameId}`);
-      setInvite(null);
+      dismiss(invite.gameId, invite.seatIndex);
     } finally {
       setBusy(false);
     }
   }
 
   async function handleDecline() {
-    if (!invite) return;
     setBusy(true);
-    setError(null);
     try {
-      await api.declineSeatInvite(invite.gameId, invite.seatIndex);
-      setInvite(null);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Erreur invitation");
+      await decline(invite.gameId, invite.seatIndex);
     } finally {
       setBusy(false);
     }
@@ -93,7 +65,7 @@ export function InvitationToast() {
 
   return (
     <div
-      className="fixed bottom-4 right-4 z-50 w-80 max-w-[90vw] rounded-xl border border-amber-500/40 bg-zinc-950/95 p-4 shadow-2xl backdrop-blur"
+      className="animate-[slideIn_0.2s_ease-out] rounded-xl border border-amber-500/40 bg-zinc-950/95 p-4 shadow-2xl backdrop-blur"
       role="alert"
       aria-live="polite"
     >
@@ -101,9 +73,6 @@ export function InvitationToast() {
         <span className="font-medium text-amber-300">{hostLabel}</span>{" "}
         t'invite à jouer
       </p>
-      {error && (
-        <p className="mt-2 text-xs text-red-300">{error}</p>
-      )}
       <div className="mt-3 flex gap-2">
         <button
           type="button"

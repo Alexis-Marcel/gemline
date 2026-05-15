@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import type { Game, GameRatings, WinKind } from "../api/types";
 import { gemColor, gemName } from "../lib/colors";
 import { Button } from "./Button";
+import { RematchControls } from "./RematchControls";
 
 interface GameEndModalProps {
   game: Game;
@@ -10,7 +11,11 @@ interface GameEndModalProps {
    *  loading; rated=false hides the Elo block; applied=false shows
    *  "calcul du rating en cours…" while the server crunches deltas. */
   ratings: GameRatings | null;
-  rematchLink: string | null;
+  /** Seat index of the local user, or null for spectators. Drives the
+   *  rematch state machine — only the actual participants can offer,
+   *  accept, or decline. */
+  mySeatIndex: number | null;
+  /** True while any rematch action (offer/accept/decline) is in flight. */
   rematching: boolean;
   /** True while a "Nouvelle partie" click is in flight — either
    *  matchmaking is enqueueing (public) or a private createGame is
@@ -20,7 +25,9 @@ interface GameEndModalProps {
    *  ("Recherche…" for matchmaking, "Création…" for private). null
    *  means the button keeps its idle label even while disabled. */
   newGameBusyLabel: string | null;
-  onRematch: () => void;
+  onOfferRematch: () => void;
+  onDeclineRematch: () => void;
+  onGoToRematch: () => void;
   onNewGame: (() => void) | null;
   onClose: () => void;
   onLeave: () => void;
@@ -42,11 +49,13 @@ interface GameEndModalProps {
 export function GameEndModal({
   game,
   ratings,
-  rematchLink,
+  mySeatIndex,
   rematching,
   newGameBusy,
   newGameBusyLabel,
-  onRematch,
+  onOfferRematch,
+  onDeclineRematch,
+  onGoToRematch,
   onNewGame,
   onClose,
   onLeave,
@@ -156,27 +165,17 @@ export function GameEndModal({
                 : "Nouvelle partie"}
             </Button>
           )}
-          <div className="flex gap-2">
-            <Button
-              variant="secondary"
-              onClick={onRematch}
-              disabled={rematching}
-              className="flex-1"
-            >
-              {rematching
-                ? "Création…"
-                : rematchLink
-                  ? "Aller à la revanche"
-                  : "Revanche"}
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={onLeave}
-              className="flex-1"
-            >
-              Quitter
-            </Button>
-          </div>
+          <RematchControls
+            game={game}
+            mySeatIndex={mySeatIndex}
+            busy={rematching}
+            onOffer={onOfferRematch}
+            onDecline={onDeclineRematch}
+            onGoToRematch={onGoToRematch}
+          />
+          <Button variant="secondary" onClick={onLeave} className="w-full">
+            Quitter
+          </Button>
         </footer>
       </div>
     </div>

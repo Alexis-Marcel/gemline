@@ -161,11 +161,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/draw/offer", s.offerDraw)
 	mux.HandleFunc("POST /api/games/{id}/draw/accept", s.acceptDraw)
 	mux.HandleFunc("POST /api/games/{id}/draw/decline", s.declineDraw)
-	mux.HandleFunc("POST /api/games/{id}/rematch", s.rematchGame)
+	mux.HandleFunc("POST /api/games/{id}/rematch/offer", s.offerRematch)
+	mux.HandleFunc("POST /api/games/{id}/rematch/decline", s.declineRematch)
 	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/bot", s.addBot)
 	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/bot", s.removeBot)
 	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite", s.inviteSeat)
 	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/invite", s.cancelSeatInvite)
+	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite/decline", s.declineInvite)
 	mux.HandleFunc("POST /api/games/{id}/leave", s.leaveSeat)
 	mux.HandleFunc("POST /api/games/{id}/start", s.startGame)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
@@ -588,9 +590,20 @@ func statusForRemoveBotError(err error) int {
 	}
 }
 
-func (s *Server) rematchGame(w http.ResponseWriter, r *http.Request) {
-	originalID := r.PathValue("id")
-	rec, err := s.store.Rematch(r.Context(), originalID)
+// offerRematch is the chess.com-style "Propose / Accept rematch" endpoint.
+// The first caller creates an offer (bots pre-marked accepted); each
+// subsequent caller adds their seat to the acceptance set. When every
+// needed human seat has accepted, the new game is created and the
+// original's RematchGameID gets set — clients see that on the broadcast
+// state event and navigate over.
+func (s *Server) offerRematch(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	token := playerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing player token")
+		return
+	}
+	rec, err := s.store.OfferRematch(r.Context(), gameID, token)
 	if err != nil {
 		writeError(w, statusForRematchError(err), err.Error())
 		return
@@ -598,7 +611,75 @@ func (s *Server) rematchGame(w http.ResponseWriter, r *http.Request) {
 	rec.Lock()
 	dto := toGameDTO(rec)
 	rec.Unlock()
-	writeJSON(w, http.StatusCreated, rematchResponse{GameID: rec.ID, Game: dto})
+	s.events.Publish(gameID, eventState(dto))
+	writeJSON(w, http.StatusOK, dto)
+}
+
+// declineRematch withdraws the pending offer (proposer cancels) or refuses
+// it (other player declines). Wire shape is identical for both — the
+// outcome is the same: offer cleared, everyone back to the "propose" UI.
+func (s *Server) declineRematch(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	token := playerToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing player token")
+		return
+	}
+	rec, err := s.store.DeclineRematch(r.Context(), gameID, token)
+	if err != nil {
+		writeError(w, statusForRematchError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	s.events.Publish(gameID, eventState(dto))
+	writeJSON(w, http.StatusOK, dto)
+}
+
+// declineInvite is the invitee-side refusal of a private-game invitation.
+// Auth is via the Supabase JWT (not a seat token — the invitee doesn't
+// hold one yet). Mirrors cancelSeatInvite's outcome (seat freed) but
+// the auth check enforces that only the invited userID may call this.
+func (s *Server) declineInvite(w http.ResponseWriter, r *http.Request) {
+	gameID := r.PathValue("id")
+	seatIdx, err := strconv.Atoi(r.PathValue("idx"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid seat index")
+		return
+	}
+	u, ok := userFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required to decline an invitation")
+		return
+	}
+	rec, err := s.store.DeclineSeatInvite(r.Context(), gameID, seatIdx, u.ID)
+	if err != nil {
+		writeError(w, statusForDeclineInviteError(err), err.Error())
+		return
+	}
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	s.events.Publish(gameID, eventState(dto))
+	writeJSON(w, http.StatusOK, dto)
+}
+
+func statusForDeclineInviteError(err error) int {
+	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrBadSeatIndex):
+		return http.StatusBadRequest
+	case errors.Is(err, ErrNotInvitee):
+		return http.StatusForbidden
+	case errors.Is(err, ErrSeatNotInvited),
+		errors.Is(err, ErrNotPlaying),
+		errors.Is(err, ErrBotsOnPublic):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // resignGame, offerDraw, acceptDraw, declineDraw all share the same shape:
@@ -712,7 +793,10 @@ func statusForRematchError(err error) int {
 	switch {
 	case errors.Is(err, ErrGameNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, ErrNotFinished):
+	case errors.Is(err, ErrBadToken):
+		return http.StatusUnauthorized
+	case errors.Is(err, ErrNotFinished),
+		errors.Is(err, ErrNoRematchOffer):
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError

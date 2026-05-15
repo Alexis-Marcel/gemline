@@ -55,6 +55,13 @@ export type LobbyEvent =
 
 type Listener = (ev: LobbyEvent) => void;
 
+/** Returns the freshest valid access token, or null if the user has
+ *  no session. Called by the socket before each reconnect attempt
+ *  after the first failure so a stale token (Supabase refresh missed
+ *  while the tab was backgrounded, network blip, etc.) is replaced
+ *  before we burn more reconnect attempts on the bad credential. */
+export type AuthRefresher = () => Promise<string | null>;
+
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 15000;
 
@@ -64,6 +71,7 @@ class UserSocket {
   private accessToken: string | null = null;
   private reconnectAttempt = 0;
   private reconnectTimer: number | null = null;
+  private refreshAuth: AuthRefresher | null = null;
   // closed=true means the caller explicitly invoked close() — don't
   // attempt to reconnect. open() resets this.
   private closed = true;
@@ -84,6 +92,16 @@ class UserSocket {
     this.accessToken = null;
     this.clearReconnectTimer();
     this.disconnect();
+  }
+
+  /** AuthProvider installs this on mount so reconnects can pull a
+   *  freshly-refreshed Supabase token when the current one is bad. We
+   *  can't tell from the browser WS API whether a close was caused
+   *  by a 401 specifically (the status code isn't exposed), so we
+   *  trigger a refresh after every reconnect attempt past the first
+   *  — cheap when the token is still valid (Supabase no-ops). */
+  setAuthRefresher(fn: AuthRefresher | null) {
+    this.refreshAuth = fn;
   }
 
   subscribe(listener: Listener): () => void {
@@ -155,9 +173,31 @@ class UserSocket {
       RECONNECT_MAX_MS,
       RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempt),
     );
+    const attempt = this.reconnectAttempt;
     this.reconnectAttempt += 1;
-    this.reconnectTimer = window.setTimeout(() => {
+    this.reconnectTimer = window.setTimeout(async () => {
       this.reconnectTimer = null;
+      // After the first failure, ask AuthProvider for the freshest
+      // token — guards against "tab was asleep when Supabase rotated
+      // our access_token and now the WS upgrade keeps 401-ing". The
+      // refresher is allowed to return null (user signed out
+      // mid-retry); in that case we abandon the reconnect chain
+      // entirely until open() is called again with a new token.
+      if (attempt > 0 && this.refreshAuth) {
+        try {
+          const fresh = await this.refreshAuth();
+          if (this.closed) return;
+          if (fresh == null) {
+            this.accessToken = null;
+            return;
+          }
+          this.accessToken = fresh;
+        } catch {
+          // Refresh failed (network, IdP down). Try connecting with
+          // whatever token we have; if it's also bad, the next
+          // reconnect will refresh again.
+        }
+      }
       this.connect();
     }, delay);
   }

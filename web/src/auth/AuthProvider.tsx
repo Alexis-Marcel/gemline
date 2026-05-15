@@ -54,6 +54,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [session?.access_token]);
 
+  // Hand the socket a way to ask Supabase for a fresh access_token on
+  // reconnect failure. Covers the case where the browser slept past
+  // the regular auto-refresh: by the time we wake up the WS would
+  // otherwise loop forever with the expired JWT. refreshSession() is
+  // idempotent — Supabase no-ops when the current token still has
+  // time on it.
+  useEffect(() => {
+    userSocket.setAuthRefresher(async () => {
+      const { data, error } = await supabase.auth.refreshSession();
+      if (error) return null;
+      return data.session?.access_token ?? null;
+    });
+    return () => {
+      userSocket.setAuthRefresher(null);
+    };
+  }, []);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user: session?.user ?? null,

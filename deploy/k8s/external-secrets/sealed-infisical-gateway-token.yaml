@@ -1,0 +1,13 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: infisical-gateway-token
+  namespace: external-secrets
+spec:
+  encryptedData:
+    token: AgCTtpwoBIOynA4+30ykZYpy5Pw4jCN80mYVdWPt1sHbeCJc2WfyWLZoxge7WBIoRgENlr1WzNBFN6N3zbEMCew1TxKqxrtcTFMZN6m4VvMMKi+zV4mVKAf3po4cYeC4NBVKNQhP90I/57sPnptKSv5UGq9bzAl918aJUQhGiyEgMvBkGsXNte5upFcxGsmWV3CvDWb0hjtOTVuWvvjIaGpueNfMYwzrnvGgb3yQPDmncVOmxZldEk9/ndpr9MqWJkhwfSXypqh3ZNn8enE/4VANIULYeA0O9fgTREp9Ww5YMG018+mpiwq7Tv3vHuRJ26kyU9wywBWFS+1aFjHIj4rkFd1O5VdgHvoU562hK0NRlPL8KM51x2m1f/hqRaTiTt6V8bmRcCAiPljbj624jLix8M5XLOJupFATPQbc+SfR/DOsf26NQ09G4B5PLuGBV3j01PCu5i3tMNMItKANay8gP9xygDvTFiolh0jWacJ3P3qnVBux7DHr8vkATmrbvjTORI4+Olfr/aoFb6oFIAo/ElSqH9p7hSNvADWNQf+yyRjhotay8x1Rzqzega0StJjYzsh2j8LMO2qImJHXoE7m1onLr6Jw6dcetjx2lbbDkZKigWSvAoMWaW9OgEK8g9uqe5xPlRz0Eisouy1PAmMTph52ibmtVCh9xpnqitp7mGhRG6eOrXTxh/lH36pDkPOxmK0v/UMg2CVHosqWkaLLzPvFOg/5HMZoJjcDsmpkvea+vgCwJUKz2/mxe7iYzw==
+  template:
+    metadata:
+      name: infisical-gateway-token
+      namespace: external-secrets

@@ -25,24 +25,14 @@ spec:
     targetRevision: "*"
     helm:
       releaseName: infisical-gateway
+      # Configuration MINIMALE : on s'aligne sur les défauts de la
+      # chart au lieu de les override. La chart attend par défaut un
+      # Secret nommé `infisical-gateway-environment` avec la clé
+      # `enrollment-token` — c'est ce qu'on a généré côté SealedSecret.
+      # Le `gateway.domain` reste configurable (EU region chez nous).
       values: |
         gateway:
-          name: gemline-cluster
           domain: https://eu.infisical.com
-          enrollment:
-            method: token
-            token:
-              # Référence le Secret K8s `infisical-gateway-token` créé
-              # par sealed-secrets depuis le SealedSecret en git. La
-              # chart lit la clé `token` (au lieu du défaut
-              # `enrollment-token`) — notre SealedSecret a été créé
-              # avec --from-literal=token=...
-              existingSecretRef: infisical-gateway-token
-              secretKey: token
-        # Pas besoin de persistence pour le Gateway en mode token —
-        # le token est ré-injecté à chaque restart via le Secret.
-        # Garder par défaut (5Gi PVC) si la chart l'exige, sinon
-        # désactiver pour économiser le stockage.
         persistence:
           enabled: true
           size: 1Gi

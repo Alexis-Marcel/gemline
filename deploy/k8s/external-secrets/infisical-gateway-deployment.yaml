@@ -1,0 +1,68 @@
+# Infisical Gateway — Deployment custom au lieu du Helm chart officiel.
+#
+# Pourquoi pas la chart : le chart v1.0.5 (le plus récent) ne câble pas
+# proprement les args de la CLI Infisical depuis ses values quand on
+# utilise enrollment.method=token. On se retrouve en mode "legacy" qui
+# demande une autre structure de Secret. Plus simple de gérer
+# nous-mêmes le Deployment — la commande à lancer est juste celle que
+# l'UI Infisical nous donne :
+#   infisical gateway start <name> --enroll-method=token --token=<T> --domain=<D>
+#
+# Le Gateway établit un tunnel outbound vers Infisical SaaS pour qu'on
+# puisse faire du Kubernetes Auth sans ouvrir le firewall.
+#
+# Le token est lu depuis un Secret (créé par sealed-secrets depuis
+# sealed-infisical-gateway-environment.yaml) avec la clé `enrollment-token`.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infisical-gateway
+  namespace: external-secrets
+  labels:
+    app: infisical-gateway
+spec:
+  replicas: 1
+  # Stratégie Recreate : un seul Gateway à la fois, pas de rolling
+  # update (la connexion outbound se réinitialise mieux comme ça).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: infisical-gateway
+  template:
+    metadata:
+      labels:
+        app: infisical-gateway
+    spec:
+      containers:
+        - name: gateway
+          # Image officielle CLI Infisical — la CLI a la sous-commande
+          # `gateway start`. Pin une version pour la reproductibilité.
+          image: infisical/cli:0.43.85
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ENROLLMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: infisical-gateway-environment
+                  key: enrollment-token
+          command: ["infisical"]
+          args:
+            - "gateway"
+            - "start"
+            - "gemline-cluster"
+            - "--enroll-method=token"
+            - "--token=$(ENROLLMENT_TOKEN)"
+            - "--domain=https://eu.infisical.com"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

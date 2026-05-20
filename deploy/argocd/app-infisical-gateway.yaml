@@ -1,0 +1,72 @@
+# ArgoCD Application — Infisical Gateway via la chart Helm officielle.
+#
+# Le Gateway établit un tunnel outbound vers Infisical SaaS (région EU),
+# permettant à Infisical de faire du Kubernetes Auth contre l'API K8s
+# privée de ce cluster sans qu'on ouvre le firewall.
+#
+# Le token Gateway vient d'un SealedSecret existant
+# (deploy/k8s/external-secrets/sealed-infisical-gateway-token.yaml)
+# avec la clé `token` — la chart accepte un existingSecretRef pour
+# éviter de stocker le token en clair dans values.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: infisical-gateway
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://dl.cloudsmith.io/public/infisical/helm-charts/helm/charts/
+    chart: infisical-gateway
+    # Bump as needed. Chart version != image version (image = infisical/cli).
+    targetRevision: "*"
+    helm:
+      releaseName: infisical-gateway
+      values: |
+        gateway:
+          name: gemline-cluster
+          domain: https://eu.infisical.com
+          enrollment:
+            method: token
+            token:
+              # Référence le Secret K8s `infisical-gateway-token` créé
+              # par sealed-secrets depuis le SealedSecret en git. La
+              # chart lit la clé `token` (au lieu du défaut
+              # `enrollment-token`) — notre SealedSecret a été créé
+              # avec --from-literal=token=...
+              existingSecretRef: infisical-gateway-token
+              secretKey: token
+        # Pas besoin de persistence pour le Gateway en mode token —
+        # le token est ré-injecté à chaque restart via le Secret.
+        # Garder par défaut (5Gi PVC) si la chart l'exige, sinon
+        # désactiver pour économiser le stockage.
+        persistence:
+          enabled: true
+          size: 1Gi
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            memory: 128Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-secrets
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

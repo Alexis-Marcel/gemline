@@ -16,6 +16,17 @@ for i in $(seq 1 60); do
   sleep 2
 done
 
+# Fallback: on Ubuntu 24.04 Hetzner images the netplan config that
+# carries the private NIC sometimes isn't applied (interface stays
+# DOWN with no IPv4). Without this, flannel can't bind and the agent
+# never registers with the CP. Idempotent — no-op if the wait above
+# already succeeded.
+if ! ip -4 addr show | grep -q "$PRIVATE_IP"; then
+  echo "==> private IP still missing — bringing enp7s0 up manually"
+  ip link set enp7s0 up || true
+  ip addr add "$PRIVATE_IP/24" dev enp7s0 || true
+fi
+
 echo "==> waiting for control plane API at $CP_PRIVATE_IP:6443"
 # Use a TCP probe rather than HTTP: kube-apiserver answers / with 401
 # (no auth provided), and curl -f rejects that as a failure, so the

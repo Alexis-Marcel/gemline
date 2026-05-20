@@ -39,8 +39,10 @@ resource "hcloud_server" "control_plane" {
   ssh_keys    = [hcloud_ssh_key.default.id]
 
   user_data = templatefile("${path.module}/cloud-init/control-plane.sh.tpl", {
-    private_ip = "10.0.1.10"
-    k3s_token  = var.k3s_token
+    private_ip           = "10.0.1.10"
+    k3s_token            = var.k3s_token
+    argocd_version       = var.argocd_version
+    argocd_apps_repo_raw = var.argocd_apps_repo_raw
   })
 
   labels = {

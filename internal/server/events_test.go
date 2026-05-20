@@ -18,7 +18,7 @@ import (
 func newTestPublisher(t *testing.T, podID string, invalidate func(string)) (*EventPublisher, *Hub, Repository) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hub := NewHub(log)
+	hub := NewHub(log, "")
 	repo := noopRepo{}
 	// nil backplane = single-process fallback path.
 	p := NewEventPublisher(repo, hub, nil, log, podID, invalidate)

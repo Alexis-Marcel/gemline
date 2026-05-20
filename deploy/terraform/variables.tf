@@ -68,6 +68,61 @@ variable "ssh_key_name" {
   default     = "gemline"
 }
 
+variable "cloudflare_api_token" {
+  description = <<-EOT
+    Cloudflare API token used to manage the DNS A record pointing the
+    app hostname at the control-plane public IP. Create it at
+    Cloudflare Dashboard → My Profile → API Tokens → Create Token, with
+    the "Edit zone DNS" template scoped to var.dns_zone.
+
+    Pre-req: var.dns_zone must be a zone in your Cloudflare account
+    (i.e. the registrar's nameservers point at Cloudflare's). If your
+    domain lives elsewhere, swap the cloudflare provider in dns.tf for
+    your registrar's (ovh, gandi, hetznerdns, …).
+  EOT
+  type        = string
+  sensitive   = true
+}
+
+variable "dns_zone" {
+  description = "Apex Cloudflare zone (e.g. \"werilo.fr\"). Must already exist in your Cloudflare account."
+  type        = string
+  default     = "werilo.fr"
+}
+
+variable "dns_subdomain" {
+  description = <<-EOT
+    Subdomain under var.dns_zone for the app — kept in sync with the
+    Host: header in deploy/k8s/ingress.yaml. Default "gemline" produces
+    "gemline.werilo.fr".
+  EOT
+  type        = string
+  default     = "gemline"
+}
+
+variable "argocd_version" {
+  description = <<-EOT
+    ArgoCD release applied by cloud-init on the control plane (after k3s
+    and cert-manager). v3+ is required for k3s 1.31+ — v2 ships an older
+    Deployment schema and ArgoCD diff calculation oscillates as Unknown.
+    Bump as needed; cloud-init just curls the matching install.yaml from
+    GitHub.
+  EOT
+  type        = string
+  default     = "v3.4.1"
+}
+
+variable "argocd_apps_repo_raw" {
+  description = <<-EOT
+    Raw GitHub URL base from which cloud-init pulls the initial ArgoCD
+    Application manifests (app-monitoring.yaml + app-gemline.yaml). Once
+    applied, ArgoCD itself reconciles further changes from this same
+    repo — cloud-init only runs at first boot.
+  EOT
+  type        = string
+  default     = "https://raw.githubusercontent.com/Alexis-Marcel/gemline/main/deploy/argocd"
+}
+
 variable "kubeapi_allowed_ips" {
   description = <<-EOT
     CIDRs allowed to reach the Kubernetes API on :6443.

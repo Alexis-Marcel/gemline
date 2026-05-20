@@ -1,6 +1,7 @@
-# cert-manager ClusterIssuer for Let's Encrypt production. Apply once,
-# after installing cert-manager (see DEPLOY.md). Edit the email below
-# to receive expiry warnings from Let's Encrypt.
+# cert-manager ClusterIssuer for Let's Encrypt production. Applied
+# automatically by ArgoCD via the gemline kustomization. The email
+# below is the contact LE pings before a cert expires — not a secret,
+# safe to commit.
 
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer

@@ -18,3 +18,8 @@ web/dist/
 *.tfstate
 *.tfstate.*
 .terraform/
+
+# Backup of the Sealed Secrets master key. Stored in a password manager
+# or offline drive; if a copy lands in the working tree by accident
+# this rule keeps it out of git.
+sealed-secrets-master-key*.yaml

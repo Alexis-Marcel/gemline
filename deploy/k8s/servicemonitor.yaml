@@ -1,0 +1,23 @@
+# ServiceMonitor is a CRD installed by kube-prometheus-stack (see
+# deploy/argocd/app-monitoring.yaml). The annotation below tells ArgoCD
+# to skip the dry-run when that CRD isn't registered yet — without it,
+# a fresh cluster sync fails on the chicken-and-egg between this object
+# and the chart that introduces its kind.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gemline-server
+  namespace: gemline
+  labels:
+    app: gemline-server
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  selector:
+    matchLabels:
+      app: gemline-server
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

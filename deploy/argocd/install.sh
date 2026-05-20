@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
-# Install ArgoCD on the cluster, then declare the Gemline application
-# so it self-syncs from the repo's deploy/k8s/ directory.
+# Install ArgoCD on the cluster, then declare the Gemline + monitoring
+# Applications so they self-sync from the repo.
 #
-# Run once, from your laptop with KUBECONFIG pointed at the cluster.
+# ⚠️  FRESH CLUSTERS DON'T NEED THIS SCRIPT.
+# The control-plane cloud-init
+# (deploy/terraform/cloud-init/control-plane.sh.tpl) already installs
+# ArgoCD and applies both Applications at first boot. Use this script
+# only to:
+#   - Re-bootstrap ArgoCD on a cluster where it was removed
+#   - Upgrade ArgoCD on an existing cluster (bump ARGOCD_VERSION below)
+#   - Apply the Applications on a cluster that was provisioned by some
+#     other means than this repo's Terraform
+#
+# Run from your laptop with KUBECONFIG pointed at the cluster.
 # Idempotent: re-running it picks up new ArgoCD releases or Application
 # spec changes.
 
@@ -38,6 +48,20 @@ for d in argocd-server argocd-repo-server argocd-applicationset-controller argoc
 done
 kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=3m
 
+echo "==> applying the sealed-secrets Application"
+# Apply first so the controller is up when the gemline kustomize
+# carries a SealedSecret. The CRD is what the SealedSecret manifest
+# references; ArgoCD's gemline sync waits/retries until it exists.
+kubectl apply -f "$(dirname "$0")/app-sealed-secrets.yaml"
+
+echo "==> applying the monitoring Application (kube-prometheus-stack)"
+# Apply this BEFORE app-gemline so the ServiceMonitor CRD exists when
+# ArgoCD syncs the gemline kustomize (which includes a ServiceMonitor).
+# We don't block on the sync completing here — auto-sync will pick it
+# up, and the gemline ServiceMonitor carries SkipDryRunOnMissingResource
+# so it'll retry until the CRD is registered.
+kubectl apply -f "$(dirname "$0")/app-monitoring.yaml"
+
 echo "==> applying the Gemline Application manifest"
 kubectl apply -f "$(dirname "$0")/app-gemline.yaml"
 
@@ -58,4 +82,11 @@ Login as 'admin' — the initial password is in the secret:
     -o jsonpath='{.data.password}' | base64 -d; echo
 
 Change it as soon as you've logged in (User Info → Update Password).
+
+To reach Grafana (after the monitoring app finishes its first sync):
+  kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+  open http://localhost:3000
+
+Login as 'admin' / 'changeme' (the value set in app-monitoring.yaml).
+Rotate the password from the Grafana UI on first login.
 EOF

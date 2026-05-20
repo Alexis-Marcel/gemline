@@ -3,6 +3,10 @@ kind: Service
 metadata:
   name: gemline-server
   namespace: gemline
+  labels:
+    # The ServiceMonitor in servicemonitor.yaml selects on this label to
+    # discover the scrape endpoint — keep it in sync with that selector.
+    app: gemline-server
 spec:
   type: ClusterIP
   selector:

@@ -57,15 +57,19 @@ type Hub struct {
 	mu   sync.RWMutex
 	subs map[string]map[*subscriber]struct{}
 	log  *slog.Logger
+	// kind tags the wsConnections gauge ("game" or "lobby") so dashboards
+	// can plot the two pools separately.
+	kind string
 }
 
-func NewHub(log *slog.Logger) *Hub {
+func NewHub(log *slog.Logger, kind string) *Hub {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Hub{
 		subs: make(map[string]map[*subscriber]struct{}),
 		log:  log,
+		kind: kind,
 	}
 }
 
@@ -77,6 +81,9 @@ func (h *Hub) Subscribe(gameID string) *subscriber {
 	}
 	h.subs[gameID][sub] = struct{}{}
 	h.mu.Unlock()
+	if h.kind != "" {
+		wsConnections.WithLabelValues(h.kind).Inc()
+	}
 	return sub
 }
 
@@ -90,6 +97,9 @@ func (h *Hub) Unsubscribe(gameID string, sub *subscriber) {
 	}
 	h.mu.Unlock()
 	close(sub.ch)
+	if h.kind != "" {
+		wsConnections.WithLabelValues(h.kind).Dec()
+	}
 }
 
 // Deliver fans an event out to every local subscriber of gameID. It is

@@ -8,6 +8,17 @@ hcloud_token = ""
 # (Anyone with this token can register as a node, so treat it like a password.)
 k3s_token = ""
 
+# Cloudflare API token with "Edit zone DNS" on var.dns_zone. Used to
+# create/update the A record pointing var.dns_subdomain.var.dns_zone at
+# the control-plane public IP. Create at
+# Cloudflare → My Profile → API Tokens → Create Token (Edit zone DNS).
+cloudflare_api_token = ""
+
+# Domain pieces — defaults produce "gemline.werilo.fr". The zone must
+# already be served by Cloudflare's nameservers.
+# dns_zone      = "werilo.fr"
+# dns_subdomain = "gemline"
+
 # Number of worker nodes. 0 = single-node cluster (CP only).
 # 1 = a 2-node cluster (CP + 1 worker). Default if unset.
 # worker_count = 1

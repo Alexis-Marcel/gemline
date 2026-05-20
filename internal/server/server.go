@@ -50,8 +50,8 @@ type Config struct {
 // pods; pass nil for single-process runs (tests, no DATABASE_URL) and
 // EventPublisher will fall back to direct local delivery.
 func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *Server {
-	hub := NewHub(log)
-	lobby := NewHub(log)
+	hub := NewHub(log, "game")
+	lobby := NewHub(log, "lobby")
 	podID := newPodID()
 	log.Info("server starting", "pod_id", podID)
 	srv := &Server{
@@ -192,7 +192,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/users/{userId}", s.getPublicProfile)
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
-	return loggingMiddleware(s.log, corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, mux)))
+	app := loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, mux))))
+
+	// /metrics is scraped by Prometheus inside the cluster — bypass
+	// CORS, auth, and slog noise by registering it on a top-level mux
+	// that routes everything else through the regular middleware chain.
+	top := http.NewServeMux()
+	top.Handle("GET /metrics", metricsHandler())
+	top.Handle("/", app)
+	return top
 }
 
 // StartMatcher kicks off the background matchmaker ticker on this pod.

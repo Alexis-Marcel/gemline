@@ -1,16 +1,13 @@
 # `kubectl apply -k deploy/k8s/` to deploy everything in one shot.
-# The Secret and ClusterIssuer are deliberately NOT in this list — they
-# carry environment-specific values (real DSN, email, hostname) and are
-# applied out-of-band, once per cluster.
+# The DSN + Supabase URL Secret is committed as a SealedSecret
+# (sealed-gemline-env.yaml) and decrypted in-cluster — no out-of-band
+# kubectl apply needed anymore.
 
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 namespace: gemline
 
-# Uncomment after generating the encrypted Secret with kubeseal — full
-# workflow in secret.example.yaml. The file must exist before this line
-# is uncommented, or kustomize build fails.
 resources:
 - namespace.yaml
 - server-deployment.yaml
@@ -19,6 +16,10 @@ resources:
 - web-deployment.yaml
 - web-service.yaml
 - ingress.yaml
+# cluster-issuer.yaml is cluster-scoped — kustomize's `namespace:` above
+# is a no-op for it. cert-manager picks it up by name when the ingress
+# annotation `cert-manager.io/cluster-issuer: letsencrypt-prod` matches.
+- cluster-issuer.yaml
 - sealed-gemline-env.yaml
 
 # CI flips the `latest` tag to the commit SHA via `kustomize edit set image`

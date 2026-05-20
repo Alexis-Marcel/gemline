@@ -20,6 +20,7 @@ kind: Kustomization
 resources:
   - sealed-infisical-auth.yaml
   - sealed-infisical-gateway-environment.yaml
+  - infisical-gateway-deployment.yaml
   - cluster-secret-store-infisical.yaml
   - external-secret-gemline-env.yaml
   - external-secret-grafana-admin.yaml

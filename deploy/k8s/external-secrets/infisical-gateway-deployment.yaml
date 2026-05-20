@@ -63,6 +63,12 @@ spec:
               memory: 128Mi
           securityContext:
             runAsNonRoot: true
+            # L'image infisical/cli n'a pas de USER non-root dans son
+            # Dockerfile. On force runAsUser à 1000 (= ce que fait la
+            # chart Helm officielle). K8s n'enforce le runAsNonRoot
+            # que si soit l'image a un USER non-root, soit on lui dit
+            # explicitement quel UID utiliser.
+            runAsUser: 1000
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]

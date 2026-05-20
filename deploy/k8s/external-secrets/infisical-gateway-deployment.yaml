@@ -1,0 +1,69 @@
+# Infisical Gateway — pont outbound entre Infisical SaaS et notre
+# cluster. Permet à Infisical d'atteindre l'API K8s (pour TokenReview
+# lors du Kubernetes Auth) sans qu'on ouvre le firewall.
+#
+# Le pod fait UNE connexion sortante TLS à app.infisical.com:443 au
+# boot, puis maintient la session persistente. Plus de magie qu'un
+# bon vieux tunnel TLS reverse (cf. ngrok, Cloudflare Tunnel,
+# Tailscale Subnet Router).
+#
+# Le token Gateway est lu depuis le SealedSecret sealed-infisical-gateway-token.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infisical-gateway
+  namespace: external-secrets
+  labels:
+    app: infisical-gateway
+spec:
+  # 1 replica suffit pour l'apprentissage. En vraie prod multi-AZ :
+  # 2-3 replicas + PodDisruptionBudget pour qu'un node drain ne tue
+  # pas la connexion à Infisical.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: infisical-gateway
+  template:
+    metadata:
+      labels:
+        app: infisical-gateway
+    spec:
+      containers:
+        - name: gateway
+          # Image officielle Infisical Gateway. Pinner une version
+          # précise en prod (genre v0.10.0) ; ":latest" est OK pour
+          # apprendre — tu suis automatiquement les releases.
+          image: infisical/gateway:latest
+          imagePullPolicy: Always
+          env:
+            # Le token JWT qu'on a récupéré dans Infisical UI étape 1
+            # et chiffré via SealedSecret. Le pod l'utilise pour
+            # s'identifier auprès d'Infisical au démarrage.
+            - name: INFISICAL_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: infisical-gateway-token
+                  key: token
+            # Cible Infisical SaaS public. Si tu self-host Infisical
+            # un jour, change pour ton URL.
+            - name: INFISICAL_API_URL
+              value: "https://app.infisical.com"
+          resources:
+            # Le Gateway est très léger — surtout du tunneling TCP/HTTPS
+            # avec ~aucun traitement métier.
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          # Pas de port exposé : le Gateway initie OUTBOUND vers
+          # Infisical, ne reçoit aucune connexion inbound. Pas de
+          # Service nécessaire.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

@@ -53,11 +53,15 @@ spec:
                     requests:
                       storage: 10Gi
         grafana:
-          # CHANGE THIS before applying — and rotate via the Grafana UI
-          # afterwards. Storing real creds in git is a footgun; for a
-          # production setup move this to a sealed-secret or external
-          # secret manager and reference it via `admin.existingSecret`.
-          adminPassword: changeme
+          # admin user/password pulled from Infisical via ESO. See
+          # deploy/k8s/external-secrets/external-secret-grafana-admin.yaml
+          # which creates the Secret `grafana-admin` with keys
+          # `admin-user` + `admin-password`. The chart reads it via
+          # admin.existingSecret + keys below.
+          admin:
+            existingSecret: grafana-admin
+            userKey: admin-user
+            passwordKey: admin-password
           defaultDashboardsEnabled: true
           persistence:
             enabled: true

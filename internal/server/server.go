@@ -120,6 +120,7 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *S
 	// HTTP-driven moves use, so clients render captures + the new state
 	// identically whether the move came from a human or a bot.
 	store.SetMoveListener(func(gameID string, mv game.MoveResult) {
+		movesPlayedTotal.WithLabelValues("bot").Inc()
 		rec, ok, err := store.Get(context.Background(), gameID)
 		if err != nil || !ok {
 			return
@@ -293,6 +294,7 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not create game")
 		return
 	}
+	gamesCreatedTotal.WithLabelValues(strconv.Itoa(req.Players), string(vis)).Inc()
 	seat, token, err := s.store.Join(r.Context(), rec.ID, name, userID, 0)
 	if err != nil {
 		s.log.Error("create-join", "err", err)
@@ -331,6 +333,10 @@ func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not matchmake")
 		return
 	}
+	// Matchmake creates a public game when no candidate exists. We can't
+	// tell from here whether this call created the game or joined an
+	// existing one — undercounting is fine, the createGame handler covers
+	// private games which are the majority anyway. Skip the increment.
 	name := s.displayNameFor(r.Context(), u)
 	seat, token, err := s.store.Join(r.Context(), rec.ID, name, u.ID, -1)
 	if err != nil {
@@ -815,6 +821,10 @@ func (s *Server) endByConcession(
 	dto := toGameDTO(rec)
 	rec.Unlock()
 	s.events.Publish(gameID, eventState(dto))
+	// WinKind.String() gives a low-cardinality label (alignment4/5/6,
+	// capture, resign, draw, timeout) — same vocabulary used on the wire
+	// and in the DB, so it lines up with manual queries.
+	gamesFinishedTotal.WithLabelValues(dto.WinKind.String()).Inc()
 	s.log.Info("game ended", "op", op, "game", gameID, "winner", dto.Winner, "kind", dto.WinKind)
 	writeJSON(w, http.StatusOK, dto)
 }
@@ -1002,6 +1012,7 @@ func (s *Server) postMove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusForMoveError(err), err.Error())
 		return
 	}
+	movesPlayedTotal.WithLabelValues("human").Inc()
 
 	rec.Lock()
 	dto := toGameDTO(rec)

@@ -1,0 +1,58 @@
+---
+# Rôle "networking" — configure le NIC privé Hetzner (enp7s0) si la
+# config Hetzner DHCP/netplan n'a pas atterri (vu sur les images
+# Ubuntu 24.04 minimal : l'interface reste DOWN et sans IP).
+#
+# Équivalent du fallback shell qu'on avait dans cloud-init, mais :
+#   - idempotent (re-jouer le playbook ne refait rien si tout est déjà bon)
+#   - re-jouable à tout moment (vs cloud-init qui ne tourne qu'au 1er boot)
+#   - testable (--check pour dry-run)
+
+# Étape 1 : Capturer l'état actuel de l'interface privée.
+# - changed_when: false → cette commande est read-only, jamais "changed"
+# - failed_when: false → si l'interface n'existe pas, on continue (sera
+#   créée par les tâches suivantes)
+# - check_mode: false → même en dry-run (`--check`), on veut lire l'état
+#   réel pour décider quoi faire
+- name: Read current state of {{ private_iface }}
+  ansible.builtin.command: "ip -4 -brief addr show {{ private_iface }}"
+  register: iface_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Étape 2 : Bring up the interface si elle est DOWN. La condition `when`
+# inspecte la sortie de l'étape précédente.
+- name: Bring up {{ private_iface }} if it's DOWN
+  ansible.builtin.command: "ip link set {{ private_iface }} up"
+  when: "'UP' not in iface_state.stdout"
+  changed_when: true  # cette commande modifie l'état système, donc "changed"
+
+# Étape 3 : Assigner l'IP privée en /32 (le modèle routé de Hetzner — pas
+# de /24 sur le lien direct, sinon ARP qui ne résout pas).
+- name: Assign private IP {{ private_ip }}/32 to {{ private_iface }}
+  ansible.builtin.command: "ip addr add {{ private_ip }}/32 dev {{ private_iface }}"
+  when: private_ip not in iface_state.stdout
+  changed_when: true
+
+# Étape 4 : Capturer les routes actuelles pour décider si elles
+# manquent. Même pattern que l'étape 1.
+- name: Read current routing table
+  ansible.builtin.command: ip route show
+  register: routes
+  changed_when: false
+  check_mode: false
+
+# Étape 5 : Route link-scope vers le gateway (sinon le kernel ne sait
+# pas comment ARPer la passerelle).
+- name: Add link-scope route to gateway {{ private_network_gateway }}
+  ansible.builtin.command: "ip route add {{ private_network_gateway }} dev {{ private_iface }} scope link"
+  when: (private_network_gateway + ' dev ' + private_iface + ' scope link') not in routes.stdout
+  changed_when: true
+
+# Étape 6 : Route vers tout le réseau privé via la passerelle. C'est
+# elle qui permet d'atteindre les autres nodes (10.0.1.x).
+- name: Add route for private network {{ private_network_cidr }}
+  ansible.builtin.command: "ip route add {{ private_network_cidr }} via {{ private_network_gateway }} dev {{ private_iface }}"
+  when: (private_network_cidr + ' via ' + private_network_gateway) not in routes.stdout
+  changed_when: true

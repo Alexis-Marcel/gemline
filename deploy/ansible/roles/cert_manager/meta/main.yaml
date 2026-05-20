@@ -1,0 +1,8 @@
+---
+# Métadonnées du rôle. Ansible lit `dependencies:` pour résoudre les
+# rôles à exécuter AVANT celui-ci. Ici : on s'assure que le SDK Python
+# `kubernetes` est installé avant qu'on tente d'utiliser les modules
+# kubernetes.core.
+
+dependencies:
+  - role: kubernetes_python_deps

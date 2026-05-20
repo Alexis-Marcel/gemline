@@ -1,0 +1,80 @@
+---
+# Rôle "argocd" — installe ArgoCD via le manifest officiel et attend
+# que les composants soient up. Pas d'install des Applications ici —
+# c'est le rôle `argocd_apps` qui s'en charge ensuite.
+#
+# Variables attendues :
+#   - argocd_install_manifest : URL du manifest officiel
+#                               (group_vars/all/vars.yaml)
+
+# Étape 1 : Créer le namespace `argocd`. Le module k8s sait créer une
+# ressource depuis une `definition:` inline (plus propre que de la
+# coller en YAML séparé pour un truc aussi simple).
+- name: Ensure argocd namespace exists
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: argocd
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+# Étape 2 : Télécharger le manifest officiel.
+- name: Download ArgoCD install manifest
+  ansible.builtin.get_url:
+    url: "{{ argocd_install_manifest }}"
+    dest: /tmp/argocd-install.yaml
+    mode: '0644'
+
+# Étape 3 : Apply le manifest. server-side apply + force_conflicts pour
+# les mêmes raisons que cert-manager (transition d'un manager à l'autre).
+# `namespace: argocd` force le scope (les ressources sans namespace dans
+# le YAML — Deployments, Services, etc. — atterrissent dans argocd).
+- name: Apply ArgoCD resources
+  kubernetes.core.k8s:
+    state: present
+    src: /tmp/argocd-install.yaml
+    namespace: argocd
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    apply: true
+    server_side_apply:
+      field_manager: ansible-bootstrap
+      force_conflicts: true
+
+# Étape 4 : Attendre les 4 Deployments d'ArgoCD.
+- name: Wait for ArgoCD deployments to be Available
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: argocd
+    name: "{{ item }}"
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 300
+  loop:
+    - argocd-server
+    - argocd-repo-server
+    - argocd-applicationset-controller
+    - argocd-notifications-controller
+
+# Étape 5 : Attendre le pod du StatefulSet `argocd-application-controller`.
+# On wait sur le POD (qui a une condition `Ready` standard) plutôt que
+# sur le StatefulSet (qui n'en a pas). `label_selectors:` cible les
+# pods qui matchent les labels — pareil que `kubectl get pod -l ...`.
+- name: Wait for ArgoCD application-controller pod to be Ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: argocd
+    label_selectors:
+      - "app.kubernetes.io/name=argocd-application-controller"
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    wait: true
+    wait_condition:
+      type: Ready
+      status: "True"
+    wait_timeout: 300

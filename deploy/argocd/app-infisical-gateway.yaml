@@ -29,9 +29,11 @@ spec:
       # chart au lieu de les override. La chart attend par défaut un
       # Secret nommé `infisical-gateway-environment` avec la clé
       # `enrollment-token` — c'est ce qu'on a généré côté SealedSecret.
-      # Le `gateway.domain` reste configurable (EU region chez nous).
+      # `gateway.name` doit matcher EXACTEMENT le nom du Gateway créé
+      # dans Infisical UI (sinon la CLI bail "please provide name flag").
       values: |
         gateway:
+          name: gemline-cluster
           domain: https://eu.infisical.com
         persistence:
           enabled: true

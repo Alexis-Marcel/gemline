@@ -60,6 +60,11 @@ echo "==> applying the external-secrets Application"
 # create ExternalSecret resources.
 kubectl apply -f "$(dirname "$0")/app-external-secrets.yaml"
 
+echo "==> applying the eso-config Application"
+# Cross-namespace ESO resources (Infisical auth SealedSecret,
+# ClusterSecretStore, ExternalSecrets for shared services).
+kubectl apply -f "$(dirname "$0")/app-eso-config.yaml"
+
 echo "==> applying the monitoring Application (kube-prometheus-stack)"
 # Apply this BEFORE app-gemline so the ServiceMonitor CRD exists when
 # ArgoCD syncs the gemline kustomize (which includes a ServiceMonitor).

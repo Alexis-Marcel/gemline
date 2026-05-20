@@ -19,3 +19,4 @@ kind: Kustomization
 
 resources:
   - sealed-infisical-auth.yaml
+  - cluster-secret-store-infisical.yaml

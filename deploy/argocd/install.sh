@@ -60,11 +60,6 @@ echo "==> applying the external-secrets Application"
 # create ExternalSecret resources.
 kubectl apply -f "$(dirname "$0")/app-external-secrets.yaml"
 
-echo "==> applying the infisical-gateway Application"
-# Outbound tunnel Infisical → cluster K8s API, for Kubernetes Auth
-# without opening the firewall. Free tier compatible via the CLI image.
-kubectl apply -f "$(dirname "$0")/app-infisical-gateway.yaml"
-
 echo "==> applying the eso-config Application"
 # Cross-namespace ESO resources (Infisical auth SealedSecret,
 # ClusterSecretStore, ExternalSecrets for shared services).

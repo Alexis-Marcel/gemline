@@ -19,7 +19,7 @@ resources:
 # Uncomment after generating the encrypted Secret with kubeseal — full
 # workflow in secret.example.yaml. The file must exist before this line
 # is uncommented, or kustomize build fails.
-# - sealed-gemline-env.yaml
+- sealed-gemline-env.yaml
 
 # CI flips the `latest` tag to the commit SHA via `kustomize edit set image`
 # before applying, so a rollback is just a re-apply with the previous tag.

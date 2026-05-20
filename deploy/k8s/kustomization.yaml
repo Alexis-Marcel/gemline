@@ -1,7 +1,7 @@
 # `kubectl apply -k deploy/k8s/` to deploy everything in one shot.
-# The DSN + Supabase URL Secret is committed as a SealedSecret
-# (sealed-gemline-env.yaml) and decrypted in-cluster — no out-of-band
-# kubectl apply needed anymore.
+# The DSN + Supabase URL Secret is now pulled from Infisical via an
+# ExternalSecret in deploy/k8s/external-secrets/ — not in this kustomize
+# (lives in another namespace / ESO config bundle).
 
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -20,7 +20,6 @@ resources:
 - web-service.yaml
 - ingress.yaml
 - cluster-issuer.yaml
-- sealed-gemline-env.yaml
 
 # CI flips the `latest` tag to the commit SHA via `kustomize edit set image`
 # before applying, so a rollback is just a re-apply with the previous tag.

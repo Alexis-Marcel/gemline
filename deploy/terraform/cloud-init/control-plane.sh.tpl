@@ -21,11 +21,19 @@ done
 # carries the private NIC sometimes isn't applied (interface stays
 # DOWN with no IPv4). Without this, flannel exits in a tight loop with
 # "failed to find IPv4 address for interface enp7s0" and k3s never
-# stabilises. Idempotent — no-op if the wait above already succeeded.
+# stabilises. We replicate exactly what Hetzner DHCP would have set:
+#   - /32 on the interface (Hetzner networks are routed, not switched —
+#     a /24 here makes the kernel ARP for peers that aren't on the same
+#     L2 segment, breaking node-to-node traffic)
+#   - link-scope route to 10.0.0.1 (the Hetzner gateway)
+#   - default-ish route for the whole private network via that gateway
+# Idempotent: no-op if the wait above already succeeded.
 if ! ip -4 addr show | grep -q "$PRIVATE_IP"; then
-  echo "==> private IP still missing — bringing enp7s0 up manually"
+  echo "==> private IP still missing — configuring enp7s0 manually (Hetzner-compatible)"
   ip link set enp7s0 up || true
-  ip addr add "$PRIVATE_IP/24" dev enp7s0 || true
+  ip addr add "$PRIVATE_IP/32" dev enp7s0 || true
+  ip route add 10.0.0.1 dev enp7s0 scope link || true
+  ip route add 10.0.0.0/16 via 10.0.0.1 dev enp7s0 || true
 fi
 
 # Fetch our own public IPv4 so it can go into the kube-apiserver

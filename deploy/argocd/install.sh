@@ -54,6 +54,12 @@ echo "==> applying the sealed-secrets Application"
 # references; ArgoCD's gemline sync waits/retries until it exists.
 kubectl apply -f "$(dirname "$0")/app-sealed-secrets.yaml"
 
+echo "==> applying the external-secrets Application"
+# ESO + Infisical for cluster secrets (DSN, etc.). Apply before gemline
+# so the ExternalSecret CRD exists when the gemline kustomize tries to
+# create ExternalSecret resources.
+kubectl apply -f "$(dirname "$0")/app-external-secrets.yaml"
+
 echo "==> applying the monitoring Application (kube-prometheus-stack)"
 # Apply this BEFORE app-gemline so the ServiceMonitor CRD exists when
 # ArgoCD syncs the gemline kustomize (which includes a ServiceMonitor).

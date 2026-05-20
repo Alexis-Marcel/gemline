@@ -28,5 +28,6 @@ argocd_install_manifest: "https://raw.githubusercontent.com/argoproj/argo-cd/{{ 
 argocd_apps_repo_raw: "https://raw.githubusercontent.com/Alexis-Marcel/gemline/main/deploy/argocd"
 argocd_apps:
   - app-sealed-secrets.yaml
+  - app-external-secrets.yaml
   - app-monitoring.yaml
   - app-gemline.yaml

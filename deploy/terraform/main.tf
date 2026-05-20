@@ -38,11 +38,10 @@ resource "hcloud_server" "control_plane" {
   location    = var.location
   ssh_keys    = [hcloud_ssh_key.default.id]
 
+  # Minimal cloud-init: just brings up the private NIC. k3s/ArgoCD/etc.
+  # installs moved to deploy/ansible/ (run via `make deploy`).
   user_data = templatefile("${path.module}/cloud-init/control-plane.sh.tpl", {
-    private_ip           = "10.0.1.10"
-    k3s_token            = var.k3s_token
-    argocd_version       = var.argocd_version
-    argocd_apps_repo_raw = var.argocd_apps_repo_raw
+    private_ip = "10.0.1.10"
   })
 
   labels = {
@@ -75,9 +74,7 @@ resource "hcloud_server" "workers" {
   ssh_keys    = [hcloud_ssh_key.default.id]
 
   user_data = templatefile("${path.module}/cloud-init/agent.sh.tpl", {
-    private_ip    = "10.0.1.${11 + count.index}"
-    cp_private_ip = "10.0.1.10"
-    k3s_token     = var.k3s_token
+    private_ip = "10.0.1.${11 + count.index}"
   })
 
   labels = {

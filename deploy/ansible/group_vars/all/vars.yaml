@@ -1,0 +1,32 @@
+# Variables globales — disponibles dans tous les playbooks pour tous les
+# hôtes. Versions épinglées ici pour qu'un bump = une ligne à changer.
+# Faut juste ne pas oublier de bumper aussi dans Terraform si certaines
+# se retrouvent en double — pour l'instant elles n'y sont qu'ici.
+
+# k3s : la même version sur CP et workers (sinon registration foire).
+k3s_channel: "stable"   # ou pin : k3s_version: "v1.35.4+k3s1"
+
+# Token pour join un node au cluster. Vient du vault chiffré.
+# Convention : "k3s_token" (visible ici) pointe sur "vault_k3s_token"
+# (chiffré dans vault.yaml). Cette indirection laisse les rôles utiliser
+# un nom propre tout en gardant la valeur protégée en git.
+k3s_token: "{{ vault_k3s_token }}"
+
+# cert-manager : URL du manifest, pas un Helm chart pour rester proche
+# de ce que faisait cloud-init.
+cert_manager_version: "v1.16.1"
+cert_manager_manifest_url: "https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.yaml"
+
+# ArgoCD : on installe le bundle officiel via kubectl apply
+argocd_version: "v3.4.1"
+argocd_install_manifest: "https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml"
+
+# ArgoCD Applications à appliquer après l'install — pulled depuis le repo
+# git pour rester synchro avec ce qui est commit. Si tu forkes, override
+# `argocd_apps_repo_raw` dans terraform.tfvars équivalent ansible (host
+# vars ou group_vars/all.yaml override).
+argocd_apps_repo_raw: "https://raw.githubusercontent.com/Alexis-Marcel/gemline/main/deploy/argocd"
+argocd_apps:
+  - app-sealed-secrets.yaml
+  - app-monitoring.yaml
+  - app-gemline.yaml

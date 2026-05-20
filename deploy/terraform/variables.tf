@@ -100,28 +100,10 @@ variable "dns_subdomain" {
   default     = "gemline"
 }
 
-variable "argocd_version" {
-  description = <<-EOT
-    ArgoCD release applied by cloud-init on the control plane (after k3s
-    and cert-manager). v3+ is required for k3s 1.31+ — v2 ships an older
-    Deployment schema and ArgoCD diff calculation oscillates as Unknown.
-    Bump as needed; cloud-init just curls the matching install.yaml from
-    GitHub.
-  EOT
-  type        = string
-  default     = "v3.4.1"
-}
-
-variable "argocd_apps_repo_raw" {
-  description = <<-EOT
-    Raw GitHub URL base from which cloud-init pulls the initial ArgoCD
-    Application manifests (app-monitoring.yaml + app-gemline.yaml). Once
-    applied, ArgoCD itself reconciles further changes from this same
-    repo — cloud-init only runs at first boot.
-  EOT
-  type        = string
-  default     = "https://raw.githubusercontent.com/Alexis-Marcel/gemline/main/deploy/argocd"
-}
+# `argocd_version` and `argocd_apps_repo_raw` used to live here when
+# cloud-init installed ArgoCD. They've moved to deploy/ansible/group_vars/
+# all/vars.yaml (`argocd_install_manifest`, `argocd_apps_repo_raw`). TF
+# doesn't need to know about them anymore.
 
 variable "kubeapi_allowed_ips" {
   description = <<-EOT

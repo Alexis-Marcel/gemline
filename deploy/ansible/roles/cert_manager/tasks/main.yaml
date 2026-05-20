@@ -1,0 +1,59 @@
+---
+# Rôle "cert_manager" — installe cert-manager via les modules natifs
+# kubernetes.core. Idempotent par design : les modules diffent l'état
+# désiré (le YAML upstream) avec l'état actuel du cluster, et ne
+# changent que ce qui doit l'être.
+#
+# Dépendance déclarée dans meta/main.yaml : kubernetes_python_deps tourne
+# automatiquement avant.
+
+# Étape 1 : Télécharger le manifest officiel localement sur le node.
+# `kubernetes.core.k8s` accepte un `src:` (chemin local) ou un
+# `definition:` (YAML inline) — pas d'URL directement. On télécharge
+# d'abord. `get_url` est idempotent : il check le timestamp HTTP et
+# ne re-télécharge que si le fichier distant a changé.
+- name: Download cert-manager manifest
+  ansible.builtin.get_url:
+    url: "{{ cert_manager_manifest_url }}"
+    dest: /tmp/cert-manager.yaml
+    mode: '0644'
+
+# Étape 2 : Apply le manifest. Le module `k8s` parse le YAML et fait
+# du SSA (Server-Side Apply) ressource par ressource. Si une ressource
+# est déjà là dans le même état, "ok". Si elle diff, "changed".
+#
+# force_conflicts: true — équivalent de `kubectl apply --force-conflicts`.
+# Nécessaire pour reprendre l'ownership des champs précédemment écrits
+# par "kubectl-client-side-apply" (l'install initial via cloud-init).
+# Sans ce flag, K8s refuse de modifier les champs déjà "owned" par un
+# autre manager → 409 FieldManagerConflict. Avec, on transfère
+# explicitement l'ownership à `ansible-bootstrap`.
+- name: Apply cert-manager resources
+  kubernetes.core.k8s:
+    state: present
+    src: /tmp/cert-manager.yaml
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    apply: true              # comportement type kubectl apply (vs replace)
+    server_side_apply:
+      field_manager: ansible-bootstrap
+      force_conflicts: true
+
+# Étape 3 : Attendre que les 3 deployments soient Available. Le module
+# `k8s_info` peut directement bloquer jusqu'à une condition — plus
+# propre que `kubectl wait` shell out.
+- name: Wait for cert-manager deployments to be Available
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: cert-manager
+    name: "{{ item }}"
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 480   # 8 min — laisse de la marge sur cx23 cold boot
+  loop:
+    - cert-manager
+    - cert-manager-webhook
+    - cert-manager-cainjector

@@ -30,6 +30,23 @@ var (
 		Name: "gemline_websocket_connections",
 		Help: "Active WebSocket connections, partitioned by hub kind.",
 	}, []string{"hub"})
+
+	// Business metrics. Labels stay low-cardinality: `players` ∈ [2..6],
+	// `outcome` ∈ {resign, draw, timeout, win}, `actor` ∈ {human, bot}.
+	gamesCreatedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gemline_games_created_total",
+		Help: "Total games created, partitioned by player count and visibility.",
+	}, []string{"players", "visibility"})
+
+	gamesFinishedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gemline_games_finished_total",
+		Help: "Total games that reached a terminal state, partitioned by outcome.",
+	}, []string{"outcome"})
+
+	movesPlayedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gemline_moves_played_total",
+		Help: "Total moves played, partitioned by actor (human or bot).",
+	}, []string{"actor"})
 )
 
 // metricsHandler serves the Prometheus exposition format on /metrics.

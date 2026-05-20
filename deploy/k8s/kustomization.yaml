@@ -8,6 +8,9 @@ kind: Kustomization
 
 namespace: gemline
 
+# cluster-issuer.yaml is cluster-scoped — kustomize's `namespace:` above
+# is a no-op for it. cert-manager picks it up by name when the ingress
+# annotation `cert-manager.io/cluster-issuer: letsencrypt-prod` matches.
 resources:
 - namespace.yaml
 - server-deployment.yaml
@@ -16,9 +19,6 @@ resources:
 - web-deployment.yaml
 - web-service.yaml
 - ingress.yaml
-# cluster-issuer.yaml is cluster-scoped — kustomize's `namespace:` above
-# is a no-op for it. cert-manager picks it up by name when the ingress
-# annotation `cert-manager.io/cluster-issuer: letsencrypt-prod` matches.
 - cluster-issuer.yaml
 - sealed-gemline-env.yaml
 
@@ -27,7 +27,7 @@ resources:
 images:
 - name: ghcr.io/alexis-marcel/gemline-server
   newName: ghcr.io/alexis-marcel/gemline-server
-  newTag: 163a9aea3624bfd08ce3bc4f2ca3c384c4220d57
+  newTag: 03fd84b738260e82e82f314d2acce7e7f8d019ca
 - name: ghcr.io/alexis-marcel/gemline-web
   newName: ghcr.io/alexis-marcel/gemline-web
-  newTag: 163a9aea3624bfd08ce3bc4f2ca3c384c4220d57
+  newTag: 03fd84b738260e82e82f314d2acce7e7f8d019ca

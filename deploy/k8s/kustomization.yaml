@@ -8,6 +8,9 @@ kind: Kustomization
 
 namespace: gemline
 
+# Uncomment after generating the encrypted Secret with kubeseal — full
+# workflow in secret.example.yaml. The file must exist before this line
+# is uncommented, or kustomize build fails.
 resources:
 - namespace.yaml
 - server-deployment.yaml
@@ -16,9 +19,6 @@ resources:
 - web-deployment.yaml
 - web-service.yaml
 - ingress.yaml
-# Uncomment after generating the encrypted Secret with kubeseal — full
-# workflow in secret.example.yaml. The file must exist before this line
-# is uncommented, or kustomize build fails.
 - sealed-gemline-env.yaml
 
 # CI flips the `latest` tag to the commit SHA via `kustomize edit set image`
@@ -26,7 +26,7 @@ resources:
 images:
 - name: ghcr.io/alexis-marcel/gemline-server
   newName: ghcr.io/alexis-marcel/gemline-server
-  newTag: 12b0f5d8263aea12944452c73aee218a9ad3b72b
+  newTag: 163a9aea3624bfd08ce3bc4f2ca3c384c4220d57
 - name: ghcr.io/alexis-marcel/gemline-web
   newName: ghcr.io/alexis-marcel/gemline-web
-  newTag: 12b0f5d8263aea12944452c73aee218a9ad3b72b
+  newTag: 163a9aea3624bfd08ce3bc4f2ca3c384c4220d57

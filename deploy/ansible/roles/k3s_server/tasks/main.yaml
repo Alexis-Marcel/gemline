@@ -1,0 +1,70 @@
+---
+# Rôle "k3s_server" — installe k3s en mode "server" (control plane) sur
+# le node CP. Idempotent : si k3s est déjà installé, ne fait rien.
+#
+# Variables attendues (depuis l'inventaire / group_vars) :
+#   - private_ip          : IP privée du node (10.0.1.10)
+#   - private_iface       : nom de l'interface privée (enp7s0)
+#   - k3s_channel         : "stable", "latest" ou version pinnée
+#   - k3s_token           : token de cluster (depuis vault)
+#   - ansible_host        : IP publique (utilisée pour --tls-san)
+
+# Précondition : on REFUSE de tourner si k3s_token n'est pas fourni.
+# Sans token, l'install tournerait mais générerait un token aléatoire,
+# rendant impossible le join des workers. Mieux vaut bail tôt avec un
+# message clair que créer un cluster cassé silencieusement.
+- name: Ensure k3s_token is provided
+  ansible.builtin.assert:
+    that:
+      - k3s_token is defined
+      - k3s_token | length > 0
+    fail_msg: >
+      k3s_token is missing. Provide it via Ansible Vault (see
+      group_vars/all/vault.yaml) and run with --ask-vault-pass.
+
+# Idempotence marker n°1 : présence du binaire. Si /usr/local/bin/k3s
+# existe, on considère que l'install a déjà tourné. C'est le pattern
+# canonique pour "check if a tool is installed" en Ansible.
+- name: Check if k3s is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_binary
+
+# Lance le script d'install officiel. Les env vars `INSTALL_K3S_*`
+# pilotent le mode (server vs agent), les flags passés à k3s, et le
+# token. Le `creates:` est une 2e couche d'idempotence (si le binaire
+# apparait pendant l'exécution pour une raison X, on retry pas).
+#
+# Pourquoi `shell` et pas `command` : on a un `|` (pipe) qui demande
+# un shell pour être interprété. `command` exécute en exec direct, pas
+# d'expansion. `shell` invoque /bin/sh -c.
+- name: Install k3s server
+  ansible.builtin.shell: |
+    curl -sfL https://get.k3s.io | \
+      INSTALL_K3S_CHANNEL={{ k3s_channel }} \
+      INSTALL_K3S_EXEC="server --node-ip={{ private_ip }} \
+                               --advertise-address={{ private_ip }} \
+                               --flannel-iface={{ private_iface }} \
+                               --tls-san={{ ansible_host }}" \
+      K3S_TOKEN="{{ k3s_token }}" \
+      sh -
+  args:
+    creates: /usr/local/bin/k3s
+  when: not k3s_binary.stat.exists
+  # `no_log` masque la sortie : le token apparaîtrait sinon dans les
+  # logs Ansible côté laptop. Tradeoff : si l'install foire, on perd
+  # la sortie d'erreur. À retirer temporairement si tu débuggues.
+  no_log: true
+
+# Attente active : kubectl get nodes doit répondre avant qu'on
+# considère l'install OK. Utile si on enchaîne sur d'autres tâches
+# (cert-manager, ArgoCD) qui ont besoin de l'API.
+- name: Wait for k3s API to be reachable
+  ansible.builtin.command: /usr/local/bin/kubectl get nodes
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: nodes_check
+  until: nodes_check.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false

@@ -1,0 +1,28 @@
+---
+# Rôle "kubernetes_python_deps" — installe les pré-requis Python pour
+# que les modules kubernetes.core puissent tourner sur ce node.
+#
+# Les modules kubernetes.core (k8s, k8s_info, helm, …) sont écrits en
+# Python et utilisent la lib officielle `kubernetes`. Cette lib doit
+# être présente sur le node où la task est EXÉCUTÉE — donc sur le CP
+# pour nous, puisqu'on délègue les tasks K8s là-bas.
+#
+# Sur Ubuntu 24.04, PEP 668 interdit `pip install` global sans flag.
+# On force avec --break-system-packages, qui est OK ici parce que ces
+# VMs sont à usage unique (single-tenant k3s). En vrai prod multi-app,
+# tu utiliserais un venv dédié + ansible_python_interpreter.
+
+- name: Install python3-pip
+  ansible.builtin.apt:
+    name: python3-pip
+    state: present
+    update_cache: true
+    cache_valid_time: 3600  # ne refresh apt qu'une fois par heure
+
+- name: Install kubernetes Python SDK
+  ansible.builtin.pip:
+    name:
+      - kubernetes>=28.0.0   # version minimum requise par kubernetes.core
+      - PyYAML
+    state: present
+    extra_args: --break-system-packages

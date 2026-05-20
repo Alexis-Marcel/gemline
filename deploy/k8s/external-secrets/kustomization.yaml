@@ -1,0 +1,21 @@
+# Kustomize for External Secrets Operator config.
+#
+# Lives separately from deploy/k8s/ because the resources here span
+# multiple namespaces (or are cluster-scoped):
+#   - infisical-auth Secret      → namespace: external-secrets
+#   - ClusterSecretStore         → cluster-scoped
+#   - ExternalSecret per app     → namespace of the consuming app
+#
+# Deploy/k8s/kustomization.yaml has `namespace: gemline` at its top,
+# which would force-rewrite the namespace of every resource — broken
+# for cross-namespace setups. This kustomization deliberately omits
+# the `namespace:` field so each resource keeps the namespace
+# declared in its own metadata.
+#
+# Synced by deploy/argocd/app-eso-config.yaml.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - sealed-infisical-auth.yaml

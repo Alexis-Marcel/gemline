@@ -53,7 +53,10 @@ jobs:
         uses: Infisical/secrets-action@v1.0.16
         with:
           method: oidc
-          domain: https://app.infisical.com
+          # EU region — the project lives on eu.infisical.com, not the
+          # global app.infisical.com. Pointing to the wrong region
+          # returns 404 "OIDC auth method not found for identity".
+          domain: https://eu.infisical.com
           identity-id: 09158407-59f2-474f-b5b4-0b5e1d6febb2
           project-slug: gemline
           env-slug: prod

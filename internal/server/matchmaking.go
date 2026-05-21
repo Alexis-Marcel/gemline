@@ -35,4 +35,3 @@ func withinBand(callerRating, candidateRating int, age time.Duration) bool {
 	delta := math.Abs(float64(callerRating) - float64(candidateRating))
 	return delta <= scoreBandFor(age)
 }
-

@@ -50,7 +50,7 @@ jobs:
       # Infisical OIDC: same pattern, different provider.
       # Exposes every secret in env=prod as env vars on the runner.
       - name: Infisical OIDC + fetch secrets
-        uses: Infisical/secrets-action@v1.0.10
+        uses: Infisical/secrets-action@v1.0.16
         with:
           method: oidc
           domain: https://app.infisical.com

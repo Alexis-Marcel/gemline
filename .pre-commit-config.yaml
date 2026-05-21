@@ -1,0 +1,41 @@
+# Pre-commit hooks for this repo.
+#
+# Install once on your laptop:
+#   brew install pre-commit
+#   pre-commit install
+#
+# After that, every `git commit` runs these hooks against the staged
+# files. A failing hook aborts the commit until you fix it (or run with
+# --no-verify, but we don't do that here).
+#
+# To run manually against everything:
+#   pre-commit run --all-files
+#
+# To bump hook versions:
+#   pre-commit autoupdate
+
+repos:
+  # Terraform: fmt + validate + tflint. Runs only on changes to
+  # deploy/terraform/**.
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.105.0
+    hooks:
+      - id: terraform_fmt
+      - id: terraform_validate
+      - id: terraform_tflint
+        args:
+          - --args=--config=__GIT_WORKING_DIR__/deploy/terraform/.tflint.hcl
+
+  # Generic hygiene hooks — fast, no-config.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # Some K8s manifests use templating that breaks the YAML parser.
+        # Exclude paths that contain raw template syntax if needed.
+        args: [--allow-multiple-documents]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]

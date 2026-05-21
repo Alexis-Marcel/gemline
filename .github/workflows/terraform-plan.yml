@@ -1,0 +1,154 @@
+# Terraform Plan on PR.
+#
+# Triggered on any PR that touches deploy/terraform/** or this workflow.
+# Runs fmt-check / init / validate / tflint / trivy / plan, and posts
+# the plan output as a PR comment.
+#
+# Auth: zero long-lived secrets in GitHub.
+#   - AWS (state bucket + lock table): OIDC -> arn:aws:iam::386324384913:role/gemline-tf-plan
+#   - Infisical (HCLOUD_TOKEN, CLOUDFLARE_API_TOKEN, ...): OIDC -> machine identity
+#
+# The role is least-privilege: it can only read the state object and
+# CRUD the lock item. No write to state, no other AWS service access.
+
+name: Terraform Plan
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/terraform/**'
+      - '.github/workflows/terraform-plan.yml'
+
+permissions:
+  contents: read         # checkout
+  id-token: write        # request OIDC JWT from GitHub
+  pull-requests: write   # post plan comment
+
+concurrency:
+  # One plan at a time per PR. A new push cancels the in-flight one to
+  # avoid racing for the DynamoDB lock.
+  group: terraform-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      # AWS OIDC: exchange GitHub-signed JWT for short-lived STS creds.
+      # The IAM role's trust policy verifies repo + branch/PR + audience.
+      - name: AWS OIDC auth
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::386324384913:role/gemline-tf-plan
+          aws-region: eu-west-3
+
+      # Infisical OIDC: same pattern, different provider.
+      # Exposes every secret in env=prod as env vars on the runner.
+      - name: Infisical OIDC + fetch secrets
+        uses: Infisical/secrets-action@v1.0.10
+        with:
+          method: oidc
+          domain: https://app.infisical.com
+          identity-id: 09158407-59f2-474f-b5b4-0b5e1d6febb2
+          project-slug: gemline
+          env-slug: prod
+          secret-path: /
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.5
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.62.1
+
+      # Static checks first — fail fast before touching state.
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive
+
+      # -lockfile=readonly ensures the .terraform.lock.hcl is honored
+      # exactly as committed, no silent upgrades in CI.
+      - name: terraform init
+        run: terraform init -input=false -lockfile=readonly
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: tflint
+        run: |
+          tflint --init
+          tflint -f compact
+
+      # Trivy scans the Terraform code itself for insecure declarations
+      # (open security groups, unencrypted storage, etc.). Severity
+      # HIGH/CRITICAL fails the job — anything else is informational.
+      - name: Trivy IaC scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: deploy/terraform
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+      # The actual plan. TF_VAR_* env vars are picked up by Terraform as
+      # input variables. The Infisical secrets are already on the
+      # runner's env from the auth step above; we just rename them with
+      # the TF_VAR_ prefix.
+      - name: terraform plan
+        id: plan
+        env:
+          TF_VAR_hcloud_token: ${{ env.HCLOUD_TOKEN }}
+          TF_VAR_cloudflare_api_token: ${{ env.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -o pipefail
+          terraform plan -no-color -input=false -out=tfplan.bin 2>&1 | tee plan.txt
+        continue-on-error: true
+
+      # Always post the plan, even on failure, so the PR author can see
+      # what went wrong without diving into Actions logs.
+      - name: Post plan to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = '';
+            try {
+              plan = fs.readFileSync('deploy/terraform/plan.txt', 'utf8');
+            } catch (e) {
+              plan = '(plan output unavailable - see workflow logs)';
+            }
+            // GitHub comment hard limit is ~65535 chars.
+            const max = 60000;
+            if (plan.length > max) {
+              plan = plan.substring(0, max) + '\n\n... (truncated, see workflow logs for full output)';
+            }
+            const outcome = '${{ steps.plan.outcome }}';
+            const status = outcome === 'success' ? 'OK' : 'FAILED';
+            const body = [
+              `### Terraform Plan: ${status}`,
+              '',
+              '<details><summary>Plan output</summary>',
+              '',
+              '```hcl',
+              plan,
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      # Re-fail the job if the plan step failed (continue-on-error masked it).
+      - name: Fail if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1

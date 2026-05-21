@@ -49,16 +49,18 @@ jobs:
       run:
         working-directory: deploy/terraform
     steps:
-      - uses: actions/checkout@v4
+      # SHA-pinned actions: see terraform-plan.yml for the rationale and
+      # how to bump.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: AWS OIDC auth
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4
         with:
           role-to-assume: arn:aws:iam::386324384913:role/gemline-tf-apply
           aws-region: eu-west-3
 
       - name: Infisical OIDC + fetch secrets
-        uses: Infisical/secrets-action@v1.0.16
+        uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995  # v1.0.16
         with:
           method: oidc
           domain: https://eu.infisical.com
@@ -68,7 +70,7 @@ jobs:
           env-slug: prod
           secret-path: /
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3
         with:
           terraform_version: 1.14.5
 
@@ -80,18 +82,42 @@ jobs:
       - name: terraform validate
         run: terraform validate
 
-      - name: terraform apply
-        id: apply
+      # Plan-then-apply pattern: compute the plan once, save it to a
+      # file, then apply that exact plan. Guarantees that what's applied
+      # matches what was just computed (no second refresh that could
+      # show a different reality). The plan binary is also archived as
+      # an artifact for audit.
+      - name: terraform plan (post-approval)
+        id: plan
         env:
           TF_VAR_hcloud_token: ${{ env.HCLOUD_TOKEN }}
           TF_VAR_cloudflare_api_token: ${{ env.CLOUDFLARE_API_TOKEN }}
           TF_VAR_kubeapi_allowed_ips: ${{ env.KUBEAPI_ALLOWED_IPS }}
         run: |
           set -o pipefail
-          terraform apply -auto-approve -input=false -no-color 2>&1 | tee apply.txt
+          terraform plan -out=tfplan.bin -input=false -no-color 2>&1 | tee plan.txt
 
-      # Append a summary visible on the workflow run page. Useful for
-      # post-deploy review without digging through raw logs.
+      # Archive the binary plan (retention 30d). If something goes
+      # wrong post-apply, this is the evidence of what was promised.
+      - name: Archive plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: deploy/terraform/tfplan.bin
+          retention-days: 30
+
+      # Apply the exact plan we just computed. No -auto-approve needed
+      # (and not accepted): a saved plan file is itself the approval.
+      - name: terraform apply (saved plan)
+        id: apply
+        run: |
+          set -o pipefail
+          terraform apply -input=false -no-color tfplan.bin 2>&1 | tee apply.txt
+
+      # Append a summary visible on the workflow run page. Shows the
+      # plan (what was about to happen) and the apply (what actually
+      # happened). On failure, comparing the two pinpoints whether the
+      # apply diverged from the plan or failed for another reason.
       - name: Job summary
         if: always()
         run: |
@@ -99,12 +125,21 @@ jobs:
             echo "## Terraform Apply"
             echo ""
             echo "**Commit:** \`${{ github.sha }}\`"
-            echo "**Outcome:** ${{ steps.apply.outcome }}"
+            echo "**Plan:**   ${{ steps.plan.outcome }}"
+            echo "**Apply:**  ${{ steps.apply.outcome }}"
+            echo ""
+            echo "<details><summary>Plan output</summary>"
+            echo ""
+            echo '```hcl'
+            head -c 30000 plan.txt 2>/dev/null || echo "(no plan output)"
+            echo '```'
+            echo ""
+            echo "</details>"
             echo ""
             echo "<details><summary>Apply output</summary>"
             echo ""
             echo '```hcl'
-            head -c 60000 apply.txt 2>/dev/null || echo "(no output)"
+            head -c 30000 apply.txt 2>/dev/null || echo "(no apply output)"
             echo '```'
             echo ""
             echo "</details>"

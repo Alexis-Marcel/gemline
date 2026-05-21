@@ -124,4 +124,3 @@ func TestHandleGameEventNotif_NoSubsSkipsDelivery(t *testing.T) {
 		t.Fatalf("test setup broken: hub should not report subs for game-1")
 	}
 }
-

@@ -314,4 +314,3 @@ func (s *Server) wsLobby(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-

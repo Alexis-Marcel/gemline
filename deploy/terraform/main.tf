@@ -3,8 +3,9 @@
 # Topology:
 #   - 1 control-plane node (k3s server) with the public IP
 #   - N worker nodes (k3s agents), joining over a private Hetzner network
-#   - Pre-shared join token (var.k3s_token) so cloud-init can do its job
-#     without any extra round-trip
+#
+# k3s install + join token are handled by Ansible (see deploy/ansible/).
+# Terraform only provisions the VMs, network, firewall, and DNS.
 #
 # Set worker_count = 0 to fall back to a single-node cluster.
 

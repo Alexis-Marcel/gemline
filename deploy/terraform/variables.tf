@@ -4,16 +4,6 @@ variable "hcloud_token" {
   sensitive   = true
 }
 
-variable "k3s_token" {
-  description = <<-EOT
-    Shared secret used by every node to authenticate cluster membership.
-    Generate one once and pin it here: openssl rand -hex 32
-    Anyone who has this token can register themselves as a node.
-  EOT
-  type        = string
-  sensitive   = true
-}
-
 variable "server_name" {
   description = "Prefix for every resource in the Hetzner dashboard (servers, network, firewall)."
   type        = string
@@ -57,9 +47,15 @@ variable "image" {
 }
 
 variable "ssh_public_key_path" {
-  description = "Local path to the SSH public key uploaded to every node."
+  description = <<-EOT
+    Path to the SSH public key uploaded to every node. Default points
+    to the repo-committed key at ssh-keys/admin.pub (resolved relative
+    to the Terraform module). The committed key is *public* — fine to
+    track in git. Override locally with your own path if needed (the
+    pathexpand() in main.tf handles `~`).
+  EOT
   type        = string
-  default     = "~/.ssh/id_ed25519.pub"
+  default     = "./ssh-keys/admin.pub"
 }
 
 variable "ssh_key_name" {

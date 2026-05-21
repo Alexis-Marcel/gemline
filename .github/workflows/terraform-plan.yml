@@ -109,6 +109,9 @@ jobs:
         env:
           TF_VAR_hcloud_token: ${{ env.HCLOUD_TOKEN }}
           TF_VAR_cloudflare_api_token: ${{ env.CLOUDFLARE_API_TOKEN }}
+          # List-typed var: TF parses JSON when value starts with [ or {.
+          # Infisical stores it as `["x.y.z.t/32", ...]`.
+          TF_VAR_kubeapi_allowed_ips: ${{ env.KUBEAPI_ALLOWED_IPS }}
         run: |
           set -o pipefail
           terraform plan -no-color -input=false -out=tfplan.bin 2>&1 | tee plan.txt

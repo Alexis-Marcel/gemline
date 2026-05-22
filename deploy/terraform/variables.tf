@@ -16,6 +16,23 @@ variable "server_type" {
   default     = "cx23"
 }
 
+variable "cp_count" {
+  description = <<-EOT
+    Number of control-plane nodes.
+      1 = non-HA (single point of failure, fine for dev/learning).
+      3/5/7 = HA with k3s embedded etcd. Quorum needs an odd number
+              of nodes; only odd values >= 3 give real fault tolerance.
+    Even numbers are rejected to keep cluster semantics sane.
+  EOT
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = contains([1, 3, 5, 7], var.cp_count)
+    error_message = "cp_count must be 1 (non-HA) or 3/5/7 (HA with embedded etcd)."
+  }
+}
+
 variable "worker_count" {
   description = "How many worker nodes to attach to the control plane (0 = single-node cluster)."
   type        = number

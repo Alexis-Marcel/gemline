@@ -15,7 +15,9 @@ resource "cloudflare_record" "app" {
   zone_id = data.cloudflare_zones.selected.zones[0].id
   name    = var.dns_subdomain
   type    = "A"
-  value   = hcloud_server.control_plane.ipv4_address
+  # Pointe sur le premier CP. En Phase 2 (HA), ce record sera repointé
+  # sur l'IP publique du Hetzner Load Balancer qui fronte tous les CPs.
+  value = hcloud_server.control_plane[0].ipv4_address
   # 60s TTL keeps the recovery window short if we ever rebuild the CP
   # and the public IP changes — a fresh apply pushes the new value and
   # clients see it within a minute.

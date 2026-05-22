@@ -20,6 +20,11 @@
 - name: Install k3s server on control plane
   hosts: control_plane
   gather_facts: false
+  # serial: 1 ensures the first CP completes its --cluster-init before
+  # additional CPs attempt --server. Without this, in HA mode (cp_count
+  # >= 3), the join attempts on cp2/cp3 race the bootstrap on cp1 and
+  # the install script fails to reach the API.
+  serial: 1
   roles:
     - role: k3s_server
       tags: [k3s, k3s_server]
@@ -31,8 +36,12 @@
     - role: k3s_agent
       tags: [k3s, k3s_agent]
 
-- name: Install cluster add-ons on control plane
-  hosts: control_plane
+# Add-ons (cert-manager, ArgoCD, ArgoCD apps) live IN the cluster as
+# K8s objects, not on a specific node. Applying them from every CP is
+# redundant and racey. We restrict to the first CP — any CP would do
+# but pinning to one keeps the logs single-threaded and idempotent.
+- name: Install cluster add-ons (run once, from first CP)
+  hosts: control_plane[0]
   gather_facts: false
   roles:
     - role: cert_manager

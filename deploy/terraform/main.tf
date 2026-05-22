@@ -29,11 +29,25 @@ resource "hcloud_network_subnet" "internal" {
 }
 
 # ---------------------------------------------------------------------------
-# Control plane
+# Control plane (count = var.cp_count)
 # ---------------------------------------------------------------------------
+#
+# 1 CP   = non-HA (current default).
+# 3+ CPs = HA via k3s embedded etcd. Quorum requires odd numbers >= 3.
+#
+# Phase 1 of the HA migration: the resources are now counted but
+# cp_count stays at its default (1). Apply produces zero infra
+# change thanks to the `moved` blocks below.
 
 resource "hcloud_server" "control_plane" {
-  name        = "${var.server_name}-cp"
+  count = var.cp_count
+
+  # When cp_count == 1, keep the historical name "gemline-cp" so the
+  # Ansible inventory script (which hard-codes that name) keeps
+  # working. When cp_count > 1, switch to suffixed names; the Ansible
+  # side will need updating in Phase 4 to match.
+  name = var.cp_count == 1 ? "${var.server_name}-cp" : "${var.server_name}-cp${count.index + 1}"
+
   server_type = var.server_type
   image       = var.image
   location    = var.location
@@ -42,7 +56,7 @@ resource "hcloud_server" "control_plane" {
   # Minimal cloud-init: just brings up the private NIC. k3s/ArgoCD/etc.
   # installs moved to deploy/ansible/ (run via `make deploy`).
   user_data = templatefile("${path.module}/cloud-init/control-plane.sh.tpl", {
-    private_ip = "10.0.1.10"
+    private_ip = "10.0.1.${10 + count.index}"
   })
 
   labels = {
@@ -57,9 +71,24 @@ resource "hcloud_server" "control_plane" {
 }
 
 resource "hcloud_server_network" "control_plane" {
-  server_id  = hcloud_server.control_plane.id
+  count      = var.cp_count
+  server_id  = hcloud_server.control_plane[count.index].id
   network_id = hcloud_network.internal.id
-  ip         = "10.0.1.10"
+  ip         = "10.0.1.${10 + count.index}"
+}
+
+# State migration: the singleton CP resources are now counted, which
+# would normally trigger destroy+create. The `moved` block (TF >= 1.1)
+# tells Terraform to rewrite the addresses in state instead — zero
+# infra change on apply.
+moved {
+  from = hcloud_server.control_plane
+  to   = hcloud_server.control_plane[0]
+}
+
+moved {
+  from = hcloud_server_network.control_plane
+  to   = hcloud_server_network.control_plane[0]
 }
 
 # ---------------------------------------------------------------------------
@@ -145,7 +174,7 @@ resource "hcloud_firewall" "public" {
 resource "hcloud_firewall_attachment" "all_nodes" {
   firewall_id = hcloud_firewall.public.id
   server_ids = concat(
-    [hcloud_server.control_plane.id],
+    hcloud_server.control_plane[*].id,
     hcloud_server.workers[*].id,
   )
 }

@@ -1,52 +1,51 @@
 ---
-# Rôle "k3s_agent" — installe k3s en mode "agent" (worker) sur les
-# nodes workers. Joint le cluster via l'IP privée du CP + le k3s_token
-# partagé. Idempotent : skip si k3s déjà installé.
+# Rôle "k3s_agent" — installe k3s en mode "agent" (worker) sur tous les
+# nodes workers. Idempotent : skip si k3s déjà là.
+#
+# HA model (phase 3): workers join the cluster through the Load
+# Balancer (https://{{ lb_ipv4 }}:6443), not via a specific CP IP. This
+# means a worker survives the loss of any individual CP — the LB
+# auto-routes to whichever CP is still healthy.
 #
 # Variables attendues :
-#   - private_ip          : IP privée DU WORKER (10.0.1.11, 10.0.1.12, …)
-#   - private_iface       : nom de l'interface privée (enp7s0)
+#   - private_ip          : IP privée DU WORKER (10.0.1.{N})
+#   - private_iface       : interface privée (enp7s0)
 #   - k3s_channel         : "stable", "latest" ou version pinnée
-#   - k3s_token           : token du cluster (depuis vault)
-#   - groups['control_plane'][0] : nom d'inventaire du CP, pour récupérer
-#                                  son IP privée via hostvars
+#   - k3s_token           : token du cluster (vault)
+#   - lb_ipv4             : IP publique du Hetzner LB (pour K3S_URL)
 
-# Précondition n°1 : token disponible.
+# Précondition : token.
 - name: Ensure k3s_token is provided
   ansible.builtin.assert:
     that:
       - k3s_token is defined
       - k3s_token | length > 0
-    fail_msg: "k3s_token missing — provide via Ansible Vault"
+    fail_msg: "k3s_token missing - provide via Ansible Vault"
 
-# Précondition n°2 : connaître l'IP du CP pour s'y connecter.
-# `hostvars` est un dict des variables de TOUS les hôtes de l'inventaire.
-# `groups.control_plane[0]` = le 1er host du groupe "control_plane"
-# (gemline-cp). On récupère son `private_ip` depuis l'inventory.
-- name: Resolve control-plane private IP
-  ansible.builtin.set_fact:
-    cp_private_ip: "{{ hostvars[groups['control_plane'][0]]['private_ip'] }}"
-
-- name: Ensure CP private IP was resolved
+# Précondition : LB IP.
+- name: Ensure lb_ipv4 is provided
   ansible.builtin.assert:
     that:
-      - cp_private_ip is defined
-      - cp_private_ip | length > 0
-    fail_msg: "Could not resolve control_plane private_ip from inventory"
+      - lb_ipv4 is defined
+      - lb_ipv4 | length > 0
+    fail_msg: "lb_ipv4 missing from inventory - Hetzner LB not provisioned?"
 
-# Idempotence : skip l'install si k3s déjà là.
+# Idempotence : skip si k3s déjà là.
 - name: Check if k3s is already installed
   ansible.builtin.stat:
     path: /usr/local/bin/k3s
   register: k3s_binary
 
-- name: Install k3s agent (joins control plane at {{ cp_private_ip }})
+# Joins the cluster via the LB endpoint. The LB load-balances 6443
+# across all CPs, so this worker can be installed whichever CP is
+# currently leader. K3S_URL replaces the older direct-CP wiring.
+- name: Install k3s agent (joins via LB at {{ lb_ipv4 }})
   ansible.builtin.shell: |
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_CHANNEL={{ k3s_channel }} \
       INSTALL_K3S_EXEC="agent --node-ip={{ private_ip }} \
                               --flannel-iface={{ private_iface }}" \
-      K3S_URL="https://{{ cp_private_ip }}:6443" \
+      K3S_URL="https://{{ lb_ipv4 }}:6443" \
       K3S_TOKEN="{{ k3s_token }}" \
       sh -
   args:
@@ -54,13 +53,10 @@
   when: not k3s_binary.stat.exists
   no_log: true
 
-# Vérification : `kubectl wait` est l'outil dédié — il poll lui-même
-# l'API et exit 0 dès que le node est Ready, ou 1 au timeout. Plus
-# propre que de faire la boucle nous-mêmes avec until/retries.
-#
-# delegate_to: on exécute la commande depuis le CP (qui a kubectl
-# configuré), pas depuis le worker. Pattern essentiel d'Ansible : la
-# task itère sur les workers mais on délègue la vérification au CP.
+# `kubectl wait` from the first CP — that node has kubectl and a valid
+# kubeconfig (the additional CPs do too, but the first is always there).
+# delegate_to: l'exécution est faite sur le premier CP, pas sur le
+# worker. Pattern Ansible standard pour "vérifier depuis ailleurs".
 - name: Wait for this node to be Ready in the cluster
   ansible.builtin.command: >
     /usr/local/bin/kubectl wait

@@ -13,6 +13,20 @@ output "control_plane_ipv4_all" {
   value       = hcloud_server.control_plane[*].ipv4_address
 }
 
+output "control_plane_private_ips" {
+  description = <<-EOT
+    Private IPv4 of every CP, indexed the same as control_plane_ipv4_all.
+    The Ansible inventory consumes this to populate `private_ip` hostvars
+    without having to recompute the allocation logic on its own side.
+  EOT
+  value       = hcloud_server_network.control_plane[*].ip
+}
+
+output "worker_private_ips" {
+  description = "Private IPv4 of every worker, indexed same as worker_ipv4."
+  value       = hcloud_server_network.workers[*].ip
+}
+
 output "load_balancer_ipv4" {
   description = <<-EOT
     Public IPv4 of the Hetzner Load Balancer. The Cloudflare A record

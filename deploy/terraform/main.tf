@@ -103,8 +103,11 @@ resource "hcloud_server" "workers" {
   location    = var.location
   ssh_keys    = [hcloud_ssh_key.default.id]
 
+  # Worker private IPs start right after the CP range. CPs take
+  # 10.0.1.10..10+cp_count-1, workers continue from there. Keeps the
+  # allocation collision-free when we bump cp_count from 1 to 3.
   user_data = templatefile("${path.module}/cloud-init/agent.sh.tpl", {
-    private_ip = "10.0.1.${11 + count.index}"
+    private_ip = "10.0.1.${10 + var.cp_count + count.index}"
   })
 
   labels = {
@@ -126,7 +129,8 @@ resource "hcloud_server_network" "workers" {
   count      = var.worker_count
   server_id  = hcloud_server.workers[count.index].id
   network_id = hcloud_network.internal.id
-  ip         = "10.0.1.${11 + count.index}"
+  # Must match the IP injected by cloud-init via user_data above.
+  ip = "10.0.1.${10 + var.cp_count + count.index}"
 }
 
 # ---------------------------------------------------------------------------

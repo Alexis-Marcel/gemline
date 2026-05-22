@@ -69,43 +69,74 @@ def terraform_outputs() -> dict:
 def build_inventory(outputs: dict) -> dict:
     """Construct the Ansible-format inventory from TF outputs.
 
-    Matches the structure of the previous static inventory.yaml so the
-    rest of Ansible (playbooks, roles, group_vars) doesn't need to change.
+    Handles both the legacy single-CP layout (cp_count == 1) and the
+    HA layout (cp_count >= 3). The dimensioning is driven entirely by
+    the lists returned by Terraform; this script doesn't recompute IP
+    allocation, just consumes what TF has already decided.
     """
-    cp_ip = outputs["control_plane_ipv4"]
-    worker_ips = outputs.get("worker_ipv4", [])
+    # Lists of IPs straight from Terraform. control_plane_ipv4_all and
+    # *_private_ips were added in HA phase 1+3; fall back to the older
+    # scalar control_plane_ipv4 if we're running against a pre-phase-1
+    # state for any reason.
+    cp_public_ips = outputs.get(
+        "control_plane_ipv4_all",
+        [outputs["control_plane_ipv4"]] if "control_plane_ipv4" in outputs else [],
+    )
+    cp_private_ips = outputs.get("control_plane_private_ips", [])
+    worker_public_ips = outputs.get("worker_ipv4", [])
+    worker_private_ips = outputs.get("worker_private_ips", [])
+    lb_ipv4 = outputs.get("load_balancer_ipv4", "")
 
-    # Common vars for all hosts (was: `all.vars` in inventory.yaml)
+    # Common vars for all hosts (was: `all.vars` in inventory.yaml).
+    # lb_ipv4 is shared so k3s_server and k3s_agent roles can target
+    # the Load Balancer for --tls-san and --server flags.
     common_vars = {
         "ansible_user": "root",
         "ansible_python_interpreter": "/usr/bin/python3",
         "private_network_cidr": "10.0.0.0/16",
         "private_network_gateway": "10.0.0.1",
         "private_iface": "enp7s0",
+        "lb_ipv4": lb_ipv4,
     }
 
-    # Per-host vars. The private IP convention matches Terraform's
-    # static assignment (CP = 10.0.1.10, workers = 10.0.1.{11,12,...}).
-    hostvars = {
-        "gemline-cp": {
-            "ansible_host": cp_ip,
-            "private_ip": "10.0.1.10",
-        },
-    }
-    for i, w_ip in enumerate(worker_ips):
+    # Naming convention: single-CP setups keep the historical
+    # "gemline-cp" alias (no suffix) so playbook tags and operator
+    # muscle memory keep working. Multi-CP uses cp1/cp2/cp3.
+    if len(cp_public_ips) == 1:
+        cp_hostnames = ["gemline-cp"]
+    else:
+        cp_hostnames = [f"gemline-cp{i + 1}" for i in range(len(cp_public_ips))]
+
+    hostvars = {}
+    for i, name in enumerate(cp_hostnames):
+        # Fall back to computed private IP if the output wasn't
+        # available (older state). Phase 1+3 onwards, the list is
+        # always there.
+        priv = cp_private_ips[i] if i < len(cp_private_ips) else f"10.0.1.{10 + i}"
+        hostvars[name] = {
+            "ansible_host": cp_public_ips[i],
+            "private_ip": priv,
+        }
+
+    worker_hostnames = []
+    for i, w_ip in enumerate(worker_public_ips):
         name = f"gemline-w{i + 1}"
+        worker_hostnames.append(name)
+        priv = (
+            worker_private_ips[i]
+            if i < len(worker_private_ips)
+            else f"10.0.1.{10 + len(cp_public_ips) + i}"
+        )
         hostvars[name] = {
             "ansible_host": w_ip,
-            "private_ip": f"10.0.1.{11 + i}",
+            "private_ip": priv,
         }
 
     return {
         "_meta": {"hostvars": hostvars},
         "all": {"vars": common_vars},
-        "control_plane": {"hosts": ["gemline-cp"]},
-        "workers": {
-            "hosts": [f"gemline-w{i + 1}" for i in range(len(worker_ips))],
-        },
+        "control_plane": {"hosts": cp_hostnames},
+        "workers": {"hosts": worker_hostnames},
         "k3s_cluster": {
             "children": ["control_plane", "workers"],
         },

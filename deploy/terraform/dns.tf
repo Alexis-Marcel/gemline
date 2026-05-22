@@ -15,9 +15,10 @@ resource "cloudflare_record" "app" {
   zone_id = data.cloudflare_zones.selected.zones[0].id
   name    = var.dns_subdomain
   type    = "A"
-  # Pointe sur le premier CP. En Phase 2 (HA), ce record sera repointé
-  # sur l'IP publique du Hetzner Load Balancer qui fronte tous les CPs.
-  value = hcloud_server.control_plane[0].ipv4_address
+  # Points at the Hetzner Load Balancer which fronts the CP(s) on
+  # 6443/80/443. Single stable address for kubectl, workers, and
+  # browsers — survives any individual CP failure.
+  value = hcloud_load_balancer.main.ipv4
   # 60s TTL keeps the recovery window short if we ever rebuild the CP
   # and the public IP changes — a fresh apply pushes the new value and
   # clients see it within a minute.

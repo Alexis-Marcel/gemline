@@ -116,6 +116,9 @@
   when:
     - not k3s_binary.stat.exists
     - not is_first_cp
+  # `no_log` masque la sortie qui contient le K3S_TOKEN. Si tu débuggues un join
+  # qui foire (par ex. LB pas joignable, cert SAN absent), bascule temporairement
+  # à `no_log: false` pour voir l'output de l'install script.
   no_log: true
 
 # --- Final wait: API reachable from this node -------------------------

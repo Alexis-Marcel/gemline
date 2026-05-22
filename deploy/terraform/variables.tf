@@ -25,7 +25,7 @@ variable "cp_count" {
     Even numbers are rejected to keep cluster semantics sane.
   EOT
   type        = number
-  default     = 1
+  default     = 3
 
   validation {
     condition     = contains([1, 3, 5, 7], var.cp_count)

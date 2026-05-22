@@ -178,3 +178,100 @@ resource "hcloud_firewall_attachment" "all_nodes" {
     hcloud_server.workers[*].id,
   )
 }
+
+# ---------------------------------------------------------------------------
+# Load Balancer (HA phase 2)
+# ---------------------------------------------------------------------------
+#
+# Fronts the K8s API (6443) and the app HTTP/HTTPS ingress (80/443).
+# Routes to control-plane nodes via the private network. Necessary for
+# HA: once cp_count > 1, kubectl + workers + browsers all share one
+# stable address, and a CP failure becomes transparent.
+#
+# In phase 2 the LB simply sits in front of the existing single CP —
+# adds one hop but proves the routing layer end-to-end before we add
+# more CPs in phase 4.
+
+resource "hcloud_load_balancer" "main" {
+  name               = "${var.server_name}-lb"
+  load_balancer_type = "lb11" # 1 vCPU, 50 GbE pipe, 20k concurrent — ample for our scale
+  location           = var.location
+
+  labels = {
+    project = "gemline"
+  }
+}
+
+# Attach to the private network so LB->CP traffic stays on Hetzner's
+# private fabric (free, no egress charge, no public hop).
+resource "hcloud_load_balancer_network" "main" {
+  load_balancer_id = hcloud_load_balancer.main.id
+  network_id       = hcloud_network.internal.id
+}
+
+# Targets are chosen by Hetzner labels, not by static server IDs. When
+# we bump cp_count to 3 in phase 4, the two new CPs inherit
+# role=control-plane and are auto-added — no Terraform churn here.
+resource "hcloud_load_balancer_target" "control_plane" {
+  load_balancer_id = hcloud_load_balancer.main.id
+  type             = "label_selector"
+  label_selector   = "role=control-plane"
+  use_private_ip   = true
+
+  # The LB must be in the private network before targets using
+  # use_private_ip can resolve; Terraform can't infer this through the
+  # label_selector indirection.
+  depends_on = [hcloud_load_balancer_network.main]
+}
+
+# K8s API. Workers and kubectl talk to <lb-ip>:6443.
+# TCP passthrough — TLS is terminated by the kube-apiserver itself.
+resource "hcloud_load_balancer_service" "api" {
+  load_balancer_id = hcloud_load_balancer.main.id
+  protocol         = "tcp"
+  listen_port      = 6443
+  destination_port = 6443
+
+  health_check {
+    protocol = "tcp"
+    port     = 6443
+    interval = 15
+    timeout  = 10
+    retries  = 3
+  }
+}
+
+# App HTTP — used both by Traefik and by cert-manager's HTTP-01 ACME
+# challenges (Let's Encrypt hits gemline.werilo.fr:80/.well-known/...).
+resource "hcloud_load_balancer_service" "http" {
+  load_balancer_id = hcloud_load_balancer.main.id
+  protocol         = "tcp"
+  listen_port      = 80
+  destination_port = 80
+
+  health_check {
+    protocol = "tcp"
+    port     = 80
+    interval = 15
+    timeout  = 10
+    retries  = 3
+  }
+}
+
+# App HTTPS — TCP passthrough, TLS terminated by Traefik on the
+# destination. Keeps cert lifecycle (cert-manager + Traefik) in one
+# place; the LB is just a dumb pipe.
+resource "hcloud_load_balancer_service" "https" {
+  load_balancer_id = hcloud_load_balancer.main.id
+  protocol         = "tcp"
+  listen_port      = 443
+  destination_port = 443
+
+  health_check {
+    protocol = "tcp"
+    port     = 443
+    interval = 15
+    timeout  = 10
+    retries  = 3
+  }
+}

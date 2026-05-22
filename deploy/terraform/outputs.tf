@@ -13,6 +13,16 @@ output "control_plane_ipv4_all" {
   value       = hcloud_server.control_plane[*].ipv4_address
 }
 
+output "load_balancer_ipv4" {
+  description = <<-EOT
+    Public IPv4 of the Hetzner Load Balancer. The Cloudflare A record
+    for `var.dns_subdomain.var.dns_zone` points here. kubectl, workers,
+    and browsers should target this address (or the FQDN) rather than
+    any individual CP IP.
+  EOT
+  value       = hcloud_load_balancer.main.ipv4
+}
+
 output "app_fqdn" {
   description = "Fully-qualified hostname the cluster serves at — A record managed by dns.tf."
   value       = "${var.dns_subdomain}.${var.dns_zone}"

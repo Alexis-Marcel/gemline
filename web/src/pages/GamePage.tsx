@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
-import { useMatchmake } from "../api/matchmake";
 import { useAuth } from "../auth/AuthProvider";
 import type { Color, Game, GameRatings, Replay } from "../api/types";
 import {
@@ -60,14 +59,6 @@ export function GamePage() {
   // to the chat + replay underneath without nagging.
   const [endModalDismissed, setEndModalDismissed] = useState(false);
 
-  // Matchmaking driver for the "Nouvelle partie" action surfaced both
-  // in the modal and in the sidebar after the game ends. On match,
-  // save creds and navigate to the new game.
-  const matchmake = useMatchmake();
-  const matchmakeBusy =
-    matchmake.state.status === "queueing" ||
-    matchmake.state.status === "queued";
-
   // Stones captured by the most recent move, kept around briefly so the
   // Board can animate them out. Each entry has a unique key so React doesn't
   // re-use a dying ghost when a subsequent capture lands on the same cell.
@@ -107,23 +98,6 @@ export function GamePage() {
       setPresence((prev) => ({ ...prev, [seatIndex]: online }));
     });
   }, [id]);
-
-  // When the matchmaking queue resolves to a match, jump into the new
-  // game with the seat token the server handed us. Errors get surfaced
-  // through the existing setError pipe.
-  useEffect(() => {
-    if (matchmake.state.status === "matched") {
-      const { match } = matchmake.state;
-      saveCredentials(match.gameId, {
-        token: match.token,
-        seatIndex: match.seatIndex,
-        name: match.name,
-      });
-      navigate(`/game/${match.gameId}`);
-    } else if (matchmake.state.status === "error") {
-      setError(matchmake.state.message);
-    }
-  }, [matchmake.state, navigate]);
 
   // Initial ratings fetch on mount, plus a refetch on the
   // playing→finished transition so the modal has data even if the WS
@@ -438,10 +412,11 @@ export function GamePage() {
   }
 
   // "Nouvelle partie" mirrors the visibility of the game that just
-  // ended: a public/matchmade game funnels back into matchmaking, a
-  // private game spawns a fresh empty private game with the same
-  // player count. handleNewPrivateGame reuses the caller's seat name
-  // (held in creds) so an anonymous host doesn't have to retype it.
+  // ended: a public/matchmade game funnels back into matchmaking
+  // (via the dedicated /play/<mode> page), a private game spawns a
+  // fresh empty private game with the same player count.
+  // handleNewPrivateGame reuses the caller's seat name (held in creds)
+  // so an anonymous host doesn't have to retype it.
   const [creatingNew, setCreatingNew] = useState(false);
   // Seat index currently being invited via the SeatInviteModal. -1
   // means the modal is closed; an integer value pins the modal to a
@@ -471,13 +446,15 @@ export function GamePage() {
   // for authed users the server falls back to the profile name, but
   // having creds at all means we know who's asking). Public/matchmade
   // branch needs auth — matchmaking 401s anonymous callers server-side.
+  // Public branch just hands the user off to the dedicated matchmaking
+  // page; the queue lifecycle lives there.
   const onNewGame =
     isPrivate && creds
       ? handleNewPrivateGame
       : !isPrivate && user
-        ? () => matchmake.start(playerCount)
+        ? () => navigate(playerCount > 2 ? "/play/multi" : "/play/1v1")
         : null;
-  const newGameBusy = creatingNew || matchmakeBusy;
+  const newGameBusy = creatingNew;
 
   if (!game) {
     return (
@@ -718,11 +695,7 @@ export function GamePage() {
                   disabled={newGameBusy}
                   className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
                 >
-                  {creatingNew
-                    ? "Création…"
-                    : matchmakeBusy
-                      ? "Recherche…"
-                      : "Nouvelle partie"}
+                  {creatingNew ? "Création…" : "Nouvelle partie"}
                 </button>
               )}
               <RematchControls
@@ -740,15 +713,6 @@ export function GamePage() {
               >
                 Quitter
               </button>
-              {matchmakeBusy && (
-                <button
-                  type="button"
-                  onClick={() => matchmake.cancel()}
-                  className="w-full text-xs text-zinc-500 hover:text-zinc-300"
-                >
-                  Annuler la recherche
-                </button>
-              )}
             </div>
           )}
 
@@ -797,22 +761,11 @@ export function GamePage() {
           mySeatIndex={mySeatIndex}
           rematching={rematching}
           newGameBusy={newGameBusy}
-          newGameBusyLabel={creatingNew ? "Création…" : matchmakeBusy ? "Recherche…" : null}
+          newGameBusyLabel={creatingNew ? "Création…" : null}
           onOfferRematch={handleOfferRematch}
           onDeclineRematch={handleDeclineRematch}
           onGoToRematch={handleGoToRematch}
-          onNewGame={
-            onNewGame
-              ? () => {
-                  // Close the modal so the queueing feedback in the
-                  // sidebar is visible. The hook continues running;
-                  // a match resolves to a navigate(...) via the effect
-                  // above.
-                  setEndModalDismissed(true);
-                  onNewGame();
-                }
-              : null
-          }
+          onNewGame={onNewGame}
           onClose={() => setEndModalDismissed(true)}
           onLeave={handleLeave}
         />

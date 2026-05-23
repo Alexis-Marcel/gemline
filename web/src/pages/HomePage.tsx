@@ -1,51 +1,14 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
-import { useMatchmake, type MatchmakeState } from "../api/matchmake";
 import { useAuth } from "../auth/AuthProvider";
 import { Button } from "../components/Button";
 import { UserNav } from "../components/UserNav";
 import { saveCredentials } from "../lib/auth";
 
-// Multi rooms open at the engine's max — the matcher decides the
-// actual room size (3..6) at start time based on how many people are
-// queued.
-const MULTIPLAYER_MAX_SEATS = 6;
+// Private rooms open at the engine's max — the host decides who actually
+// plays via invites / bots before clicking Start.
 const PRIVATE_SEATS = 6;
-
-// oneVOneStatus / multiStatus render the live queue indicator under the
-// matchmaking buttons while we're queued. They read from the matchmake
-// state's `progress` field (populated by queue_update WS events) and
-// fall back to a neutral message when no tick has reported yet.
-function oneVOneStatus(state: MatchmakeState): string {
-  if (state.status !== "queued") {
-    return "On te trouve un adversaire. Reste sur cette page.";
-  }
-  const count = state.progress?.count;
-  if (count == null || count <= 1) {
-    return "On te trouve un adversaire. Reste sur cette page.";
-  }
-  return `${count} joueurs en file. Pairing par classement en cours…`;
-}
-
-function multiStatus(state: MatchmakeState): string {
-  if (state.status !== "queued") {
-    return "On accumule 3 à 6 joueurs. Reste sur cette page.";
-  }
-  const count = state.progress?.count ?? 1;
-  const eta = state.progress?.etaSeconds;
-  const label = `${count}/${MULTIPLAYER_MAX_SEATS} joueurs en attente`;
-  if (count < 3) {
-    return `${label} — il faut au moins 3 pour démarrer.`;
-  }
-  if (eta == null) {
-    return label;
-  }
-  if (eta <= 1) {
-    return `${label} — démarrage imminent…`;
-  }
-  return `${label} — démarre dans ${eta}s`;
-}
 
 type Mode = "menu" | "private-name";
 
@@ -57,45 +20,17 @@ export function HomePage() {
   const [mode, setMode] = useState<Mode>("menu");
   const [hostName, setHostName] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const matchmake = useMatchmake();
-  // Track which button the user clicked so the spinner attaches to it
-  // rather than to both 1v1 and multi at once.
-  const [queuedFor, setQueuedFor] = useState<"1v1" | "multi" | null>(null);
 
-  // When the matcher resolves to a match, save the seat credentials and
-  // navigate. The hook stays in "matched" state until we leave the page,
-  // which is fine — the navigation effectively unmounts this component
-  // and the hook's cleanup teardown fires.
-  useEffect(() => {
-    if (matchmake.state.status === "matched") {
-      const { match } = matchmake.state;
-      saveCredentials(match.gameId, {
-        token: match.token,
-        seatIndex: match.seatIndex,
-        name: match.name,
-      });
-      navigate(`/game/${match.gameId}`);
-    } else if (matchmake.state.status === "error") {
-      setError(matchmake.state.message);
-      setQueuedFor(null);
-    } else if (matchmake.state.status === "idle") {
-      setQueuedFor(null);
-    }
-  }, [matchmake.state, navigate]);
-
-  async function findMatch(players: number, key: "1v1" | "multi") {
+  // findMatch routes the user to the dedicated matchmaking page. The queue
+  // lifecycle (enqueue / match_found / cancel) lives there — keeping it off
+  // HomePage lets this view stay a thin menu.
+  function findMatch(target: "1v1" | "multi") {
     if (!user) {
-      navigate("/login?next=/");
+      navigate(`/login?next=${encodeURIComponent(`/play/${target}`)}`);
       return;
     }
     setError(null);
-    setQueuedFor(key);
-    await matchmake.start(players);
-  }
-
-  async function cancelMatch() {
-    await matchmake.cancel();
-    setQueuedFor(null);
+    navigate(`/play/${target}`);
   }
 
   async function createPrivate(name?: string) {
@@ -161,37 +96,15 @@ export function HomePage() {
           Jouer en ligne
         </h2>
         <BigAction
-          label={queuedFor === "1v1" ? "Recherche en cours…" : "1 contre 1"}
-          sub={
-            queuedFor === "1v1"
-              ? oneVOneStatus(matchmake.state)
-              : "Trouve un adversaire pour un duel."
-          }
-          onClick={() =>
-            queuedFor === "1v1" ? cancelMatch() : findMatch(2, "1v1")
-          }
-          loading={
-            queuedFor === "1v1" && matchmake.state.status === "queueing"
-          }
-          tone={queuedFor === "1v1" ? undefined : "primary"}
-          cancellable={queuedFor === "1v1"}
+          label="1 contre 1"
+          sub="Trouve un adversaire pour un duel."
+          onClick={() => findMatch("1v1")}
+          tone="primary"
         />
         <BigAction
-          label={queuedFor === "multi" ? "Recherche en cours…" : "Multijoueur"}
-          sub={
-            queuedFor === "multi"
-              ? multiStatus(matchmake.state)
-              : "3 à 6 joueurs. La partie démarre dès qu'assez de monde est là."
-          }
-          onClick={() =>
-            queuedFor === "multi"
-              ? cancelMatch()
-              : findMatch(MULTIPLAYER_MAX_SEATS, "multi")
-          }
-          loading={
-            queuedFor === "multi" && matchmake.state.status === "queueing"
-          }
-          cancellable={queuedFor === "multi"}
+          label="Multijoueur"
+          sub="3 à 6 joueurs. La partie démarre dès qu'assez de monde est là."
+          onClick={() => findMatch("multi")}
         />
       </section>
 
@@ -285,14 +198,12 @@ function BigAction({
   onClick,
   loading,
   tone,
-  cancellable,
 }: {
   label: string;
   sub: string;
   onClick: () => void;
   loading?: boolean;
   tone?: "primary";
-  cancellable?: boolean;
 }) {
   const base =
     "w-full rounded-xl border px-4 py-3 text-left transition disabled:opacity-50";
@@ -300,23 +211,15 @@ function BigAction({
     "border-amber-400 bg-amber-400/10 text-amber-100 hover:bg-amber-400/20";
   const neutral =
     "border-zinc-800 bg-zinc-900/40 text-zinc-100 hover:border-zinc-600";
-  // Cancellable buttons stay enabled (the click cancels the queue);
-  // non-cancellable buttons disable while loading so users can't
-  // double-click. The label change ("Recherche en cours…") signals
-  // state regardless.
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={loading && !cancellable}
+      disabled={loading}
       className={`${base} ${tone === "primary" ? primary : neutral}`}
     >
-      <div className="text-base font-medium">
-        {loading ? "Recherche…" : label}
-      </div>
-      <div className="mt-0.5 text-xs text-zinc-400">
-        {cancellable ? `${sub} — clique pour annuler.` : sub}
-      </div>
+      <div className="text-base font-medium">{loading ? "…" : label}</div>
+      <div className="mt-0.5 text-xs text-zinc-400">{sub}</div>
     </button>
   );
 }

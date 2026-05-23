@@ -6,6 +6,7 @@ import { HomePage } from "./pages/HomePage";
 import { GamePage } from "./pages/GamePage";
 import { LeaderboardPage } from "./pages/LeaderboardPage";
 import { LoginPage, SignupPage } from "./pages/LoginPage";
+import { MatchmakingPage } from "./pages/MatchmakingPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import { PublicProfilePage } from "./pages/PublicProfilePage";
 
@@ -22,6 +23,8 @@ export default function App() {
               <Route path="/profile" element={<ProfilePage />} />
               <Route path="/profile/:userId" element={<PublicProfilePage />} />
               <Route path="/leaderboard" element={<LeaderboardPage />} />
+              <Route path="/play/1v1" element={<MatchmakingPage mode="1v1" />} />
+              <Route path="/play/multi" element={<MatchmakingPage mode="multi" />} />
               <Route path="/game/:id" element={<GamePage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

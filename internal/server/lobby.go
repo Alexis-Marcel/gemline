@@ -67,6 +67,12 @@ const (
 	LobbyEventInviteReceived  = "invite_received"
 	LobbyEventInviteCancelled = "invite_cancelled"
 	LobbyEventQueueUpdate     = "queue_update"
+	// LobbyEventRematchReady delivers a player's fresh seat credentials
+	// for a rematch game that pre-seated them. Wire shape matches
+	// match_found (LobbyMatchPayload) so the client can share the
+	// save-creds path; the discriminator is kept distinct so the
+	// matchmaking hook doesn't react to it as a real match.
+	LobbyEventRematchReady = "rematch_ready"
 )
 
 // LobbyQueueUpdatePayload is the wire shape of the per-tick "you have

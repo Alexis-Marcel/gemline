@@ -22,6 +22,7 @@ import {
 } from "react";
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
+import { saveCredentials } from "../lib/auth";
 import { playNotificationSound } from "../lib/notificationSound";
 import { userSocket, type InvitePayload } from "../api/userSocket";
 
@@ -55,9 +56,16 @@ export function InvitationsProvider({ children }: { children: ReactNode }) {
     if (!user) setInvitations([]);
   }, [user]);
 
-  // Wire the lobby socket: invite_received pushes onto the stack,
-  // invite_cancelled removes from it (host withdrew the offer while
-  // the toast was still visible).
+  // Wire the lobby socket:
+  //  - invite_received pushes onto the stack;
+  //  - invite_cancelled removes from it (host withdrew the offer while
+  //    the toast was still visible);
+  //  - rematch_ready saves the fresh seat creds the server issued for
+  //    a rematch game pre-seating this user. We piggyback this here
+  //    rather than spinning a dedicated provider — same lobby socket,
+  //    same per-user lifetime, and the only side-effect we need is the
+  //    localStorage write (GamePage picks the change up via the
+  //    subscribeCredentials hook).
   useEffect(() => {
     return userSocket.subscribe((ev) => {
       if (ev.type === "invite_received") {
@@ -79,6 +87,12 @@ export function InvitationsProvider({ children }: { children: ReactNode }) {
               ),
           ),
         );
+      } else if (ev.type === "rematch_ready") {
+        saveCredentials(ev.payload.gameId, {
+          token: ev.payload.token,
+          seatIndex: ev.payload.seatIndex,
+          name: ev.payload.name,
+        });
       }
     });
   }, []);

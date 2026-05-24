@@ -221,6 +221,58 @@ func TestRematchOffer_BotIsPreAccepted(t *testing.T) {
 	if d.RematchGameID == "" {
 		t.Fatalf("rematch must be created on Alice's single accept (bot pre-accepted), got %#v", d)
 	}
+	// The rematch must carry the bot forward — same seat, same IsBot — so
+	// "play vs bot again" doesn't ask the host to re-add the bot. And with
+	// the human (Alice) pre-seated alongside, the new game starts in
+	// `playing` straight away.
+	rematch := getGameViaHTTP(t, ts, d.RematchGameID)
+	if !rematch.Seats[1].Occupied || !rematch.Seats[1].IsBot {
+		t.Fatalf("bot must be pre-seated in the rematch on its original seat, got %+v", rematch.Seats[1])
+	}
+	// Alice is anon (joinGame with nil userID), so her seat is *not*
+	// pre-seated — we have no way to deliver her a token. Seat 0 stays
+	// empty and Alice auto-rejoins client-side. The rematch therefore
+	// starts in `waiting` until she joins. (The authed counterpart is
+	// covered by TestRematchOffer_AuthedHumansArePreSeated below.)
+	if rematch.Seats[0].Occupied {
+		t.Fatalf("anon human must not be pre-seated, got %+v", rematch.Seats[0])
+	}
+	if rematch.Status != StatusWaiting {
+		t.Fatalf("rematch with an empty anon seat must stay waiting, got %s", rematch.Status)
+	}
+}
+
+// TestRematchOffer_AuthedHumansArePreSeated pins the pre-seating contract
+// for authenticated players: the rematch carries the same UserIDs at the
+// same seats, with fresh tokens (delivered out-of-band via the lobby
+// rematch_ready event), and the game starts in `playing` since every seat
+// is filled. This is the path that powers the public 1v1 / multi rematch
+// without a "Recherche d'adversaire" flash.
+func TestRematchOffer_AuthedHumansArePreSeated(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	a := joinGameAs(t, ts, g.ID, "Alice", "alice-uuid", nil)
+	b := joinGameAs(t, ts, g.ID, "Bob", "bob-uuid", nil)
+	finishGame(t, ts, g.ID, a.Token, b.Token)
+
+	// Alice proposes, Bob accepts → rematch created.
+	_ = postRematchOffer(t, ts, g.ID, a.Token, http.StatusOK)
+	d := postRematchOffer(t, ts, g.ID, b.Token, http.StatusOK)
+	if d.RematchGameID == "" {
+		t.Fatalf("rematch must be created after both accept")
+	}
+
+	rematch := getGameViaHTTP(t, ts, d.RematchGameID)
+	if rematch.Status != StatusPlaying {
+		t.Fatalf("rematch with all seats pre-filled must start in playing, got %s", rematch.Status)
+	}
+	if !rematch.Seats[0].Occupied || rematch.Seats[0].UserID != "alice-uuid" {
+		t.Fatalf("seat 0 must carry Alice's UserID, got %+v", rematch.Seats[0])
+	}
+	if !rematch.Seats[1].Occupied || rematch.Seats[1].UserID != "bob-uuid" {
+		t.Fatalf("seat 1 must carry Bob's UserID, got %+v", rematch.Seats[1])
+	}
 }
 
 func TestLastMove_PopulatedOnDTOAfterMove(t *testing.T) {

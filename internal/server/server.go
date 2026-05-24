@@ -660,9 +660,12 @@ func statusForRemoveBotError(err error) int {
 // offerRematch is the chess.com-style "Propose / Accept rematch" endpoint.
 // The first caller creates an offer (bots pre-marked accepted); each
 // subsequent caller adds their seat to the acceptance set. When every
-// needed human seat has accepted, the new game is created and the
-// original's RematchGameID gets set — clients see that on the broadcast
-// state event and navigate over.
+// needed human seat has accepted, the new game is created (pre-seated
+// with bots + the same authed humans), and the original's RematchGameID
+// gets set — clients see that on the broadcast state event and navigate
+// over. Pre-seated humans receive their fresh seat token through the
+// lobby's rematch_ready event so they pick up the new game without
+// having to re-join.
 func (s *Server) offerRematch(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	token := playerToken(r)
@@ -670,15 +673,24 @@ func (s *Server) offerRematch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "missing player token")
 		return
 	}
-	rec, err := s.store.OfferRematch(r.Context(), gameID, token)
+	rec, authedSeats, err := s.store.OfferRematch(r.Context(), gameID, token)
 	if err != nil {
 		writeError(w, statusForRematchError(err), err.Error())
 		return
 	}
 	rec.Lock()
 	dto := toGameDTO(rec)
+	rematchID := rec.RematchGameID
 	rec.Unlock()
 	s.events.Publish(gameID, eventState(dto))
+	for _, seat := range authedSeats {
+		s.publishLobby(seat.UserID, LobbyEventRematchReady, LobbyMatchPayload{
+			GameID:    rematchID,
+			Token:     seat.Token,
+			SeatIndex: seat.SeatIndex,
+			Name:      seat.Name,
+		})
+	}
 	writeJSON(w, http.StatusOK, dto)
 }
 

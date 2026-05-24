@@ -183,7 +183,7 @@ func TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation(t *testing.T) {
 	}
 
 	// Alice (on pod A) proposes.
-	if _, err := podA.OfferRematch(ctx, gameID, aliceTok); err != nil {
+	if _, _, err := podA.OfferRematch(ctx, gameID, aliceTok); err != nil {
 		t.Fatalf("Alice's OfferRematch on pod A: %v", err)
 	}
 
@@ -192,7 +192,7 @@ func TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation(t *testing.T) {
 	// for pod B — the cache invalidation would have it freshly fetch
 	// the game on the next access.
 	podB := NewStore(repo)
-	if _, err := podB.OfferRematch(ctx, gameID, bobTok); err != nil {
+	if _, _, err := podB.OfferRematch(ctx, gameID, bobTok); err != nil {
 		t.Fatalf("Bob's OfferRematch on pod B: %v", err)
 	}
 

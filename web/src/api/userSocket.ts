@@ -21,7 +21,8 @@ export type LobbyEventType =
   | "match_found"
   | "invite_received"
   | "invite_cancelled"
-  | "queue_update";
+  | "queue_update"
+  | "rematch_ready";
 
 export interface MatchFoundPayload {
   gameId: string;
@@ -29,6 +30,12 @@ export interface MatchFoundPayload {
   seatIndex: number;
   name: string;
 }
+
+// rematch_ready carries the same shape as match_found — fresh per-seat
+// credentials for a game the server just created. Sent to each authed
+// player pre-seated in a rematch so the client can save the token and
+// pick up where it left off, without a re-join roundtrip.
+export type RematchReadyPayload = MatchFoundPayload;
 
 export interface InvitePayload {
   gameId: string;
@@ -51,7 +58,8 @@ export type LobbyEvent =
   | { type: "match_found"; payload: MatchFoundPayload }
   | { type: "invite_received"; payload: InvitePayload }
   | { type: "invite_cancelled"; payload: InvitePayload }
-  | { type: "queue_update"; payload: QueueUpdatePayload };
+  | { type: "queue_update"; payload: QueueUpdatePayload }
+  | { type: "rematch_ready"; payload: RematchReadyPayload };
 
 type Listener = (ev: LobbyEvent) => void;
 

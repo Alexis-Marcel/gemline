@@ -20,7 +20,11 @@ import { RematchControls } from "../components/RematchControls";
 import { ReplayControls } from "../components/ReplayControls";
 import { Scoreboard } from "../components/Scoreboard";
 import { UserNav } from "../components/UserNav";
-import { clearCredentials, loadCredentials, saveCredentials } from "../lib/auth";
+import {
+  clearCredentials,
+  saveCredentials,
+  useCredentials,
+} from "../lib/auth";
 import { gemName } from "../lib/colors";
 import { cellsAtStep, lastMoveAt } from "../lib/replay";
 
@@ -80,7 +84,11 @@ export function GamePage() {
     return localGame.moveCount > liveGame.moveCount ? localGame : liveGame;
   }, [liveGame, localGame]);
 
-  const creds = useMemo(() => loadCredentials(id), [id, game]);
+  // Creds tracks the seat token for this game id and stays reactive to
+  // out-of-band writes — the lobby's rematch_ready event can save creds
+  // while the page is already mounted on the new game id, and the
+  // auto-join effect + WS hello pick them up automatically.
+  const creds = useCredentials(id);
 
   // Push our seat token to the shared socket so the server can mark us as
   // online (and cancel any disconnect-grace timer that was running).

@@ -186,6 +186,15 @@ type Repository interface {
 	// (which invalidate their in-memory copy on every state event and
 	// re-read from DB on the next access).
 	SaveRematchOffer(ctx context.Context, gameID string, offer []byte) error
+
+	// SaveDrawOffer writes the draw_offer_by SMALLINT column on the
+	// games row. Pass the offering seat's index to set (or refresh) the
+	// offer; pass -1 to clear. Must be called whenever Store mutates
+	// rec.DrawOfferBy — same multi-pod consistency posture as
+	// SaveRematchOffer: a load balancer can route the opponent's
+	// /draw/accept to a pod whose cache has been invalidated by the
+	// state-event NOTIFY, and that pod's reload must see the offer.
+	SaveDrawOffer(ctx context.Context, gameID string, offerBy int) error
 }
 
 // EventRow is a persisted row in game_events. Payload stays as
@@ -473,3 +482,4 @@ func (noopRepo) MatchmakeQueueSnapshot(context.Context, int, string) ([]QueuedUs
 	return nil, nil
 }
 func (noopRepo) SaveRematchOffer(context.Context, string, []byte) error { return nil }
+func (noopRepo) SaveDrawOffer(context.Context, string, int) error        { return nil }

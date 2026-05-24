@@ -213,3 +213,68 @@ func TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation(t *testing.T) {
 		t.Fatalf("offer must be cleared after the rematch is created, still got %+v", got.RematchOffer)
 	}
 }
+
+// TestPostgresRepo_DrawOffer_SurvivesCacheInvalidation is the draw-offer
+// twin of the rematch test above. Same multi-pod failure mode that
+// produced the user-reported "Accepter trop vite → 409" symptom:
+//
+//   1. Pod A receives the offerer's POST /draw/offer and writes
+//      rec.DrawOfferBy in memory.
+//   2. Pod A NOTIFY's the state event; pod B's listener invalidates
+//      its cached copy of the game.
+//   3. The opponent's POST /draw/accept hits the load balancer and
+//      lands on pod B.
+//   4. Pod B reloads the game from Postgres — and the offer must come
+//      with it. If draw_offer_by weren't persisted (the pre-fix world),
+//      pod B would see DrawOfferBy=-1, return ErrDrawNotOffered and the
+//      HTTP layer would 409. The user's "wait a bit and retry" workaround
+//      worked only because retries occasionally landed on the originating
+//      pod A which still held the in-memory offer.
+func TestPostgresRepo_DrawOffer_SurvivesCacheInvalidation(t *testing.T) {
+	pool := openTestDB(t)
+	repo := NewPostgresRepo(pool)
+	ctx := context.Background()
+
+	podA := NewStore(repo)
+	rec, err := podA.Create(ctx, 2, VisibilityPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gameID := rec.ID
+
+	_, aliceTok, err := podA.Join(ctx, gameID, "Alice", "", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, bobTok, err := podA.Join(ctx, gameID, "Bob", "", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Alice (on pod A) proposes a draw.
+	if _, err := podA.OfferDraw(ctx, gameID, aliceTok); err != nil {
+		t.Fatalf("Alice's OfferDraw on pod A: %v", err)
+	}
+
+	// Pod B reloads through the repo — pre-fix, draw_offer_by came back
+	// as -1 and Bob's accept would 409 with ErrDrawNotOffered.
+	podB := NewStore(repo)
+	if _, err := podB.AcceptDraw(ctx, gameID, bobTok); err != nil {
+		t.Fatalf("Bob's AcceptDraw on pod B (multi-pod regression): %v", err)
+	}
+
+	got, ok, err := podB.Get(ctx, gameID)
+	if err != nil || !ok {
+		t.Fatalf("reload: ok=%v err=%v", ok, err)
+	}
+	got.Lock()
+	st := got.Status
+	wk := got.State.WinKind
+	got.Unlock()
+	if st != StatusFinished {
+		t.Fatalf("game must be finished after the cross-pod draw accept, got %s", st)
+	}
+	if wk != game.WinDraw {
+		t.Fatalf("win kind must be WinDraw after accepted draw, got %v", wk)
+	}
+}

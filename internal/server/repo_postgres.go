@@ -57,7 +57,7 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 	row := r.pool.QueryRowContext(ctx, `
 		SELECT status, board_side, capture_pairs_win, align4_to_win, align5_to_win,
 		       winner_color, win_kind, initial_time_ms, increment_ms, created_at,
-		       visibility, rematch_game_id, rematch_offer
+		       visibility, rematch_game_id, rematch_offer, draw_offer_by
 		FROM games WHERE id = $1
 	`, id)
 	var (
@@ -74,8 +74,9 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 		visibility    string
 		rematchID     sql.NullString
 		rematchOffer  []byte
+		drawOfferBy   int
 	)
-	if err := row.Scan(&status, &boardSide, &captureWin, &align4, &align5, &winnerColor, &winKind, &initialTimeMs, &incrementMs, &createdAt, &visibility, &rematchID, &rematchOffer); err != nil {
+	if err := row.Scan(&status, &boardSide, &captureWin, &align4, &align5, &winnerColor, &winKind, &initialTimeMs, &incrementMs, &createdAt, &visibility, &rematchID, &rematchOffer, &drawOfferBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -221,7 +222,7 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 		RematchGameID: rematchID.String,
 		RematchOffer:  offer,
 		CreatedAt:     createdAt,
-		DrawOfferBy:   -1, // draw offers don't survive restarts; players can re-offer
+		DrawOfferBy:   drawOfferBy,
 	}, nil
 }
 
@@ -994,6 +995,24 @@ func (r *PostgresRepo) SaveRematchOffer(ctx context.Context, gameID string, offe
 	`, gameID, blob)
 	if err != nil {
 		return fmt.Errorf("save rematch offer: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrGameNotFound
+	}
+	return nil
+}
+
+// SaveDrawOffer persists the seat index currently offering a draw on a
+// playing 2-player game (or -1 to clear). Same multi-pod rationale as
+// SaveRematchOffer: without this write the opponent's accept call
+// landing on a non-originating pod would see the cache reload from a
+// DB row that doesn't know about the offer.
+func (r *PostgresRepo) SaveDrawOffer(ctx context.Context, gameID string, offerBy int) error {
+	res, err := r.pool.ExecContext(ctx, `
+		UPDATE games SET draw_offer_by = $2 WHERE id = $1
+	`, gameID, offerBy)
+	if err != nil {
+		return fmt.Errorf("save draw offer: %w", err)
 	}
 	if n, err := res.RowsAffected(); err == nil && n == 0 {
 		return ErrGameNotFound

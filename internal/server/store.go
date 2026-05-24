@@ -1154,6 +1154,7 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 	// so we don't fire the draw-offer listener here — doing so under the
 	// rec.Lock held by the deferred Unlock would deadlock anyway when the
 	// listener tries to re-enter through store.Get.
+	hadDrawOffer := rec.DrawOfferBy >= 0
 	rec.DrawOfferBy = -1
 
 	if perr := s.repo.AppendMove(ctx, gameID, ordinal, move, rec.State.Winner, rec.State.WinKind, rec.Status); perr != nil {
@@ -1161,6 +1162,15 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 		// means the client retries and the DB stays out of sync. That's worse
 		// than the inconsistency. Surface it but keep the in-memory truth.
 		return res, rec, perr
+	}
+	if hadDrawOffer {
+		// Move just rescinded a pending draw offer — clear draw_offer_by in
+		// the DB so other pods reload the right value rather than the stale
+		// offerer. Skipped when no offer was pending to avoid a write per
+		// move on the hot path.
+		if perr := s.repo.SaveDrawOffer(ctx, gameID, -1); perr != nil {
+			return res, rec, perr
+		}
 	}
 
 	// Re-arm or cancel the chess clock for the next player. Called while
@@ -1731,8 +1741,15 @@ func (s *Store) Resign(ctx context.Context, gameID, token string) (*GameRecord, 
 		// failure but don't roll the engine back.
 		_ = err
 	}
-	if hadOffer && s.onDrawOffer != nil {
-		s.onDrawOffer(gameID, -1)
+	if hadOffer {
+		// Persist the clear so a cross-pod reload of this finished game's
+		// row doesn't surface a phantom draw_offer_by on the DTO.
+		if err := s.repo.SaveDrawOffer(ctx, gameID, -1); err != nil {
+			_ = err
+		}
+		if s.onDrawOffer != nil {
+			s.onDrawOffer(gameID, -1)
+		}
 	}
 	s.maybeApplyRating(rec)
 	if s.onState != nil {
@@ -1785,6 +1802,15 @@ func (s *Store) OfferDraw(ctx context.Context, gameID, token string) (*GameRecor
 	offeredBy := seat.Index
 	rec.Unlock()
 
+	// Persist BEFORE the listener fires the state-event NOTIFY: that
+	// notification invalidates other pods' caches, so they must observe
+	// the new draw_offer_by on the next reload. Without this write the
+	// opponent's accept call landing on a non-originating pod would
+	// reload a row with draw_offer_by=-1 and 409 with ErrDrawNotOffered.
+	if err := s.repo.SaveDrawOffer(ctx, gameID, offeredBy); err != nil {
+		return rec, err
+	}
+
 	// Listener may need to re-enter the record (via store.Get → toGameDTO),
 	// so we MUST release rec.Lock before firing it. Same pattern as Resign.
 	if s.onDrawOffer != nil {
@@ -1833,6 +1859,12 @@ func (s *Store) AcceptDraw(ctx context.Context, gameID, token string) (*GameReco
 	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
 		_ = err
 	}
+	// Persist the cleared draw_offer_by so cross-pod reloads of this
+	// game's row don't keep showing a stale offerer on the finished
+	// game DTO.
+	if err := s.repo.SaveDrawOffer(ctx, gameID, -1); err != nil {
+		_ = err
+	}
 	if s.onDrawOffer != nil {
 		s.onDrawOffer(gameID, -1)
 	}
@@ -1872,6 +1904,11 @@ func (s *Store) DeclineDraw(ctx context.Context, gameID, token string) (*GameRec
 	rec.DrawOfferBy = -1
 	rec.Unlock()
 
+	// Persist the clear before the NOTIFY so other pods reload the new
+	// value rather than the cleared-then-restored stale offer.
+	if err := s.repo.SaveDrawOffer(ctx, gameID, -1); err != nil {
+		return rec, err
+	}
 	if s.onDrawOffer != nil {
 		s.onDrawOffer(gameID, -1)
 	}
@@ -1935,6 +1972,7 @@ func (s *Store) playBotTurnIfNeeded(rec *GameRecord) {
 	if rec.State.IsOver() {
 		rec.Status = StatusFinished
 	}
+	hadDrawOffer := rec.DrawOfferBy >= 0
 	rec.DrawOfferBy = -1 // any draw offer is auto-rescinded by a move
 
 	winner := rec.State.Winner
@@ -1950,6 +1988,11 @@ func (s *Store) playBotTurnIfNeeded(rec *GameRecord) {
 	if err := s.repo.AppendMove(context.Background(), gameID, ordinal, move, winner, winKind, status); err != nil {
 		// In-memory truth wins (same policy as the human path).
 		_ = err
+	}
+	if hadDrawOffer {
+		if err := s.repo.SaveDrawOffer(context.Background(), gameID, -1); err != nil {
+			_ = err
+		}
 	}
 
 	if s.onMove != nil {

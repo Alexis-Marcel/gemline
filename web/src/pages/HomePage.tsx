@@ -4,7 +4,7 @@ import { api, ApiError } from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
 import { Button } from "../components/Button";
 import { UserNav } from "../components/UserNav";
-import { saveCredentials } from "../lib/auth";
+import { saveCredentials } from "../lib/credentials";
 
 // Private rooms open at the engine's max — the host decides who actually
 // plays via invites / bots before clicking Start.

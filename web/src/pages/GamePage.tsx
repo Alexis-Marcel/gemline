@@ -24,7 +24,7 @@ import {
   clearCredentials,
   saveCredentials,
   useCredentials,
-} from "../lib/auth";
+} from "../lib/credentials";
 import { gemName } from "../lib/colors";
 import { cellsAtStep, lastMoveAt } from "../lib/replay";
 

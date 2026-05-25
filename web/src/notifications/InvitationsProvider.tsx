@@ -22,7 +22,7 @@ import {
 } from "react";
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
-import { saveCredentials } from "../lib/auth";
+import { saveCredentials } from "../lib/credentials";
 import { playNotificationSound } from "../lib/notificationSound";
 import { userSocket, type InvitePayload } from "../api/userSocket";
 

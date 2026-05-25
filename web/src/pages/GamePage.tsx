@@ -422,7 +422,10 @@ export function GamePage() {
   // "Nouvelle partie" mirrors the visibility of the game that just
   // ended: a public/matchmade game funnels back into matchmaking
   // (via the dedicated /play/<mode> page), a private game spawns a
-  // fresh empty private game with the same player count.
+  // fresh empty private lobby at the engine's max seat count — same
+  // shape as HomePage's "Créer une partie privée", so the host can
+  // re-decide who plays (invite, add bot, leave empty) rather than
+  // being locked into the previous game's seat count.
   // handleNewPrivateGame reuses the caller's seat name (held in creds)
   // so an anonymous host doesn't have to retype it.
   const [creatingNew, setCreatingNew] = useState(false);
@@ -435,7 +438,9 @@ export function GamePage() {
     setCreatingNew(true);
     setError(null);
     try {
-      const res = await api.createGame(game.seats.length, creds?.name);
+      // 6 = engine's max seats; matches HomePage.PRIVATE_SEATS so the
+      // two private-creation entrypoints behave identically.
+      const res = await api.createGame(6, creds?.name);
       saveCredentials(res.game.id, {
         token: res.token,
         seatIndex: res.seat.index,

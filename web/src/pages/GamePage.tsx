@@ -17,6 +17,7 @@ import { ChatPanel } from "../components/ChatPanel";
 import { ConnStatus } from "../components/ConnStatus";
 import { DrawOfferAndActions } from "../components/DrawOfferAndActions";
 import { GameEndModal } from "../components/GameEndModal";
+import { GameMenu } from "../components/GameMenu";
 import { Objectives } from "../components/Objectives";
 import { ObjectivesPopover } from "../components/ObjectivesPopover";
 import { RematchControls } from "../components/RematchControls";
@@ -465,10 +466,16 @@ export function GamePage() {
     "fixed inset-x-0 bottom-0 z-30 border-t border-zinc-800 bg-zinc-950/95 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] backdrop-blur lg:static lg:border-0 lg:bg-transparent lg:p-0 lg:backdrop-blur-none";
 
   return (
-    // pb-24 lg:pb-4 leaves room for the fixed mobile action bar so the
-    // chat / quitter link aren't hidden under it. On desktop the bar is
-    // inline, no extra room needed.
-    <div className="mx-auto max-w-[88rem] p-2 pb-24 lg:p-4 lg:pb-4">
+    // The page locks to a single viewport (h-dvh + overflow-hidden) at
+    // every breakpoint and every status. Two reasons:
+    //   - on phones the pinch-pan wrapper on the board captures touches
+    //     and competes with page scroll, so the layout would feel broken
+    //     if it required scrolling;
+    //   - on desktop the 3-col layout already fits in one viewport, so
+    //     scrolling is just dead chrome.
+    // pb-24 lg:pb-4 reserves room for the fixed mobile action bar; on
+    // desktop the bar is inline so no extra padding needed.
+    <div className="mx-auto flex h-dvh max-w-[88rem] flex-col overflow-hidden p-2 pb-24 lg:p-4 lg:pb-4">
       <header className="flex items-center justify-between">
         <Link
           to="/"
@@ -497,6 +504,36 @@ export function GamePage() {
           <div className="lg:hidden">
             <ObjectivesPopover thresholds={game.thresholds} />
           </div>
+          {/* Mobile-only kebab menu. Hosts the "Revoir la partie" /
+             "Quitter la partie" actions that used to live below the
+             board — those don't fit in the single-viewport layout
+             anymore, so they migrate here. Items are conditional: no
+             items → menu doesn't render. */}
+          <div className="lg:hidden">
+            <GameMenu
+              items={[
+                ...(game.moveCount > 0 && !inReplay
+                  ? [
+                      {
+                        label: replayLoading
+                          ? "Chargement…"
+                          : "Revoir la partie",
+                        onClick: () => void openReplay(),
+                      },
+                    ]
+                  : []),
+                ...(creds
+                  ? [
+                      {
+                        label: "Quitter la partie",
+                        onClick: handleLeave,
+                        variant: "danger" as const,
+                      },
+                    ]
+                  : []),
+              ]}
+            />
+          </div>
           <ConnStatus status={wsStatus} attempt={wsAttempt} />
           <UserNav />
         </div>
@@ -515,8 +552,16 @@ export function GamePage() {
             seats | board | conditions+chat.
         Each side rail is fixed-width; the board takes the remaining 1fr.
       */}
-      <div className="mt-3 flex flex-col gap-3 [@media(max-height:500px)]:mt-2 [@media(max-height:500px)]:grid [@media(max-height:500px)]:grid-cols-[auto_minmax(0,1fr)] [@media(max-height:500px)]:items-start [@media(max-height:500px)]:gap-3 lg:mt-4 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_20rem] lg:items-start lg:gap-4">
-        <aside className="flex flex-col gap-3 [@media(max-height:500px)]:col-start-2 lg:col-start-1">
+      {/*
+        items-start was the old default to keep the right rail flush to
+        the top of its column on desktop — but it also prevented the
+        main board column from stretching to the row height, so the
+        board read as a tiny square on a 1280-wide screen. Drop the
+        wrapper-level alignment and let the right-aside set its own
+        self-start below; the board now fills its column.
+      */}
+      <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3 [@media(max-height:500px)]:mt-2 [@media(max-height:500px)]:grid [@media(max-height:500px)]:grid-cols-[auto_minmax(0,1fr)] [@media(max-height:500px)]:items-start [@media(max-height:500px)]:gap-3 lg:mt-4 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_20rem] lg:grid-rows-[minmax(0,1fr)] lg:gap-4">
+        <aside className="flex flex-col gap-3 [@media(max-height:500px)]:col-start-2 lg:col-start-1 lg:self-start">
           <Scoreboard
             game={game}
             mySeatIndex={creds?.seatIndex ?? null}
@@ -630,7 +675,14 @@ export function GamePage() {
           )}
         </aside>
 
-        <main className="[@media(max-height:500px)]:col-start-1 [@media(max-height:500px)]:row-span-2 lg:col-start-2">
+        {/*
+          @container turns the <main> into a query container so the
+          board can size itself as min(100% width, 100% height) of the
+          surrounding main — `aspect-square` alone falls back to the
+          SVG's intrinsic dimensions (~300 px) and reads as a tiny
+          square in the middle of a huge cell on desktop.
+        */}
+        <main className="@container flex min-h-0 flex-1 items-center justify-center [@media(max-height:500px)]:col-start-1 [@media(max-height:500px)]:row-span-2 lg:col-start-2">
           {/*
             Mobile portrait: drop the chrome (no border, near-zero padding)
             so the board itself dominates the viewport — every wasted px
@@ -641,7 +693,16 @@ export function GamePage() {
             wider than tall, so a square container would overflow.
             Desktop: keep the rounded, padded card.
           */}
-          <div className="aspect-square w-full bg-zinc-950/60 p-0.5 [@media(max-height:500px)]:aspect-square [@media(max-height:500px)]:h-[calc(100dvh-6rem)] [@media(max-height:500px)]:w-auto lg:aspect-auto lg:h-[min(80vh,calc(100vw-40rem))] lg:w-full lg:rounded-xl lg:border lg:border-zinc-800 lg:p-3">
+          {/*
+            w-[min(100cqw,100cqh)] reads the container query units off
+            <main> above and picks the smaller of its width / height,
+            so the board is a square that fills its slot regardless of
+            which axis is constraining. aspect-square then makes height
+            follow width. The landscape branch overrides with an
+            explicit dvh-derived height because the @container path
+            doesn't account for the fixed action bar at the bottom.
+          */}
+          <div className="aspect-square w-[min(100cqw,100cqh)] bg-zinc-950/60 p-0.5 [@media(max-height:500px)]:h-[calc(100dvh-6rem)] [@media(max-height:500px)]:w-auto lg:rounded-xl lg:border lg:border-zinc-800 lg:p-3">
             <Board
               side={inReplay ? replay.boardSide : game.boardSide}
               cells={boardCells}
@@ -662,7 +723,7 @@ export function GamePage() {
           </div>
         </main>
 
-        <aside className="flex flex-col gap-3 [@media(max-height:500px)]:col-start-2 lg:col-start-3">
+        <aside className="flex flex-col gap-3 [@media(max-height:500px)]:col-start-2 lg:col-start-3 lg:self-start">
           {/* Hidden on phones — same content is reachable via the "?"
              button in the header (ObjectivesPopover above). */}
           <div className="hidden lg:block">
@@ -728,18 +789,27 @@ export function GamePage() {
           )}
 
           {inReplay ? (
-            <ReplayControls
-              step={replayStep}
-              total={replay.steps.length}
-              onChange={setReplayStep}
-              onExit={closeReplay}
-            />
+            // While in replay, the action bar contents are irrelevant
+            // (no actions to take). Pin ReplayControls bottom-of-viewport
+            // on mobile via the same mobileBar dance so the user can
+            // step through moves without scrolling.
+            <div className={mobileBar}>
+              <ReplayControls
+                step={replayStep}
+                total={replay.steps.length}
+                onChange={setReplayStep}
+                onExit={closeReplay}
+              />
+            </div>
           ) : (
             game.moveCount > 0 && (
+              // Mobile reaches this via the kebab menu in the header; the
+              // inline button only renders on desktop where there's room
+              // in the right rail.
               <button
                 onClick={openReplay}
                 disabled={replayLoading}
-                className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500 disabled:opacity-50"
+                className="hidden rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500 disabled:opacity-50 lg:block"
               >
                 {replayLoading ? "Chargement…" : "Revoir la partie"}
               </button>
@@ -754,21 +824,39 @@ export function GamePage() {
           </div>
 
           {creds && (
+            // Same story as "Revoir la partie": the mobile escape hatch
+            // is the kebab menu; only render the inline link on desktop.
             <button
               onClick={handleLeave}
-              className="text-xs text-zinc-500 hover:text-zinc-300"
+              className="hidden text-xs text-zinc-500 hover:text-zinc-300 lg:block"
             >
               Quitter la partie (efface mon token local)
             </button>
           )}
 
+          {/* Desktop renders the error inline at the end of the rail.
+             Mobile uses a fixed toast (rendered outside the grid below)
+             so the message is always visible without scrolling. */}
           {error && (
-            <p className="rounded-md border border-red-900/50 bg-red-950/30 p-3 text-sm text-red-300">
+            <p className="hidden rounded-md border border-red-900/50 bg-red-950/30 p-3 text-sm text-red-300 lg:block">
               {error}
             </p>
           )}
         </aside>
       </div>
+
+      {/* Mobile error toast: sits just above the action bar, fixed to
+         the viewport so it can't fall off-screen in a non-scrolling
+         layout. Tap to dismiss. */}
+      {error && (
+        <button
+          type="button"
+          onClick={() => setError(null)}
+          className="fixed inset-x-2 bottom-24 z-30 rounded-md border border-red-900/50 bg-red-950/95 p-3 text-left text-sm text-red-200 shadow-lg backdrop-blur lg:hidden"
+        >
+          {error}
+        </button>
+      )}
 
       {game.status === "finished" && !endModalDismissed && (
         <GameEndModal

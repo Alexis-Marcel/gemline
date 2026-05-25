@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Gemline app icon. Matches the in-app brand mark (amber rounded square
+       on a zinc-950 background) so the home-screen tile reads as the same
+       game without needing a separate art pass. Rounded outer corners are
+       54 px = ~10.5% of 512, the standard iOS / Android icon radius. -->
+  <rect width="512" height="512" rx="96" fill="#09090b"/>
+  <rect x="128" y="128" width="256" height="256" rx="32" fill="#fbbf24"/>
+</svg>

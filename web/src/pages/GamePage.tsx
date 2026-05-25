@@ -25,6 +25,8 @@ import { SeatInviteModal } from "../components/SeatInviteModal";
 import { ShareCard } from "../components/ShareCard";
 import { StartButton } from "../components/StartButton";
 import { UserNav } from "../components/UserNav";
+import { useInPlayActions } from "../hooks/useInPlayActions";
+import { useRematchFlow } from "../hooks/useRematchFlow";
 import {
   clearCredentials,
   saveCredentials,
@@ -45,7 +47,6 @@ export function GamePage() {
   const [name, setName] = useState("");
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [rematching, setRematching] = useState(false);
 
   const [replay, setReplay] = useState<Replay | null>(null);
   const [replayStep, setReplayStep] = useState(0);
@@ -284,115 +285,26 @@ export function GamePage() {
   // render in read-only mode for these viewers.
   const mySeatIndex = creds?.seatIndex ?? null;
 
-  function handleGoToRematch() {
-    if (!game?.rematchGameId) return;
-    navigate(`/game/${game.rematchGameId}`);
-  }
+  const { handleResign, handleOfferDraw, handleAcceptDraw, handleDeclineDraw } =
+    useInPlayActions({
+      gameId: id,
+      creds,
+      onGame: setLocalGame,
+      onError: setError,
+    });
 
-  // handleOfferRematch is the "Propose" / "Accept" call — the server
-  // disambiguates by whether an offer is already pending. When this
-  // call is the *last* acceptance, the response carries rematchGameId
-  // and we navigate straight in (the other accepted players see the
-  // link via the WS state event and click "Aller à la revanche").
-  async function handleOfferRematch() {
-    if (!creds) return;
-    setRematching(true);
-    setError(null);
-    try {
-      const g = await api.offerRematch(id, creds.token);
-      setLocalGame(g);
-      if (g.rematchGameId) {
-        navigate(`/game/${g.rematchGameId}`);
-      }
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Erreur revanche");
-    } finally {
-      setRematching(false);
-    }
-  }
-
-  async function handleDeclineRematch() {
-    if (!creds) return;
-    setRematching(true);
-    setError(null);
-    try {
-      const g = await api.declineRematch(id, creds.token);
-      setLocalGame(g);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Erreur revanche");
-    } finally {
-      setRematching(false);
-    }
-  }
-
-  // Auto-redirect both players to the rematch the moment it's created.
-  // The acceptor who triggered the unanimous flip already navigates from
-  // handleOfferRematch above; this effect handles the *other* accepters
-  // who learn about the new game via the WS state event. We track the
-  // last-seen rematchGameId via a ref so a fresh page load on a finished
-  // game that already has a rematch doesn't kidnap the viewer — only a
-  // genuine empty → set transition triggers the jump.
-  const lastRematchIdRef = useRef<string | undefined>(undefined);
-  const sawRematchRef = useRef(false);
-  useEffect(() => {
-    if (!game) return;
-    const curr = game.rematchGameId;
-    if (!sawRematchRef.current) {
-      sawRematchRef.current = true;
-      lastRematchIdRef.current = curr;
-      return;
-    }
-    const prev = lastRematchIdRef.current;
-    lastRematchIdRef.current = curr;
-    if (curr && !prev && creds) {
-      navigate(`/game/${curr}`);
-    }
-  }, [game, creds, navigate]);
-
-  const handleResign = useCallback(async () => {
-    if (!creds) return;
-    if (!window.confirm("Abandonner la partie ?")) return;
-    setError(null);
-    try {
-      const g = await api.resign(id, creds.token);
-      setLocalGame(g);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Erreur forfait");
-    }
-  }, [creds, id]);
-
-  const handleOfferDraw = useCallback(async () => {
-    if (!creds) return;
-    setError(null);
-    try {
-      const g = await api.offerDraw(id, creds.token);
-      setLocalGame(g);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Erreur nul");
-    }
-  }, [creds, id]);
-
-  const handleAcceptDraw = useCallback(async () => {
-    if (!creds) return;
-    setError(null);
-    try {
-      const g = await api.acceptDraw(id, creds.token);
-      setLocalGame(g);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Erreur nul");
-    }
-  }, [creds, id]);
-
-  const handleDeclineDraw = useCallback(async () => {
-    if (!creds) return;
-    setError(null);
-    try {
-      const g = await api.declineDraw(id, creds.token);
-      setLocalGame(g);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Erreur nul");
-    }
-  }, [creds, id]);
+  const {
+    rematching,
+    handleOfferRematch,
+    handleDeclineRematch,
+    handleGoToRematch,
+  } = useRematchFlow({
+    gameId: id,
+    game,
+    creds,
+    onGame: setLocalGame,
+    onError: setError,
+  });
 
   async function openReplay() {
     setReplayLoading(true);

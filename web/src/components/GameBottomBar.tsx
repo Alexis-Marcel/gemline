@@ -1,0 +1,213 @@
+import { useEffect, useRef, useState } from "react";
+
+export interface BottomBarMenuItem {
+  label: string;
+  onClick: () => void;
+  variant?: "danger" | "primary";
+  disabled?: boolean;
+}
+
+interface GameBottomBarProps {
+  /** Number of moves played — when 0, the replay-nav block hides. */
+  totalMoves: number;
+  /** Currently displayed step (0..totalMoves). Equal to totalMoves when
+   *  the user is on the live board; less when stepping through history. */
+  step: number;
+  /** True while the user is in replay mode (i.e. the board renders a
+   *  past step rather than live state). */
+  inReplay: boolean;
+  /** Called with the new step on ◀ / ▶ taps. The host owns the live →
+   *  replay transition: tapping ◀ on a live game opens replay at the
+   *  last step (totalMoves), then subsequent taps decrement. */
+  onStep: (step: number) => void;
+  /** Asynchronous "enter replay" hook for the live → replay transition.
+   *  Tapping ◀ when not yet in replay calls this; subsequent ◀ taps go
+   *  through onStep. The bar waits for openReplay to finish before
+   *  considering the move applied. */
+  openReplay: () => void;
+  /** Called when the user taps the live/exit button to leave replay
+   *  mode. No-op when not in replay. */
+  exitReplay: () => void;
+  /** Called when the chat icon is tapped. The chat surface itself
+   *  (ChatDrawer on mobile, inline panel on desktop) is owned by the
+   *  parent. */
+  onOpenChat: () => void;
+  /** Menu items rendered behind the ⋯ kebab. Empty array → kebab still
+   *  renders but disabled (gives the bar a stable layout). */
+  menuItems: BottomBarMenuItem[];
+}
+
+/**
+ * GameBottomBar is the fixed action toolbar at the bottom of the
+ * GamePage. Three regions:
+ *
+ *    [💬]            [◀  N / M  ▶]                       [⋯]
+ *
+ *   left  : chat trigger (always)
+ *   centre: replay navigation (only when there are moves to step through)
+ *   right : kebab menu — the catch-all for "everything else" — propose
+ *           draw, resign, start the game, leave, rules. The menu items
+ *           are passed in so each game state can dictate what shows up
+ *           without the bar having to know about game logic.
+ *
+ * Pinned to the bottom of the viewport via `fixed`, with the iOS safe-
+ * area inset baked into the bottom padding so the home-indicator strip
+ * doesn't crowd the controls.
+ */
+export function GameBottomBar({
+  totalMoves,
+  step,
+  inReplay,
+  onStep,
+  openReplay,
+  exitReplay,
+  onOpenChat,
+  menuItems,
+}: GameBottomBarProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close on Escape / outside click. Mirrors the GameMenu pattern.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    const onDocClick = (e: MouseEvent) => {
+      if (!menuRef.current) return;
+      if (!menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onDocClick);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onDocClick);
+    };
+  }, [menuOpen]);
+
+  // ◀ tap: if we're not in replay yet, open it at the live step; if we
+  // are, walk one step back. ▶ symmetrically walks forward and is a
+  // no-op at the live boundary (totalMoves). Keeps the bar's API
+  // single-purpose — the parent decides if/when ReplayControls renders
+  // for a richer detail view.
+  function back() {
+    if (!inReplay) {
+      openReplay();
+      return;
+    }
+    onStep(Math.max(0, step - 1));
+  }
+  function forward() {
+    if (!inReplay) return;
+    onStep(Math.min(totalMoves, step + 1));
+  }
+
+  const hasReplay = totalMoves > 0;
+
+  return (
+    <nav className="fixed inset-x-0 bottom-0 z-30 flex items-center justify-between gap-2 border-t border-zinc-800 bg-zinc-950/95 px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] backdrop-blur">
+      {/* Left: chat */}
+      <button
+        type="button"
+        onClick={onOpenChat}
+        aria-label="Ouvrir le chat"
+        className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900 text-base transition hover:border-zinc-500"
+      >
+        💬
+      </button>
+
+      {/* Centre: replay nav. Hidden entirely when there are no moves
+         yet, otherwise centred and self-contained. */}
+      {hasReplay ? (
+        <div className="flex items-center gap-2 text-xs text-zinc-400">
+          <button
+            type="button"
+            onClick={back}
+            disabled={inReplay && step === 0}
+            aria-label="Coup précédent"
+            className="inline-flex h-8 w-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-200 transition hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            ◀
+          </button>
+          <span className="font-mono tabular-nums">
+            {inReplay ? step : totalMoves}
+            <span className="text-zinc-600">/</span>
+            {totalMoves}
+          </span>
+          <button
+            type="button"
+            onClick={forward}
+            disabled={!inReplay || step === totalMoves}
+            aria-label="Coup suivant"
+            className="inline-flex h-8 w-8 items-center justify-center rounded border border-zinc-700 bg-zinc-950 text-zinc-200 transition hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            ▶
+          </button>
+          {inReplay && (
+            <button
+              type="button"
+              onClick={exitReplay}
+              className="text-[11px] text-amber-300 hover:text-amber-200"
+              aria-label="Quitter le replay"
+            >
+              live
+            </button>
+          )}
+        </div>
+      ) : (
+        // Empty spacer keeps the kebab anchored to the right when no
+        // replay controls render — otherwise the chat icon would drift
+        // to the centre via justify-between.
+        <div />
+      )}
+
+      {/* Right: kebab */}
+      <div ref={menuRef} className="relative">
+        <button
+          type="button"
+          aria-label="Plus d'actions"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          disabled={menuItems.length === 0}
+          onClick={() => setMenuOpen((v) => !v)}
+          className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900 text-base font-medium leading-none text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100 disabled:opacity-40"
+        >
+          ⋯
+        </button>
+        {menuOpen && (
+          <div
+            role="menu"
+            className="absolute bottom-full right-0 z-40 mb-2 min-w-[14rem] overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 shadow-xl"
+          >
+            {menuItems.map((item, i) => {
+              const cls =
+                item.variant === "danger"
+                  ? "text-red-300 hover:bg-red-950/40 disabled:opacity-40"
+                  : item.variant === "primary"
+                    ? "text-amber-200 hover:bg-amber-950/30 disabled:opacity-40"
+                    : "text-zinc-100 hover:bg-zinc-800 disabled:opacity-40";
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  role="menuitem"
+                  disabled={item.disabled}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    item.onClick();
+                  }}
+                  className={
+                    "block w-full px-3 py-2 text-left text-sm transition disabled:cursor-not-allowed " +
+                    cls
+                  }
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </nav>
+  );
+}

@@ -2,30 +2,61 @@ import { useEffect, useState } from "react";
 import type { Thresholds } from "../api/types";
 import { Objectives } from "./Objectives";
 
-/**
- * ObjectivesPopover is the mobile-only "?" button in the GamePage header
- * that reveals the Objectives panel as a centered overlay. The desktop
- * layout still renders <Objectives> inline in the right rail (where
- * there's room); on phones the same information lives one tap away
- * without occupying ~150 px of vertical real estate during play.
- *
- * Dismissal: backdrop click, the X button, or Escape. We intentionally
- * don't trap focus or block scroll under the modal — the dialog is
- * small and read-only, so a more elaborate focus dance would be
- * overkill.
- */
-export function ObjectivesPopover({ thresholds }: { thresholds: Thresholds }) {
-  const [open, setOpen] = useState(false);
+interface RulesOverlayProps {
+  thresholds: Thresholds;
+  open: boolean;
+  onClose: () => void;
+}
 
+/**
+ * RulesOverlay is the controlled modal that paints the Objectives panel
+ * over the page. Used both by the standalone ObjectivesPopover button
+ * (own its own state) and by the GameBottomBar kebab menu (state lives
+ * on the parent GamePage).
+ *
+ * Dismissal: backdrop click, the X button, or Escape.
+ */
+export function RulesOverlay({ thresholds, open, onClose }: RulesOverlayProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [open, onClose]);
 
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="relative w-full max-w-sm"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute right-2 top-2 z-10 text-zinc-500 hover:text-zinc-200"
+          aria-label="Fermer"
+        >
+          ✕
+        </button>
+        <Objectives thresholds={thresholds} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * ObjectivesPopover is a "?" button that opens RulesOverlay on tap.
+ * Kept as the standalone affordance for callers that want a one-shot
+ * trigger without managing state themselves.
+ */
+export function ObjectivesPopover({ thresholds }: { thresholds: Thresholds }) {
+  const [open, setOpen] = useState(false);
   return (
     <>
       <button
@@ -36,27 +67,11 @@ export function ObjectivesPopover({ thresholds }: { thresholds: Thresholds }) {
       >
         ?
       </button>
-      {open && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-          onClick={() => setOpen(false)}
-        >
-          <div
-            className="relative w-full max-w-sm"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="absolute right-2 top-2 z-10 text-zinc-500 hover:text-zinc-200"
-              aria-label="Fermer"
-            >
-              ✕
-            </button>
-            <Objectives thresholds={thresholds} />
-          </div>
-        </div>
-      )}
+      <RulesOverlay
+        thresholds={thresholds}
+        open={open}
+        onClose={() => setOpen(false)}
+      />
     </>
   );
 }

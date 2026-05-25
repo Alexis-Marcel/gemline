@@ -430,8 +430,19 @@ export function GamePage() {
     );
   }
 
+  // mobileBar pins the action block to the bottom of the viewport on
+  // phones — fixed positioning + a translucent backdrop, with the iOS
+  // safe-area inset added to py so the home-indicator strip doesn't
+  // crowd the buttons. On lg+ the `lg:` resets drop it back into the
+  // right aside as a regular block.
+  const mobileBar =
+    "fixed inset-x-0 bottom-0 z-30 border-t border-zinc-800 bg-zinc-950/95 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] backdrop-blur lg:static lg:border-0 lg:bg-transparent lg:p-0 lg:backdrop-blur-none";
+
   return (
-    <div className="mx-auto max-w-[88rem] p-3 lg:p-4">
+    // pb-24 lg:pb-4 leaves room for the fixed mobile action bar so the
+    // chat / quitter link aren't hidden under it. On desktop the bar is
+    // inline, no extra room needed.
+    <div className="mx-auto max-w-[88rem] p-2 pb-24 lg:p-4 lg:pb-4">
       <header className="flex items-center justify-between">
         <Link
           to="/"
@@ -579,7 +590,14 @@ export function GamePage() {
         </aside>
 
         <main className="lg:col-start-2">
-          <div className="aspect-square w-full rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 lg:aspect-auto lg:h-[min(80vh,calc(100vw-40rem))]">
+          {/*
+            Mobile: drop the chrome (no border, near-zero padding) so the
+            board itself dominates the viewport — every wasted px around the
+            SVG is a px the cells lose, and the cells were already painful
+            to tap at 14 px. The aspect-square keeps the natural hex
+            bounding box. Desktop keeps the existing styling.
+          */}
+          <div className="aspect-square w-full bg-zinc-950/60 p-0.5 lg:aspect-auto lg:h-[min(80vh,calc(100vw-40rem))] lg:rounded-xl lg:border lg:border-zinc-800 lg:p-3">
             <Board
               side={inReplay ? replay.boardSide : game.boardSide}
               cells={boardCells}
@@ -594,15 +612,26 @@ export function GamePage() {
         <aside className="flex flex-col gap-3 lg:col-start-3">
           <Objectives thresholds={game.thresholds} />
 
+          {/*
+            mobileBar groups the chrome that turns the action set into a
+            fixed bottom bar on phones and a regular sidebar block on
+            desktop. Same element either way — the lg: modifiers wipe the
+            position / border / backdrop so it slots into the right aside.
+            Combined with the page wrapper's pb-24 it never overlaps real
+            content underneath, and the safe-area inset clears the iOS
+            home-indicator strip.
+          */}
           {game.status === "playing" && creds && (
-            <DrawOfferAndActions
-              game={game}
-              mySeatIndex={creds.seatIndex}
-              onOfferDraw={handleOfferDraw}
-              onAcceptDraw={handleAcceptDraw}
-              onDeclineDraw={handleDeclineDraw}
-              onResign={handleResign}
-            />
+            <div className={mobileBar}>
+              <DrawOfferAndActions
+                game={game}
+                mySeatIndex={creds.seatIndex}
+                onOfferDraw={handleOfferDraw}
+                onAcceptDraw={handleAcceptDraw}
+                onDeclineDraw={handleDeclineDraw}
+                onResign={handleResign}
+              />
+            </div>
           )}
 
           {game.status === "finished" && (
@@ -612,7 +641,7 @@ export function GamePage() {
             // chess.com-style state machine (propose / waiting / accept
             // or decline / go to rematch). The Elo deltas live in the
             // left Scoreboard — no "Revoir le résultat" needed here.
-            <div className="space-y-2">
+            <div className={`${mobileBar} space-y-2`}>
               {onNewGame && (
                 <button
                   type="button"

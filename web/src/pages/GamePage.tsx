@@ -34,6 +34,7 @@ import {
   useCredentials,
 } from "../lib/credentials";
 import { mergeGameSnapshot } from "../lib/gameSnapshot";
+import { hapticCapture, hapticGameEnd } from "../lib/haptics";
 import { cellsAtStep, lastMoveAt } from "../lib/replay";
 
 export function GamePage() {
@@ -155,12 +156,31 @@ export function GamePage() {
         })),
       );
       setGhosts((prev) => [...prev, ...added]);
+      // Buzz on captures so the player feels the take-off even when not
+      // looking at the screen mid-typing. No-op on iOS Safari (no
+      // navigator.vibrate) and on desktop browsers without a haptic
+      // device — see lib/haptics for the gate.
+      hapticCapture();
       const keys = new Set(added.map((g) => g.key));
       window.setTimeout(() => {
         setGhosts((prev) => prev.filter((g) => !keys.has(g.key)));
       }, 600);
     });
   }, [id]);
+
+  // Vibrate once on the playing → finished transition so the player knows
+  // the result landed without having to look. Refs guard against a fresh
+  // mount on a finished game (would buzz on every page load) and against
+  // a state event that didn't actually flip status.
+  const lastStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!game) return;
+    const prev = lastStatusRef.current;
+    lastStatusRef.current = game.status;
+    if (prev && prev !== "finished" && game.status === "finished") {
+      hapticGameEnd();
+    }
+  }, [game]);
 
   const isMyTurn =
     !!game &&

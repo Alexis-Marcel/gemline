@@ -624,6 +624,15 @@ export function GamePage() {
               disabled={inReplay || !isMyTurn || game.status !== "playing"}
               highlight={boardHighlight}
               ghosts={inReplay ? undefined : ghosts}
+              // Used by the Board's tap-to-confirm flow on coarse pointers
+              // to paint the preview ghost in the local player's colour.
+              // Undefined for spectators / replay viewers, which is fine —
+              // they don't get the preview either.
+              playerColor={
+                creds && !inReplay
+                  ? game.seats[creds.seatIndex]?.color
+                  : undefined
+              }
             />
           </div>
         </main>

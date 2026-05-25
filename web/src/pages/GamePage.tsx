@@ -13,20 +13,17 @@ import { useGameSocket } from "../api/ws";
 import { AnonymousJoinModal } from "../components/AnonymousJoinModal";
 import { Board } from "../components/Board";
 import { ChatDrawer } from "../components/ChatDrawer";
-import { ChatPanel } from "../components/ChatPanel";
 import { ConnStatus } from "../components/ConnStatus";
-import { DrawOfferAndActions } from "../components/DrawOfferAndActions";
+import {
+  GameBottomBar,
+  type BottomBarMenuItem,
+} from "../components/GameBottomBar";
 import { GameEndModal } from "../components/GameEndModal";
-import { GameMenu } from "../components/GameMenu";
-import { Objectives } from "../components/Objectives";
-import { ObjectivesPopover } from "../components/ObjectivesPopover";
-import { RematchControls } from "../components/RematchControls";
-import { ReplayControls } from "../components/ReplayControls";
-import { Scoreboard } from "../components/Scoreboard";
+import { RulesOverlay } from "../components/ObjectivesPopover";
+import { PlayerStrip } from "../components/PlayerStrip";
 import { SearchingForOpponent } from "../components/SearchingForOpponent";
 import { SeatInviteModal } from "../components/SeatInviteModal";
 import { ShareCard } from "../components/ShareCard";
-import { StartButton } from "../components/StartButton";
 import { UserNav } from "../components/UserNav";
 import { useInPlayActions } from "../hooks/useInPlayActions";
 import { useRematchFlow } from "../hooks/useRematchFlow";
@@ -59,7 +56,7 @@ export function GamePage() {
 
   const [replay, setReplay] = useState<Replay | null>(null);
   const [replayStep, setReplayStep] = useState(0);
-  const [replayLoading, setReplayLoading] = useState(false);
+  const [, setReplayLoading] = useState(false);
 
   // Per-seat presence map fed by the shared socket. true = at least one live
   // WebSocket; false = nobody is on this seat right now; undefined = unknown
@@ -77,9 +74,11 @@ export function GamePage() {
   // to the chat + replay underneath without nagging.
   const [endModalDismissed, setEndModalDismissed] = useState(false);
 
-  // Mobile chat drawer open/closed. Desktop renders the chat inline in
-  // the right rail and ignores this entirely.
+  // Chat drawer open/closed (used on every breakpoint now — desktop's
+  // inline chat panel is gone, the drawer is the only entry point).
   const [chatOpen, setChatOpen] = useState(false);
+  // Rules overlay open/closed. Triggered from the bottom-bar kebab.
+  const [rulesOpen, setRulesOpen] = useState(false);
 
   // Stones captured by the most recent move, kept around briefly so the
   // Board can animate them out. Each entry has a unique key so React doesn't
@@ -457,25 +456,187 @@ export function GamePage() {
     );
   }
 
-  // mobileBar pins the action block to the bottom of the viewport on
-  // phones — fixed positioning + a translucent backdrop, with the iOS
-  // safe-area inset added to py so the home-indicator strip doesn't
-  // crowd the buttons. On lg+ the `lg:` resets drop it back into the
-  // right aside as a regular block.
-  const mobileBar =
-    "fixed inset-x-0 bottom-0 z-30 border-t border-zinc-800 bg-zinc-950/95 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] backdrop-blur lg:static lg:border-0 lg:bg-transparent lg:p-0 lg:backdrop-blur-none";
+  // Lobby-only seat callbacks pass through to PlayerStrip's inline
+  // +Inviter / +Bot affordances. Each one is undefined outside the
+  // (waiting + private + seated) trifecta so the strip just renders
+  // the empty card without action chrome.
+  const isPrivateLobby =
+    game.status === "waiting" && game.visibility === "private" && !!creds;
+  const stripCallbacks = {
+    onAddBot: isPrivateLobby
+      ? async (seatIndex: number) => {
+          try {
+            const g = await api.addBot(id, seatIndex);
+            setOptimisticGame(g);
+          } catch (err) {
+            setError(err instanceof ApiError ? err.message : "Erreur bot");
+          }
+        }
+      : undefined,
+    onRemoveBot: isPrivateLobby
+      ? async (seatIndex: number) => {
+          try {
+            const g = await api.removeBot(id, seatIndex);
+            setOptimisticGame(g);
+          } catch (err) {
+            setError(err instanceof ApiError ? err.message : "Erreur bot");
+          }
+        }
+      : undefined,
+    onInviteSeat: isPrivateLobby
+      ? (seatIndex: number) => setInviteSeatIdx(seatIndex)
+      : undefined,
+    onCancelInvite: isPrivateLobby
+      ? async (seatIndex: number) => {
+          try {
+            const g = await api.cancelSeatInvite(id, seatIndex);
+            setOptimisticGame(g);
+          } catch (err) {
+            setError(err instanceof ApiError ? err.message : "Erreur invitation");
+          }
+        }
+      : undefined,
+    onAcceptInvite:
+      game.status === "waiting" && !creds
+        ? () => handleJoin(undefined)
+        : undefined,
+    onDeclineInvite:
+      game.status === "waiting" && !creds && !!user
+        ? async (seatIndex: number) => {
+            setError(null);
+            try {
+              const g = await api.declineSeatInvite(id, seatIndex);
+              setOptimisticGame(g);
+              navigate("/");
+            } catch (err) {
+              setError(err instanceof ApiError ? err.message : "Erreur invitation");
+            }
+          }
+        : undefined,
+  };
+
+  // Build the kebab menu items for the bottom bar from the current state.
+  // The order is loosely "primary action first, destructive last".
+  const menuItems: BottomBarMenuItem[] = [];
+  // Lobby: host's Lancer la partie.
+  if (
+    game.status === "waiting" &&
+    game.visibility === "private" &&
+    creds &&
+    creds.seatIndex === 0
+  ) {
+    const occupied = game.seats.filter((s) => s.occupied).length;
+    menuItems.push({
+      label: "Lancer la partie",
+      variant: "primary",
+      disabled: occupied < 2,
+      onClick: async () => {
+        if (!creds) return;
+        try {
+          const g = await api.startGame(id, creds.token);
+          setOptimisticGame(g);
+        } catch (err) {
+          setError(err instanceof ApiError ? err.message : "Erreur start");
+        }
+      },
+    });
+  }
+  // In-play: draw + resign.
+  if (game.status === "playing" && creds) {
+    const drawSupported = game.seats.length === 2;
+    const offeredBy = game.drawOfferBy ?? -1;
+    if (drawSupported && offeredBy < 0) {
+      menuItems.push({ label: "Proposer un nul", onClick: handleOfferDraw });
+    } else if (offeredBy === creds.seatIndex) {
+      menuItems.push({
+        label: "Retirer ma proposition de nul",
+        onClick: handleDeclineDraw,
+      });
+    }
+    menuItems.push({
+      label: "Abandonner",
+      variant: "danger",
+      onClick: handleResign,
+    });
+  }
+  // Finished: new game / rematch state machine.
+  if (game.status === "finished") {
+    if (onNewGame) {
+      menuItems.push({
+        label: creatingNew ? "Création…" : "Nouvelle partie",
+        variant: "primary",
+        disabled: newGameBusy,
+        onClick: onNewGame,
+      });
+    }
+    if (game.rematchGameId) {
+      menuItems.push({
+        label: "Aller à la revanche",
+        onClick: handleGoToRematch,
+      });
+    } else if (creds) {
+      const offer = game.rematchOffer;
+      const iAccepted =
+        offer?.acceptedSeats.includes(creds.seatIndex) ?? false;
+      if (offer && iAccepted) {
+        menuItems.push({
+          label: "Annuler ma revanche",
+          onClick: handleDeclineRematch,
+          disabled: rematching,
+        });
+      } else if (offer) {
+        menuItems.push({
+          label: rematching ? "Envoi…" : "Accepter la revanche",
+          variant: "primary",
+          disabled: rematching,
+          onClick: handleOfferRematch,
+        });
+        menuItems.push({
+          label: "Refuser la revanche",
+          variant: "danger",
+          onClick: handleDeclineRematch,
+        });
+      } else {
+        menuItems.push({
+          label: rematching ? "Envoi…" : "Proposer une revanche",
+          disabled: rematching,
+          onClick: handleOfferRematch,
+        });
+      }
+    }
+  }
+  // Always available — quick access to the rules card.
+  menuItems.push({
+    label: "Règles de la partie",
+    onClick: () => setRulesOpen(true),
+  });
+  // Seated players can leave the game (clears the local token).
+  if (creds) {
+    menuItems.push({
+      label: "Quitter la partie",
+      variant: "danger",
+      onClick: handleLeave,
+    });
+  }
+
+  // Banner shown above the bottom bar when the opponent has just
+  // offered a draw and the local player hasn't responded yet. Kept
+  // out of the kebab menu so the decision is one tap away rather
+  // than two and the affordance is unmissable.
+  const drawOfferBy = game.drawOfferBy ?? -1;
+  const showDrawOfferBanner =
+    game.status === "playing" &&
+    creds !== null &&
+    drawOfferBy >= 0 &&
+    drawOfferBy !== creds.seatIndex;
 
   return (
-    // The page locks to a single viewport (h-dvh + overflow-hidden) at
-    // every breakpoint and every status. Two reasons:
-    //   - on phones the pinch-pan wrapper on the board captures touches
-    //     and competes with page scroll, so the layout would feel broken
-    //     if it required scrolling;
-    //   - on desktop the 3-col layout already fits in one viewport, so
-    //     scrolling is just dead chrome.
-    // pb-24 lg:pb-4 reserves room for the fixed mobile action bar; on
-    // desktop the bar is inline so no extra padding needed.
-    <div className="mx-auto flex h-dvh max-w-[88rem] flex-col overflow-hidden p-2 pb-24 lg:p-4 lg:pb-4">
+    // Single-viewport layout (h-dvh + overflow-hidden) at every
+    // breakpoint and status — the board's pinch-pan wrapper captures
+    // touches and competes with page scroll on phones, and on desktop
+    // the layout already fits in one viewport. pb-24 reserves room for
+    // the fixed GameBottomBar across all sizes.
+    <div className="mx-auto flex h-dvh max-w-[88rem] flex-col overflow-hidden px-2 pb-24 pt-2 lg:px-4 lg:pt-4">
       <header className="flex items-center justify-between">
         <Link
           to="/"
@@ -496,213 +657,44 @@ export function GamePage() {
               Spectateur
             </span>
           )}
-          {/* Mobile-only: the inline Objectives panel below the board
-             takes ~150 px, vertical real estate we can ill afford on a
-             phone. Render a "?" button here that pops the same content
-             as a modal; desktop keeps the inline version (right rail
-             has room). */}
-          <div className="lg:hidden">
-            <ObjectivesPopover thresholds={game.thresholds} />
-          </div>
-          {/* Mobile-only kebab menu. Hosts the "Revoir la partie" /
-             "Quitter la partie" actions that used to live below the
-             board — those don't fit in the single-viewport layout
-             anymore, so they migrate here. Items are conditional: no
-             items → menu doesn't render. */}
-          <div className="lg:hidden">
-            <GameMenu
-              items={[
-                ...(game.moveCount > 0 && !inReplay
-                  ? [
-                      {
-                        label: replayLoading
-                          ? "Chargement…"
-                          : "Revoir la partie",
-                        onClick: () => void openReplay(),
-                      },
-                    ]
-                  : []),
-                ...(creds
-                  ? [
-                      {
-                        label: "Quitter la partie",
-                        onClick: handleLeave,
-                        variant: "danger" as const,
-                      },
-                    ]
-                  : []),
-              ]}
-            />
-          </div>
           <ConnStatus status={wsStatus} attempt={wsAttempt} />
           <UserNav />
         </div>
       </header>
 
       {/*
-        Layout:
-          mobile portrait (default)            — flex-col, DOM order:
-            scoreboard → board → right rail.
-          mobile landscape (max-h:500px)       — 2-col grid: board on the
-            left (row-span-2 to fill the viewport height), scoreboard +
-            right-rail stack on the right. The geometry is what makes a
-            phone in landscape feel cramped — that's why the height
-            check triggers it, regardless of orientation prop.
-          desktop (lg)                         — three columns:
-            seats | board | conditions+chat.
-        Each side rail is fixed-width; the board takes the remaining 1fr.
+        BoardFirst layout (single column at every breakpoint):
+          1. PlayerStrip — horizontal seat list (scrolls when overflow).
+          2. main — the board, sized to min(100cqw, 100cqh) of its
+             container so it fills whichever axis is smaller without
+             cropping its hex aspect.
+          3. Optional waiting-state ShareCard pinned just above the
+             bottom bar so the host can hand out the URL without
+             leaving the game view.
+          4. Optional draw-offer banner — only renders when an
+             opponent's draw is pending and demands a one-tap response.
+        The fixed GameBottomBar (rendered after this column) provides
+        chat, replay nav, and the kebab menu that absorbs the
+        state-dependent actions that used to live in the right rail.
       */}
-      {/*
-        items-start was the old default to keep the right rail flush to
-        the top of its column on desktop — but it also prevented the
-        main board column from stretching to the row height, so the
-        board read as a tiny square on a 1280-wide screen. Drop the
-        wrapper-level alignment and let the right-aside set its own
-        self-start below; the board now fills its column.
-      */}
-      <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3 [@media(max-height:500px)]:mt-2 [@media(max-height:500px)]:grid [@media(max-height:500px)]:grid-cols-[auto_minmax(0,1fr)] [@media(max-height:500px)]:items-start [@media(max-height:500px)]:gap-3 lg:mt-4 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_20rem] lg:grid-rows-[minmax(0,1fr)] lg:gap-4">
-        <aside className="flex flex-col gap-3 [@media(max-height:500px)]:col-start-2 lg:col-start-1 lg:self-start">
-          <Scoreboard
-            game={game}
-            mySeatIndex={creds?.seatIndex ?? null}
-            myUserId={user?.id ?? null}
-            presence={presence}
-            ratings={ratings}
-            onAddBot={
-              game.status === "waiting" &&
-              game.visibility === "private" &&
-              !!creds
-                ? async (seatIndex) => {
-                    try {
-                      const g = await api.addBot(id, seatIndex);
-                      setOptimisticGame(g);
-                    } catch (err) {
-                      setError(err instanceof ApiError ? err.message : "Erreur bot");
-                    }
-                  }
-                : undefined
-            }
-            onRemoveBot={
-              game.status === "waiting" &&
-              game.visibility === "private" &&
-              !!creds
-                ? async (seatIndex) => {
-                    try {
-                      const g = await api.removeBot(id, seatIndex);
-                      setOptimisticGame(g);
-                    } catch (err) {
-                      setError(err instanceof ApiError ? err.message : "Erreur bot");
-                    }
-                  }
-                : undefined
-            }
-            onInviteSeat={
-              game.status === "waiting" &&
-              game.visibility === "private" &&
-              !!creds
-                ? (seatIndex) => setInviteSeatIdx(seatIndex)
-                : undefined
-            }
-            onCancelInvite={
-              game.status === "waiting" &&
-              game.visibility === "private" &&
-              !!creds
-                ? async (seatIndex) => {
-                    try {
-                      const g = await api.cancelSeatInvite(id, seatIndex);
-                      setOptimisticGame(g);
-                    } catch (err) {
-                      setError(err instanceof ApiError ? err.message : "Erreur invitation");
-                    }
-                  }
-                : undefined
-            }
-            onAcceptInvite={
-              // Invitee accepting their own reservation — goes through
-              // the standard join path; pickSeatForUser routes to the
-              // reserved seat. Only meaningful while waiting + I'm not
-              // already seated.
-              game.status === "waiting" && !creds
-                ? () => handleJoin(undefined)
-                : undefined
-            }
-            onDeclineInvite={
-              game.status === "waiting" && !creds && !!user
-                ? async (seatIndex) => {
-                    setError(null);
-                    try {
-                      const g = await api.declineSeatInvite(id, seatIndex);
-                      setOptimisticGame(g);
-                      navigate("/");
-                    } catch (err) {
-                      setError(err instanceof ApiError ? err.message : "Erreur invitation");
-                    }
-                  }
-                : undefined
-            }
-          />
+      <div className="mt-2 flex min-h-0 flex-1 flex-col gap-2">
+        <PlayerStrip
+          game={game}
+          mySeatIndex={creds?.seatIndex ?? null}
+          myUserId={user?.id ?? null}
+          presence={presence}
+          ratings={ratings}
+          {...stripCallbacks}
+        />
 
-          {/* JoinPanel is gone — auto-join handles authed users and the
-             AnonymousJoinModal handles anonymous ones. A viewer who
-             can't get a seat (full game, no reserved seat for them)
-             stays here as a spectator without seeing any "Rejoindre"
-             affordance, since the server already refused. */}
-
-          {game.status === "waiting" &&
-            game.visibility === "private" &&
-            creds &&
-            creds.seatIndex === 0 && (
-              // Host-only: the creator (seat 0) is the single source of
-              // "start now" decisions. Guests just wait; the server
-              // enforces the same rule with ErrNotHost, this guard is
-              // for affordance — don't dangle a button that 403s.
-              <StartButton
-                game={game}
-                onStart={async () => {
-                  if (!creds) return;
-                  try {
-                    const g = await api.startGame(id, creds.token);
-                    setOptimisticGame(g);
-                  } catch (err) {
-                    setError(err instanceof ApiError ? err.message : "Erreur start");
-                  }
-                }}
-              />
-            )}
-
-          {game.status === "waiting" && (
-            <ShareCard id={id} />
-          )}
-        </aside>
-
-        {/*
-          @container turns the <main> into a query container so the
-          board can size itself as min(100% width, 100% height) of the
-          surrounding main — `aspect-square` alone falls back to the
-          SVG's intrinsic dimensions (~300 px) and reads as a tiny
-          square in the middle of a huge cell on desktop.
-        */}
-        <main className="@container flex min-h-0 flex-1 items-center justify-center [@media(max-height:500px)]:col-start-1 [@media(max-height:500px)]:row-span-2 lg:col-start-2">
-          {/*
-            Mobile portrait: drop the chrome (no border, near-zero padding)
-            so the board itself dominates the viewport — every wasted px
-            around the SVG is a px the cells lose, and the cells were
-            already painful to tap at 14 px.
-            Mobile landscape: same chrome strip, but fill the viewport
-            height instead of using aspect-square — a phone in landscape is
-            wider than tall, so a square container would overflow.
-            Desktop: keep the rounded, padded card.
-          */}
+        <main className="@container flex min-h-0 flex-1 items-center justify-center">
           {/*
             w-[min(100cqw,100cqh)] reads the container query units off
-            <main> above and picks the smaller of its width / height,
-            so the board is a square that fills its slot regardless of
-            which axis is constraining. aspect-square then makes height
-            follow width. The landscape branch overrides with an
-            explicit dvh-derived height because the @container path
-            doesn't account for the fixed action bar at the bottom.
+            <main> and picks the smaller of its width / height, so the
+            board is a square that fills its slot regardless of which
+            axis is constraining.
           */}
-          <div className="aspect-square w-[min(100cqw,100cqh)] bg-zinc-950/60 p-0.5 [@media(max-height:500px)]:h-[calc(100dvh-6rem)] [@media(max-height:500px)]:w-auto lg:rounded-xl lg:border lg:border-zinc-800 lg:p-3">
+          <div className="aspect-square w-[min(100cqw,100cqh)] bg-zinc-950/60 p-0.5 lg:rounded-xl lg:border lg:border-zinc-800 lg:p-3">
             <Board
               side={inReplay ? replay.boardSide : game.boardSide}
               cells={boardCells}
@@ -710,10 +702,6 @@ export function GamePage() {
               disabled={inReplay || !isMyTurn || game.status !== "playing"}
               highlight={boardHighlight}
               ghosts={inReplay ? undefined : ghosts}
-              // Used by the Board's tap-to-confirm flow on coarse pointers
-              // to paint the preview ghost in the local player's colour.
-              // Undefined for spectators / replay viewers, which is fine —
-              // they don't get the preview either.
               playerColor={
                 creds && !inReplay
                   ? game.seats[creds.seatIndex]?.color
@@ -723,140 +711,61 @@ export function GamePage() {
           </div>
         </main>
 
-        <aside className="flex flex-col gap-3 [@media(max-height:500px)]:col-start-2 lg:col-start-3 lg:self-start">
-          {/* Hidden on phones — same content is reachable via the "?"
-             button in the header (ObjectivesPopover above). */}
-          <div className="hidden lg:block">
-            <Objectives thresholds={game.thresholds} />
-          </div>
+        {game.status === "waiting" && game.visibility === "private" && (
+          <ShareCard id={id} />
+        )}
 
-          {/*
-            mobileBar groups the chrome that turns the action set into a
-            fixed bottom bar on phones and a regular sidebar block on
-            desktop. Same element either way — the lg: modifiers wipe the
-            position / border / backdrop so it slots into the right aside.
-            Combined with the page wrapper's pb-24 it never overlaps real
-            content underneath, and the safe-area inset clears the iOS
-            home-indicator strip.
-          */}
-          {game.status === "playing" && creds && (
-            <div className={mobileBar}>
-              <DrawOfferAndActions
-                game={game}
-                mySeatIndex={creds.seatIndex}
-                onOfferDraw={handleOfferDraw}
-                onAcceptDraw={handleAcceptDraw}
-                onDeclineDraw={handleDeclineDraw}
-                onResign={handleResign}
-              />
-            </div>
-          )}
-
-          {game.status === "finished" && (
-            // End-of-game action block. Always visible (modal or not)
-            // so the player has direct access to "what's next" without
-            // having to re-open the modal. RematchControls renders the
-            // chess.com-style state machine (propose / waiting / accept
-            // or decline / go to rematch). The Elo deltas live in the
-            // left Scoreboard — no "Revoir le résultat" needed here.
-            <div className={`${mobileBar} space-y-2`}>
-              {onNewGame && (
-                <button
-                  type="button"
-                  onClick={onNewGame}
-                  disabled={newGameBusy}
-                  className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
-                >
-                  {creatingNew ? "Création…" : "Nouvelle partie"}
-                </button>
-              )}
-              <RematchControls
-                game={game}
-                mySeatIndex={mySeatIndex}
-                busy={rematching}
-                onOffer={handleOfferRematch}
-                onDecline={handleDeclineRematch}
-                onGoToRematch={handleGoToRematch}
-              />
+        {showDrawOfferBanner && creds && (
+          <div className="rounded-md border border-amber-400/40 bg-amber-400/10 p-2 text-sm text-amber-100">
+            <p>
+              🤝{" "}
+              <span className="font-medium">
+                {game.seats[drawOfferBy]?.name ?? "Adversaire"}
+              </span>{" "}
+              propose un nul.
+            </p>
+            <div className="mt-1 flex gap-2">
               <button
                 type="button"
-                onClick={handleLeave}
-                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500"
+                onClick={handleAcceptDraw}
+                className="flex-1 rounded-md bg-amber-400 px-3 py-1.5 text-xs font-medium text-zinc-950 transition hover:bg-amber-300"
               >
-                Quitter
+                Accepter
               </button>
-            </div>
-          )}
-
-          {inReplay ? (
-            // While in replay, the action bar contents are irrelevant
-            // (no actions to take). Pin ReplayControls bottom-of-viewport
-            // on mobile via the same mobileBar dance so the user can
-            // step through moves without scrolling.
-            <div className={mobileBar}>
-              <ReplayControls
-                step={replayStep}
-                total={replay.steps.length}
-                onChange={setReplayStep}
-                onExit={closeReplay}
-              />
-            </div>
-          ) : (
-            game.moveCount > 0 && (
-              // Mobile reaches this via the kebab menu in the header; the
-              // inline button only renders on desktop where there's room
-              // in the right rail.
               <button
-                onClick={openReplay}
-                disabled={replayLoading}
-                className="hidden rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500 disabled:opacity-50 lg:block"
+                type="button"
+                onClick={handleDeclineDraw}
+                className="flex-1 rounded-md border border-amber-400/50 px-3 py-1.5 text-xs text-amber-100 transition hover:bg-amber-400/10"
               >
-                {replayLoading ? "Chargement…" : "Revoir la partie"}
+                Refuser
               </button>
-            )
-          )}
-
-          {/* Inline chat lives in the desktop right rail. On phones the
-             ChatDrawer (rendered below, outside the grid) provides the
-             same surface via the floating chat button. */}
-          <div className="hidden lg:block">
-            <ChatPanel gameId={id} playerToken={creds?.token ?? null} />
+            </div>
           </div>
-
-          {creds && (
-            // Same story as "Revoir la partie": the mobile escape hatch
-            // is the kebab menu; only render the inline link on desktop.
-            <button
-              onClick={handleLeave}
-              className="hidden text-xs text-zinc-500 hover:text-zinc-300 lg:block"
-            >
-              Quitter la partie (efface mon token local)
-            </button>
-          )}
-
-          {/* Desktop renders the error inline at the end of the rail.
-             Mobile uses a fixed toast (rendered outside the grid below)
-             so the message is always visible without scrolling. */}
-          {error && (
-            <p className="hidden rounded-md border border-red-900/50 bg-red-950/30 p-3 text-sm text-red-300 lg:block">
-              {error}
-            </p>
-          )}
-        </aside>
+        )}
       </div>
 
-      {/* Mobile error toast: sits just above the action bar, fixed to
-         the viewport so it can't fall off-screen in a non-scrolling
-         layout. Tap to dismiss. */}
+      {/* Error toast — fixed above the bottom bar so it stays visible
+         in the no-scroll layout. Tap to dismiss. */}
       {error && (
         <button
           type="button"
           onClick={() => setError(null)}
-          className="fixed inset-x-2 bottom-24 z-30 rounded-md border border-red-900/50 bg-red-950/95 p-3 text-left text-sm text-red-200 shadow-lg backdrop-blur lg:hidden"
+          className="fixed inset-x-2 bottom-20 z-30 rounded-md border border-red-900/50 bg-red-950/95 p-3 text-left text-sm text-red-200 shadow-lg backdrop-blur"
         >
           {error}
         </button>
       )}
+
+      <GameBottomBar
+        totalMoves={game.moveCount}
+        step={inReplay ? replayStep : game.moveCount}
+        inReplay={inReplay}
+        onStep={setReplayStep}
+        openReplay={() => void openReplay()}
+        exitReplay={closeReplay}
+        onOpenChat={() => setChatOpen(true)}
+        menuItems={menuItems}
+      />
 
       {game.status === "finished" && !endModalDismissed && (
         <GameEndModal
@@ -893,34 +802,22 @@ export function GamePage() {
             autoJoinAttempted.current = true;
             setName(asName);
             const ok = await handleJoin(asName);
-            // Only close on success. On failure we keep the modal so
-            // the user can correct their name or back out; the error
-            // message already surfaces under the input via the
-            // shared `error` state which the modal mirrors.
             if (ok) setNameModalOpen(false);
           }}
         />
       )}
 
-      {/* Floating chat button (mobile only). Sits above the bottom action
-         bar so it's reachable with the thumb without dragging the hand.
-         Hidden on lg+ where the chat lives inline in the right rail. */}
-      <button
-        type="button"
-        onClick={() => setChatOpen(true)}
-        aria-label="Ouvrir le chat"
-        className="fixed bottom-24 right-3 z-30 inline-flex h-12 w-12 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900/90 text-xl shadow-lg backdrop-blur transition hover:border-zinc-500 lg:hidden"
-      >
-        💬
-      </button>
-
-      {/* Always mounted so the drawer can animate its slide-in/out. The
-         `open` prop drives visibility + pointer-events. */}
       <ChatDrawer
         open={chatOpen}
         onClose={() => setChatOpen(false)}
         gameId={id}
         playerToken={creds?.token ?? null}
+      />
+
+      <RulesOverlay
+        thresholds={game.thresholds}
+        open={rulesOpen}
+        onClose={() => setRulesOpen(false)}
       />
     </div>
   );

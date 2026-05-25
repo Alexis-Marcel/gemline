@@ -725,12 +725,9 @@ func rematchOfferComplete(rec *GameRecord) bool {
 //
 // Idempotent: a player who has already accepted gets a no-op success.
 func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRecord, []RematchSeat, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, nil, err
-	}
-	if !ok {
-		return nil, nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -790,12 +787,9 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 // we don't distinguish them, the outcome is the same: the offer disappears
 // and everyone returns to the "propose rematch" state.
 func (s *Store) DeclineRematch(ctx context.Context, gameID, token string) (*GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -1000,6 +994,39 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []
 	return rec, authedSeats, nil
 }
 
+// getOrNotFound is a small convenience wrapper over Get that folds the
+// "not found" boolean into ErrGameNotFound. Every mutation handler in
+// this file used to inline the same three-line dance; this returns
+// a single value pair that's hard to misuse — you can't forget the
+// not-found check.
+func (s *Store) getOrNotFound(ctx context.Context, id string) (*GameRecord, error) {
+	rec, ok, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrGameNotFound
+	}
+	return rec, nil
+}
+
+// publishDrawOffer persists the draw_offer_by value and fires the
+// draw-offer listener so other pods invalidate their cache and the
+// local WS broadcasts the new DTO. The order matters: the persist
+// MUST happen before the NOTIFY, otherwise an opponent's accept call
+// landing on a different pod after the cache invalidation would reload
+// a row with the stale value. Surface the persist error so callers can
+// return it; the notify itself is fire-and-forget.
+func (s *Store) publishDrawOffer(ctx context.Context, gameID string, offerBy int) error {
+	if err := s.repo.SaveDrawOffer(ctx, gameID, offerBy); err != nil {
+		return err
+	}
+	if s.onDrawOffer != nil {
+		s.onDrawOffer(gameID, offerBy)
+	}
+	return nil
+}
+
 // Get fetches a game, falling back to the repo if it isn't cached. Returns
 // (nil, false, nil) if no such game exists anywhere.
 func (s *Store) Get(ctx context.Context, id string) (*GameRecord, bool, error) {
@@ -1120,12 +1147,9 @@ func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx i
 // PlayMove authenticates the bearer token, applies the move to game state,
 // persists the move + any win-state change, and returns the engine's result.
 func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (game.MoveResult, *GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return game.MoveResult{}, nil, err
-	}
-	if !ok {
-		return game.MoveResult{}, nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -1213,12 +1237,9 @@ func (s *Store) PlayMove(ctx context.Context, gameID, token string, q, r int) (g
 //     opponent arrives).
 //   - Games with fewer than 2 occupied seats (no opponent to play against).
 func (s *Store) Start(ctx context.Context, gameID, token string) (*GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	// Auth & visibility checks live here (the HTTP-facing path); the
@@ -1256,12 +1277,9 @@ func (s *Store) Start(ctx context.Context, gameID, token string) (*GameRecord, e
 }
 
 func (s *Store) AddBot(ctx context.Context, gameID string, seatIdx int) (*GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -1317,12 +1335,9 @@ func (s *Store) AddBot(ctx context.Context, gameID string, seatIdx int) (*GameRe
 // would leave via Store.LeaveSeat with their own token). Resets the
 // seat to its empty state and persists.
 func (s *Store) RemoveBot(ctx context.Context, gameID string, seatIdx int) (*GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -1371,12 +1386,9 @@ func (s *Store) InviteSeat(ctx context.Context, gameID string, seatIdx int, invi
 	if inviteeID == "" || inviteeName == "" {
 		return nil, ErrBadSeatIndex // reuse 400 family — body validation
 	}
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -1421,12 +1433,9 @@ func (s *Store) InviteSeat(ctx context.Context, gameID string, seatIdx int, invi
 // !IsBot — ErrSeatNotInvited otherwise so the endpoint can't be
 // used to kick humans or bots).
 func (s *Store) CancelSeatInvite(ctx context.Context, gameID string, seatIdx int) (*GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -1470,12 +1479,9 @@ func (s *Store) DeclineSeatInvite(ctx context.Context, gameID string, seatIdx in
 	if callerUserID == "" {
 		return nil, ErrNotInvitee
 	}
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -1673,12 +1679,9 @@ func (s *Store) averageRating(ctx context.Context, userIDs []string, mode string
 // is what Resign is for. The seat's name/user/bot/token are all cleared so a
 // fresh join can reuse the slot.
 func (s *Store) LeaveSeat(ctx context.Context, gameID, token string) (*GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 	rec.Lock()
 	seat, ok := rec.SeatByToken(token)
@@ -1708,12 +1711,9 @@ func (s *Store) LeaveSeat(ctx context.Context, gameID, token string) (*GameRecor
 // winner. Persists the new outcome and notifies state listeners so the WS
 // hub broadcasts the final snapshot.
 func (s *Store) Resign(ctx context.Context, gameID, token string) (*GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -1742,13 +1742,10 @@ func (s *Store) Resign(ctx context.Context, gameID, token string) (*GameRecord, 
 		_ = err
 	}
 	if hadOffer {
-		// Persist the clear so a cross-pod reload of this finished game's
-		// row doesn't surface a phantom draw_offer_by on the DTO.
-		if err := s.repo.SaveDrawOffer(ctx, gameID, -1); err != nil {
+		// Best-effort: surface the clear to other pods. Persist failure
+		// here doesn't roll the engine's resign back — in-memory truth wins.
+		if err := s.publishDrawOffer(ctx, gameID, -1); err != nil {
 			_ = err
-		}
-		if s.onDrawOffer != nil {
-			s.onDrawOffer(gameID, -1)
 		}
 	}
 	s.maybeApplyRating(rec)
@@ -1764,12 +1761,9 @@ func (s *Store) Resign(ctx context.Context, gameID, token string) (*GameRecord, 
 // an already-pending offer is rejected so the UI surfaces "already pending"
 // cleanly rather than silently overwriting.
 func (s *Store) OfferDraw(ctx context.Context, gameID, token string) (*GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -1802,19 +1796,11 @@ func (s *Store) OfferDraw(ctx context.Context, gameID, token string) (*GameRecor
 	offeredBy := seat.Index
 	rec.Unlock()
 
-	// Persist BEFORE the listener fires the state-event NOTIFY: that
-	// notification invalidates other pods' caches, so they must observe
-	// the new draw_offer_by on the next reload. Without this write the
-	// opponent's accept call landing on a non-originating pod would
-	// reload a row with draw_offer_by=-1 and 409 with ErrDrawNotOffered.
-	if err := s.repo.SaveDrawOffer(ctx, gameID, offeredBy); err != nil {
+	// publishDrawOffer enforces the persist-then-notify order so a
+	// cross-pod accept call landing on a different pod always reloads
+	// the new draw_offer_by from the DB.
+	if err := s.publishDrawOffer(ctx, gameID, offeredBy); err != nil {
 		return rec, err
-	}
-
-	// Listener may need to re-enter the record (via store.Get → toGameDTO),
-	// so we MUST release rec.Lock before firing it. Same pattern as Resign.
-	if s.onDrawOffer != nil {
-		s.onDrawOffer(gameID, offeredBy)
 	}
 	return rec, nil
 }
@@ -1822,12 +1808,9 @@ func (s *Store) OfferDraw(ctx context.Context, gameID, token string) (*GameRecor
 // AcceptDraw ends the game in a draw if the *opponent* has an offer pending.
 // Self-acceptance is rejected. 2-player only.
 func (s *Store) AcceptDraw(ctx context.Context, gameID, token string) (*GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	rec.Lock()
@@ -1859,14 +1842,11 @@ func (s *Store) AcceptDraw(ctx context.Context, gameID, token string) (*GameReco
 	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
 		_ = err
 	}
-	// Persist the cleared draw_offer_by so cross-pod reloads of this
-	// game's row don't keep showing a stale offerer on the finished
-	// game DTO.
-	if err := s.repo.SaveDrawOffer(ctx, gameID, -1); err != nil {
+	// Best-effort: surface a clear draw_offer_by to other pods so the
+	// finished DTO doesn't keep a phantom offerer. Persist failure here
+	// doesn't roll the engine back — in-memory truth still wins.
+	if err := s.publishDrawOffer(ctx, gameID, -1); err != nil {
 		_ = err
-	}
-	if s.onDrawOffer != nil {
-		s.onDrawOffer(gameID, -1)
 	}
 	s.maybeApplyRating(rec)
 	if s.onState != nil {
@@ -1879,16 +1859,13 @@ func (s *Store) AcceptDraw(ctx context.Context, gameID, token string) (*GameReco
 // offer) or the offering player (withdrawing it) may call this — we don't
 // distinguish them at the wire level.
 func (s *Store) DeclineDraw(ctx context.Context, gameID, token string) (*GameRecord, error) {
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
-		return nil, ErrGameNotFound
-	}
 
 	rec.Lock()
-	_, ok = rec.SeatByToken(token)
+	_, ok := rec.SeatByToken(token)
 	if !ok {
 		rec.Unlock()
 		return rec, ErrBadToken
@@ -1904,13 +1881,8 @@ func (s *Store) DeclineDraw(ctx context.Context, gameID, token string) (*GameRec
 	rec.DrawOfferBy = -1
 	rec.Unlock()
 
-	// Persist the clear before the NOTIFY so other pods reload the new
-	// value rather than the cleared-then-restored stale offer.
-	if err := s.repo.SaveDrawOffer(ctx, gameID, -1); err != nil {
+	if err := s.publishDrawOffer(ctx, gameID, -1); err != nil {
 		return rec, err
-	}
-	if s.onDrawOffer != nil {
-		s.onDrawOffer(gameID, -1)
 	}
 	return rec, nil
 }
@@ -2290,12 +2262,9 @@ func (s *Store) PostMessage(ctx context.Context, gameID, token, body string) (*M
 		return nil, ErrEmptyMessage
 	}
 
-	rec, ok, err := s.Get(ctx, gameID)
+	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
 		return nil, err
-	}
-	if !ok {
-		return nil, ErrGameNotFound
 	}
 
 	rec.Lock()

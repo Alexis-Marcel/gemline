@@ -11,9 +11,14 @@ interface ChatPanelProps {
   gameId: string;
   /** Seat token of the current player, or null for spectators. */
   playerToken: string | null;
+  /** When true, the component skips its own header + card chrome and
+   *  lets the messages list grow to fill the parent height. Used by
+   *  the mobile chat drawer which provides its own header. Defaults
+   *  to false (renders the standalone card used on the desktop rail). */
+  embedded?: boolean;
 }
 
-export function ChatPanel({ gameId, playerToken }: ChatPanelProps) {
+export function ChatPanel({ gameId, playerToken, embedded = false }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -69,16 +74,26 @@ export function ChatPanel({ gameId, playerToken }: ChatPanelProps) {
     }
   }
 
-  return (
-    <section className="flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/40">
-      <header className="border-b border-zinc-800 px-3 py-2">
-        <h2 className="text-sm font-medium text-zinc-200">Chat</h2>
-      </header>
+  // The `embedded` variant lives inside a drawer that already provides
+  // its own header and a fixed-height shell — drop the card chrome and
+  // let the messages list stretch (flex-1) to fill the available
+  // space. The standalone variant keeps the rounded card.
+  const containerCls = embedded
+    ? "flex h-full flex-col bg-zinc-950"
+    : "flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/40";
+  const listCls = embedded
+    ? "flex-1 overflow-y-auto px-3 py-2 text-sm"
+    : "max-h-64 min-h-32 flex-1 overflow-y-auto px-3 py-2 text-sm";
 
-      <div
-        ref={scrollRef}
-        className="max-h-64 min-h-32 flex-1 overflow-y-auto px-3 py-2 text-sm"
-      >
+  return (
+    <section className={containerCls}>
+      {!embedded && (
+        <header className="border-b border-zinc-800 px-3 py-2">
+          <h2 className="text-sm font-medium text-zinc-200">Chat</h2>
+        </header>
+      )}
+
+      <div ref={scrollRef} className={listCls}>
         {messages.length === 0 ? (
           <p className="text-xs italic text-zinc-500">
             Tu peux discuter avec les autres joueurs ici.

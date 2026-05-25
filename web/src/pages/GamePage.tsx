@@ -12,6 +12,7 @@ import {
 import { useGameSocket } from "../api/ws";
 import { AnonymousJoinModal } from "../components/AnonymousJoinModal";
 import { Board } from "../components/Board";
+import { ChatDrawer } from "../components/ChatDrawer";
 import { ChatPanel } from "../components/ChatPanel";
 import { ConnStatus } from "../components/ConnStatus";
 import { DrawOfferAndActions } from "../components/DrawOfferAndActions";
@@ -74,6 +75,10 @@ export function GamePage() {
   // don't reopen it unless they navigate away and back. Lets them get
   // to the chat + replay underneath without nagging.
   const [endModalDismissed, setEndModalDismissed] = useState(false);
+
+  // Mobile chat drawer open/closed. Desktop renders the chat inline in
+  // the right rail and ignores this entirely.
+  const [chatOpen, setChatOpen] = useState(false);
 
   // Stones captured by the most recent move, kept around briefly so the
   // Board can animate them out. Each entry has a unique key so React doesn't
@@ -741,7 +746,12 @@ export function GamePage() {
             )
           )}
 
-          <ChatPanel gameId={id} playerToken={creds?.token ?? null} />
+          {/* Inline chat lives in the desktop right rail. On phones the
+             ChatDrawer (rendered below, outside the grid) provides the
+             same surface via the floating chat button. */}
+          <div className="hidden lg:block">
+            <ChatPanel gameId={id} playerToken={creds?.token ?? null} />
+          </div>
 
           {creds && (
             <button
@@ -803,6 +813,27 @@ export function GamePage() {
           }}
         />
       )}
+
+      {/* Floating chat button (mobile only). Sits above the bottom action
+         bar so it's reachable with the thumb without dragging the hand.
+         Hidden on lg+ where the chat lives inline in the right rail. */}
+      <button
+        type="button"
+        onClick={() => setChatOpen(true)}
+        aria-label="Ouvrir le chat"
+        className="fixed bottom-24 right-3 z-30 inline-flex h-12 w-12 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900/90 text-xl shadow-lg backdrop-blur transition hover:border-zinc-500 lg:hidden"
+      >
+        💬
+      </button>
+
+      {/* Always mounted so the drawer can animate its slide-in/out. The
+         `open` prop drives visibility + pointer-events. */}
+      <ChatDrawer
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        gameId={id}
+        playerToken={creds?.token ?? null}
+      />
     </div>
   );
 }

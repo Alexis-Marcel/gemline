@@ -70,7 +70,10 @@ export function Scoreboard({
     ratings?.rated ? ratings.seats.map((s) => [s.seatIndex, s]) : [],
   );
   return (
-    <ul className="grid grid-cols-2 gap-2 lg:flex lg:flex-col">
+    // Sticky on phones so the names + clocks stay visible while the user
+    // scrolls to the chat. Desktop keeps the regular flow (the rail is
+    // already short and never scrolls past the viewport).
+    <ul className="sticky top-2 z-10 grid grid-cols-2 gap-2 lg:static lg:flex lg:flex-col">
       {game.players.map((p, i) => {
         const seat = game.seats[i];
         const isTurn = game.turn === i && game.status === "playing";
@@ -93,7 +96,9 @@ export function Scoreboard({
         return (
           <li
             key={p.color}
-            className={`rounded-lg border p-3 transition-colors ${
+            // Tighter padding on phones so the two seat cards don't crowd
+            // out the board; desktop keeps the airier p-3.
+            className={`rounded-lg border bg-zinc-950/80 p-2 backdrop-blur transition-colors lg:bg-transparent lg:p-3 lg:backdrop-blur-none ${
               isTurn
                 ? "border-amber-400/60 bg-amber-400/5 shadow-[inset_3px_0_0_0_rgba(251,191,36,0.9)]"
                 : seat.occupied
@@ -169,13 +174,27 @@ export function Scoreboard({
                   {showOffline && <DisconnectBadge />}
                 </div>
                 {!waiting && seat.occupied && (
-                  <div className="mt-1 grid grid-cols-2 gap-1 text-xs text-zinc-400">
-                    <Stat
-                      label="Paires"
-                      value={`${p.capturedPairs}/${t.capturePairsWin}`}
-                    />
-                    <Stat label="Gemmes" value={`${p.gemsRemaining}`} />
-                  </div>
+                  <>
+                    {/* Mobile: single compact line — labels would clip
+                       anyway in the 2-col grid, and the bare numbers
+                       are unambiguous given the icons below. */}
+                    <div className="mt-1 text-xs text-zinc-400 lg:hidden">
+                      <span className="text-zinc-200">
+                        {p.capturedPairs}/{t.capturePairsWin}
+                      </span>{" "}
+                      paires ·{" "}
+                      <span className="text-zinc-200">{p.gemsRemaining}</span>{" "}
+                      gemmes
+                    </div>
+                    {/* Desktop: keep the labelled two-column block. */}
+                    <div className="mt-1 hidden grid-cols-2 gap-1 text-xs text-zinc-400 lg:grid">
+                      <Stat
+                        label="Paires"
+                        value={`${p.capturedPairs}/${t.capturePairsWin}`}
+                      />
+                      <Stat label="Gemmes" value={`${p.gemsRemaining}`} />
+                    </div>
+                  </>
                 )}
                 {waiting && seat.occupied && seat.isBot && onRemoveBot && (
                   <div className="mt-2">

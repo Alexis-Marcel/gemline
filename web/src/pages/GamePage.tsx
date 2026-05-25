@@ -8,24 +8,28 @@ import {
   acquirePresenceStream,
   acquireRatedStream,
   getSocket,
-  type ConnStatus as WsConnStatus,
 } from "../api/gameSocket";
 import { useGameSocket } from "../api/ws";
+import { AnonymousJoinModal } from "../components/AnonymousJoinModal";
 import { Board } from "../components/Board";
 import { ChatPanel } from "../components/ChatPanel";
+import { ConnStatus } from "../components/ConnStatus";
+import { DrawOfferAndActions } from "../components/DrawOfferAndActions";
 import { GameEndModal } from "../components/GameEndModal";
-import { SeatInviteModal } from "../components/SeatInviteModal";
 import { Objectives } from "../components/Objectives";
 import { RematchControls } from "../components/RematchControls";
 import { ReplayControls } from "../components/ReplayControls";
 import { Scoreboard } from "../components/Scoreboard";
+import { SearchingForOpponent } from "../components/SearchingForOpponent";
+import { SeatInviteModal } from "../components/SeatInviteModal";
+import { ShareCard } from "../components/ShareCard";
+import { StartButton } from "../components/StartButton";
 import { UserNav } from "../components/UserNav";
 import {
   clearCredentials,
   saveCredentials,
   useCredentials,
 } from "../lib/credentials";
-import { gemName } from "../lib/colors";
 import { cellsAtStep, lastMoveAt } from "../lib/replay";
 
 export function GamePage() {
@@ -817,297 +821,5 @@ export function GamePage() {
 function Center({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-full items-center justify-center p-6">{children}</div>
-  );
-}
-
-// AnonymousJoinModal is the one-time "what's your name?" prompt for
-// anonymous visitors landing on a waiting game. Authenticated users
-// auto-join silently with their profile name, so this is only ever
-// seen by guests. Required because the server has no other way to
-// identify an anon seat. The form is blocking (no backdrop close,
-// no X) — the alternative is "click around an empty game you can't
-// interact with", which is worse.
-function AnonymousJoinModal({
-  seatsFree,
-  initialName,
-  submitting,
-  onSubmit,
-}: {
-  seatsFree: number;
-  initialName: string;
-  submitting: boolean;
-  onSubmit: (name: string) => void | Promise<void>;
-}) {
-  const [name, setName] = useState(initialName);
-  const trimmed = name.trim();
-  const disabled = submitting || trimmed.length === 0;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (disabled) return;
-          void onSubmit(trimmed);
-        }}
-        className="w-full max-w-sm space-y-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl"
-      >
-        <header>
-          <h2 className="text-lg font-semibold text-zinc-100">
-            Rejoindre la partie
-          </h2>
-          <p className="mt-1 text-xs text-zinc-400">
-            {seatsFree > 0
-              ? `${seatsFree} place${seatsFree > 1 ? "s" : ""} libre${seatsFree > 1 ? "s" : ""}. Choisis un pseudo.`
-              : "Plus de place — tu pourras observer la partie."}
-          </p>
-        </header>
-        <input
-          autoFocus
-          className="block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
-          placeholder="Ton nom"
-          value={name}
-          maxLength={32}
-          onChange={(e) => setName(e.target.value)}
-          disabled={seatsFree === 0}
-        />
-        <button
-          type="submit"
-          disabled={disabled || seatsFree === 0}
-          className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
-        >
-          {submitting ? "…" : "Rejoindre"}
-        </button>
-        <p className="text-[11px] text-zinc-500">
-          Ou{" "}
-          <a href="/login" className="text-amber-400 hover:underline">
-            connecte-toi
-          </a>{" "}
-          pour jouer sous ton nom de profil.
-        </p>
-      </form>
-    </div>
-  );
-}
-
-function ConnStatus({
-  status,
-  attempt,
-}: {
-  status: WsConnStatus;
-  attempt: number;
-}) {
-  const meta = statusMeta(status, attempt);
-  return (
-    <span
-      className="flex items-center gap-1.5 text-xs text-zinc-400"
-      title={meta.title}
-    >
-      <span className={`inline-block h-2 w-2 rounded-full ${meta.dot}`} />
-      {meta.label}
-    </span>
-  );
-}
-
-function statusMeta(
-  status: WsConnStatus,
-  attempt: number,
-): { dot: string; label: string; title: string } {
-  switch (status) {
-    case "open":
-      return { dot: "bg-emerald-500", label: "en ligne", title: "WebSocket connectée" };
-    case "connecting":
-      return {
-        dot: "bg-amber-500 animate-pulse",
-        label: "connexion…",
-        title: "Ouverture de la WebSocket",
-      };
-    case "reconnecting":
-      return {
-        dot: "bg-amber-500 animate-pulse",
-        label: `reconnexion (essai ${attempt})`,
-        title: `Tentative ${attempt} de reconnexion à la WebSocket`,
-      };
-    case "offline":
-      return {
-        dot: "bg-red-500",
-        label: "hors-ligne",
-        title:
-          "Échec après plusieurs tentatives — recharge la page ou vérifie la connexion",
-      };
-  }
-}
-
-// SearchingForOpponent is the chess.com-style waiting room for matchmade
-// games. Renders before the game layout so the user sees a clean "queue"
-// state instead of an empty board. For 1v1 it just spins; for multi it
-// shows live progress (3/6 joueurs) so the user knows others are arriving.
-function SearchingForOpponent({
-  maxPlayers,
-  seatsOccupied,
-  onCancel,
-}: {
-  maxPlayers: number;
-  seatsOccupied: number;
-  onCancel: () => void;
-}) {
-  const isMulti = maxPlayers > 2;
-  return (
-    <div className="flex h-screen items-center justify-center bg-zinc-950 p-6">
-      <div className="w-full max-w-sm space-y-6 rounded-xl border border-zinc-800 bg-zinc-900/60 p-6 text-center">
-        <div
-          aria-hidden
-          className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-700 border-t-amber-400"
-        />
-        <div className="space-y-1">
-          <h1 className="text-lg font-medium text-zinc-100">
-            {isMulti
-              ? "Salle d'attente multijoueur"
-              : "Recherche d'un adversaire…"}
-          </h1>
-          {isMulti ? (
-            <>
-              <p className="text-2xl font-semibold text-amber-300">
-                {seatsOccupied}/{maxPlayers}
-              </p>
-              <p className="text-sm text-zinc-400">
-                La partie démarre dès que 3 joueurs ou plus sont là (plus tu
-                attends, plus le seuil descend).
-              </p>
-            </>
-          ) : (
-            <p className="text-sm text-zinc-400">Partie 1 contre 1.</p>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="text-sm text-zinc-400 underline-offset-2 transition hover:text-zinc-200 hover:underline"
-        >
-          Annuler
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ShareCard({ id }: { id: string }) {
-  const url = `${window.location.origin}/game/${id}`;
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3 text-xs text-zinc-400">
-      <div className="mb-1 font-medium text-zinc-300">Inviter</div>
-      <input
-        readOnly
-        value={url}
-        onFocus={(e) => e.currentTarget.select()}
-        className="w-full rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[11px] text-zinc-300"
-      />
-    </div>
-  );
-}
-
-function StartButton({ game, onStart }: { game: Game; onStart: () => void }) {
-  const occupied = game.seats.filter((s) => s.occupied).length;
-  const ready = occupied >= 2;
-  return (
-    <button
-      type="button"
-      onClick={onStart}
-      disabled={!ready}
-      className={
-        "w-full rounded-xl border px-4 py-3 text-left transition disabled:cursor-not-allowed " +
-        (ready
-          ? "border-amber-400 bg-amber-400/10 text-amber-100 hover:bg-amber-400/20"
-          : "border-zinc-800 bg-zinc-900/30 text-zinc-500")
-      }
-    >
-      <div className="text-sm font-medium">
-        {ready ? "Lancer la partie" : "Lancer la partie"}
-      </div>
-      <div className="mt-0.5 text-[11px]">
-        {ready
-          ? `${occupied} joueur${occupied > 1 ? "s" : ""} — les sièges vides resteront vides.`
-          : "Au moins 2 sièges occupés (invite un joueur ou ajoute un bot)."}
-      </div>
-    </button>
-  );
-}
-
-// DrawOfferAndActions renders the per-seat action area while a game is in
-// play: forfait + nul-related buttons, plus the offer banner when one is
-// pending. Multi-player games drop the draw controls entirely since draws
-// are only supported in 2-player.
-function DrawOfferAndActions({
-  game,
-  mySeatIndex,
-  onOfferDraw,
-  onAcceptDraw,
-  onDeclineDraw,
-  onResign,
-}: {
-  game: Game;
-  mySeatIndex: number;
-  onOfferDraw: () => void;
-  onAcceptDraw: () => void;
-  onDeclineDraw: () => void;
-  onResign: () => void;
-}) {
-  const drawSupported = game.seats.length === 2;
-  const offeredBy = game.drawOfferBy ?? -1;
-  const offerPendingByMe = offeredBy === mySeatIndex;
-  const offerPendingByThem = offeredBy >= 0 && !offerPendingByMe;
-
-  return (
-    <div className="space-y-2">
-      {offerPendingByThem && (
-        <div className="space-y-2 rounded-xl border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-100">
-          <div>
-            🤝 {gemName(game.seats[offeredBy]?.color ?? 0)} propose un nul.
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={onAcceptDraw}
-              className="flex-1 rounded-md bg-amber-400 px-3 py-1.5 text-xs font-medium text-zinc-950 transition hover:bg-amber-300"
-            >
-              Accepter
-            </button>
-            <button
-              onClick={onDeclineDraw}
-              className="flex-1 rounded-md border border-amber-400/50 px-3 py-1.5 text-xs text-amber-100 transition hover:bg-amber-400/10"
-            >
-              Refuser
-            </button>
-          </div>
-        </div>
-      )}
-
-      {offerPendingByMe && (
-        <div className="flex items-center justify-between rounded-md border border-zinc-700 bg-zinc-900/60 p-2 text-xs text-zinc-300">
-          <span>En attente de l'adversaire pour le nul…</span>
-          <button
-            onClick={onDeclineDraw}
-            className="text-zinc-400 underline-offset-2 hover:text-zinc-200 hover:underline"
-          >
-            Retirer
-          </button>
-        </div>
-      )}
-
-      <div className="flex gap-2">
-        {drawSupported && offeredBy < 0 && (
-          <button
-            onClick={onOfferDraw}
-            className="flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 transition hover:border-zinc-500"
-          >
-            Proposer un nul
-          </button>
-        )}
-        <button
-          onClick={onResign}
-          className="flex-1 rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-200 transition hover:border-red-700"
-        >
-          Abandonner
-        </button>
-      </div>
-    </div>
   );
 }

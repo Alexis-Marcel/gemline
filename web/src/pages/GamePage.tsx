@@ -32,6 +32,7 @@ import {
   saveCredentials,
   useCredentials,
 } from "../lib/credentials";
+import { mergeGameSnapshot } from "../lib/gameSnapshot";
 import { cellsAtStep, lastMoveAt } from "../lib/replay";
 
 export function GamePage() {
@@ -43,7 +44,11 @@ export function GamePage() {
     status: wsStatus,
     attempt: wsAttempt,
   } = useGameSocket(id);
-  const [localGame, setLocalGame] = useState<Game | null>(null);
+  // optimisticGame holds the server's response to the caller's own
+  // mutations (postMove, draw offers, leaves, ...). It's merged with
+  // liveGame via mergeGameSnapshot — see lib/gameSnapshot.ts for the
+  // tie-breaking rule and the bug history that justifies it.
+  const [optimisticGame, setOptimisticGame] = useState<Game | null>(null);
   const [name, setName] = useState("");
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,19 +80,10 @@ export function GamePage() {
     Array<{ q: number; r: number; color: Color; key: string }>
   >([]);
 
-  // Pick the freshest snapshot. localGame only beats liveGame when it
-  // has strictly more moves — i.e. when our optimistic mutation (our
-  // own postMove) hasn't been confirmed by the WS state event yet.
-  // On ties we MUST defer to liveGame: many server-side transitions
-  // (waiting → playing on AllSeated, draw offers, seat invitations,
-  // rematch state, etc.) change the DTO without bumping moveCount,
-  // and a `>=` here would let a stale localGame mask those updates
-  // until the user refreshed.
-  const game = useMemo(() => {
-    if (!localGame) return liveGame;
-    if (!liveGame) return localGame;
-    return localGame.moveCount > liveGame.moveCount ? localGame : liveGame;
-  }, [liveGame, localGame]);
+  const game = useMemo(
+    () => mergeGameSnapshot(liveGame, optimisticGame),
+    [liveGame, optimisticGame],
+  );
 
   // Creds tracks the seat token for this game id and stays reactive to
   // out-of-band writes — the lobby's rematch_ready event can save creds
@@ -177,7 +173,7 @@ export function GamePage() {
       setError(null);
       try {
         const res = await api.postMove(id, creds.token, q, r);
-        setLocalGame(res.game);
+        setOptimisticGame(res.game);
       } catch (err) {
         setError(err instanceof ApiError ? err.message : "Erreur inconnue");
       }
@@ -223,7 +219,7 @@ export function GamePage() {
         seatIndex: res.seat.index,
         name: res.seat.name,
       });
-      setLocalGame(res.game);
+      setOptimisticGame(res.game);
       return true;
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Erreur inconnue");
@@ -271,7 +267,7 @@ export function GamePage() {
     if (!creds) return;
     const token = creds.token;
     clearCredentials(id);
-    setLocalGame(null);
+    setOptimisticGame(null);
     try {
       await api.leaveSeat(id, token);
     } catch {
@@ -289,7 +285,7 @@ export function GamePage() {
     useInPlayActions({
       gameId: id,
       creds,
-      onGame: setLocalGame,
+      onGame: setOptimisticGame,
       onError: setError,
     });
 
@@ -302,7 +298,7 @@ export function GamePage() {
     gameId: id,
     game,
     creds,
-    onGame: setLocalGame,
+    onGame: setOptimisticGame,
     onError: setError,
   });
 
@@ -331,7 +327,7 @@ export function GamePage() {
     // is to leave the match, not to keep watching it. Anyone who
     // wants to reopen the game later can do so by URL.
     clearCredentials(id);
-    setLocalGame(null);
+    setOptimisticGame(null);
     navigate("/");
   }
 
@@ -482,7 +478,7 @@ export function GamePage() {
                 ? async (seatIndex) => {
                     try {
                       const g = await api.addBot(id, seatIndex);
-                      setLocalGame(g);
+                      setOptimisticGame(g);
                     } catch (err) {
                       setError(err instanceof ApiError ? err.message : "Erreur bot");
                     }
@@ -496,7 +492,7 @@ export function GamePage() {
                 ? async (seatIndex) => {
                     try {
                       const g = await api.removeBot(id, seatIndex);
-                      setLocalGame(g);
+                      setOptimisticGame(g);
                     } catch (err) {
                       setError(err instanceof ApiError ? err.message : "Erreur bot");
                     }
@@ -517,7 +513,7 @@ export function GamePage() {
                 ? async (seatIndex) => {
                     try {
                       const g = await api.cancelSeatInvite(id, seatIndex);
-                      setLocalGame(g);
+                      setOptimisticGame(g);
                     } catch (err) {
                       setError(err instanceof ApiError ? err.message : "Erreur invitation");
                     }
@@ -539,7 +535,7 @@ export function GamePage() {
                     setError(null);
                     try {
                       const g = await api.declineSeatInvite(id, seatIndex);
-                      setLocalGame(g);
+                      setOptimisticGame(g);
                       navigate("/");
                     } catch (err) {
                       setError(err instanceof ApiError ? err.message : "Erreur invitation");
@@ -569,7 +565,7 @@ export function GamePage() {
                   if (!creds) return;
                   try {
                     const g = await api.startGame(id, creds.token);
-                    setLocalGame(g);
+                    setOptimisticGame(g);
                   } catch (err) {
                     setError(err instanceof ApiError ? err.message : "Erreur start");
                   }
@@ -704,7 +700,7 @@ export function GamePage() {
         <SeatInviteModal
           gameId={id}
           seatIndex={inviteSeatIdx}
-          onInvited={(g) => setLocalGame(g)}
+          onInvited={(g) => setOptimisticGame(g)}
           onClose={() => setInviteSeatIdx(null)}
         />
       )}

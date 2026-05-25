@@ -479,12 +479,19 @@ export function GamePage() {
 
       {/*
         Layout:
-          mobile (default) — flex-col, DOM order: scoreboard → board → right rail
-          desktop (lg)     — three columns: seats | board | conditions+chat
+          mobile portrait (default)            — flex-col, DOM order:
+            scoreboard → board → right rail.
+          mobile landscape (max-h:500px)       — 2-col grid: board on the
+            left (row-span-2 to fill the viewport height), scoreboard +
+            right-rail stack on the right. The geometry is what makes a
+            phone in landscape feel cramped — that's why the height
+            check triggers it, regardless of orientation prop.
+          desktop (lg)                         — three columns:
+            seats | board | conditions+chat.
         Each side rail is fixed-width; the board takes the remaining 1fr.
       */}
-      <div className="mt-3 flex flex-col gap-3 lg:mt-4 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_20rem] lg:items-start lg:gap-4">
-        <aside className="flex flex-col gap-3 lg:col-start-1">
+      <div className="mt-3 flex flex-col gap-3 [@media(max-height:500px)]:mt-2 [@media(max-height:500px)]:grid [@media(max-height:500px)]:grid-cols-[auto_minmax(0,1fr)] [@media(max-height:500px)]:items-start [@media(max-height:500px)]:gap-3 lg:mt-4 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_20rem] lg:items-start lg:gap-4">
+        <aside className="flex flex-col gap-3 [@media(max-height:500px)]:col-start-2 lg:col-start-1">
           <Scoreboard
             game={game}
             mySeatIndex={creds?.seatIndex ?? null}
@@ -598,15 +605,18 @@ export function GamePage() {
           )}
         </aside>
 
-        <main className="lg:col-start-2">
+        <main className="[@media(max-height:500px)]:col-start-1 [@media(max-height:500px)]:row-span-2 lg:col-start-2">
           {/*
-            Mobile: drop the chrome (no border, near-zero padding) so the
-            board itself dominates the viewport — every wasted px around the
-            SVG is a px the cells lose, and the cells were already painful
-            to tap at 14 px. The aspect-square keeps the natural hex
-            bounding box. Desktop keeps the existing styling.
+            Mobile portrait: drop the chrome (no border, near-zero padding)
+            so the board itself dominates the viewport — every wasted px
+            around the SVG is a px the cells lose, and the cells were
+            already painful to tap at 14 px.
+            Mobile landscape: same chrome strip, but fill the viewport
+            height instead of using aspect-square — a phone in landscape is
+            wider than tall, so a square container would overflow.
+            Desktop: keep the rounded, padded card.
           */}
-          <div className="aspect-square w-full bg-zinc-950/60 p-0.5 lg:aspect-auto lg:h-[min(80vh,calc(100vw-40rem))] lg:rounded-xl lg:border lg:border-zinc-800 lg:p-3">
+          <div className="aspect-square w-full bg-zinc-950/60 p-0.5 [@media(max-height:500px)]:aspect-square [@media(max-height:500px)]:h-[calc(100dvh-6rem)] [@media(max-height:500px)]:w-auto lg:aspect-auto lg:h-[min(80vh,calc(100vw-40rem))] lg:w-full lg:rounded-xl lg:border lg:border-zinc-800 lg:p-3">
             <Board
               side={inReplay ? replay.boardSide : game.boardSide}
               cells={boardCells}
@@ -618,7 +628,7 @@ export function GamePage() {
           </div>
         </main>
 
-        <aside className="flex flex-col gap-3 lg:col-start-3">
+        <aside className="flex flex-col gap-3 [@media(max-height:500px)]:col-start-2 lg:col-start-3">
           {/* Hidden on phones — same content is reachable via the "?"
              button in the header (ObjectivesPopover above). */}
           <div className="hidden lg:block">

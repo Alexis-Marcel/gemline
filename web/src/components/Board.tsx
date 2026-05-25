@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
+import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
 import type { Color } from "../api/types";
 import { axialToScreen, boardPositions, cellIndex, inBoard } from "../lib/hex";
 import { gemColor } from "../lib/colors";
@@ -120,7 +121,7 @@ export function Board({
     ? axialToScreen(pendingCell.q, pendingCell.r, UNIT)
     : null;
 
-  return (
+  const svgEl = (
     <svg
       viewBox={viewBox}
       // touch-action: manipulation kills the 300ms tap-delay heuristic and
@@ -255,5 +256,31 @@ export function Board({
           );
         })}
     </svg>
+  );
+
+  // Pinch-to-zoom + pan on touch devices only. Mouse / desktop keeps the
+  // bare SVG — wheel zoom on a chess.com-style board is more annoying than
+  // useful, and there's nothing to pan since the whole board fits the
+  // viewport on a real screen.
+  //
+  // doubleClick is disabled because the tap-to-confirm flow already uses
+  // "two taps on the same cell" semantically; the library's default
+  // double-click-to-zoom would otherwise eat the confirmation.
+  if (!isCoarsePointer) {
+    return svgEl;
+  }
+  return (
+    <TransformWrapper
+      initialScale={1}
+      minScale={1}
+      maxScale={3}
+      doubleClick={{ disabled: true }}
+      wheel={{ disabled: true }}
+      panning={{ velocityDisabled: true }}
+    >
+      <TransformComponent wrapperClass="!w-full !h-full" contentClass="!w-full !h-full">
+        {svgEl}
+      </TransformComponent>
+    </TransformWrapper>
   );
 }

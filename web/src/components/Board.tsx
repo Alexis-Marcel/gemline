@@ -60,7 +60,12 @@ export function Board({ side, cells, onPlay, highlight, disabled, ghosts }: Boar
   return (
     <svg
       viewBox={viewBox}
-      className="w-full h-full select-none"
+      // touch-action: manipulation kills the 300ms tap-delay heuristic and
+      // the browser's double-tap-to-zoom on the board, both of which were
+      // making rapid placements feel laggy on iOS. The -webkit-tap-highlight
+      // override removes the grey flash that Safari paints under every tap
+      // on a clickable SVG element.
+      className="w-full h-full select-none touch-manipulation [-webkit-tap-highlight-color:transparent]"
       role="img"
       aria-label="Plateau hexagonal Gemline"
     >
@@ -106,7 +111,13 @@ export function Board({ side, cells, onPlay, highlight, disabled, ghosts }: Boar
               <circle
                 cx={x}
                 cy={y}
-                r={UNIT * 0.45}
+                // r = UNIT * 0.48 is the largest hitbox that still leaves a
+                // sliver of dead space between adjacent intersections (centers
+                // are exactly UNIT apart, so r1+r2 = 0.96*UNIT < UNIT). Bumped
+                // up from 0.45 to give the finger a bit more room on mobile,
+                // where the scaled radius was ~7 px (well under the 22 px
+                // Apple HIG minimum).
+                r={UNIT * 0.48}
                 fill="transparent"
                 className="cursor-pointer hover:fill-white/10"
                 onClick={() => onPlay!(q, r)}

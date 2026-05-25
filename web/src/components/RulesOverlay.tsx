@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import type { Thresholds } from "../api/types";
 import { Objectives } from "./Objectives";
 
@@ -9,10 +9,11 @@ interface RulesOverlayProps {
 }
 
 /**
- * RulesOverlay is the controlled modal that paints the Objectives panel
- * over the page. Used both by the standalone ObjectivesPopover button
- * (own its own state) and by the GameBottomBar kebab menu (state lives
- * on the parent GamePage).
+ * RulesOverlay paints the Objectives panel as a centered modal over
+ * the page. Controlled — the parent owns the open/closed state so the
+ * trigger can live anywhere. Today it's the GameBottomBar kebab
+ * "Règles de la partie" item on mobile; desktop has the same content
+ * always inline in the right rail and never opens this overlay.
  *
  * Dismissal: backdrop click, the X button, or Escape.
  */
@@ -47,31 +48,5 @@ export function RulesOverlay({ thresholds, open, onClose }: RulesOverlayProps) {
         <Objectives thresholds={thresholds} />
       </div>
     </div>
-  );
-}
-
-/**
- * ObjectivesPopover is a "?" button that opens RulesOverlay on tap.
- * Kept as the standalone affordance for callers that want a one-shot
- * trigger without managing state themselves.
- */
-export function ObjectivesPopover({ thresholds }: { thresholds: Thresholds }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        aria-label="Règles de la partie"
-        className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900 text-xs font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100"
-      >
-        ?
-      </button>
-      <RulesOverlay
-        thresholds={thresholds}
-        open={open}
-        onClose={() => setOpen(false)}
-      />
-    </>
   );
 }

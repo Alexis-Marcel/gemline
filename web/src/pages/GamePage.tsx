@@ -17,6 +17,7 @@ import { ConnStatus } from "../components/ConnStatus";
 import { DrawOfferAndActions } from "../components/DrawOfferAndActions";
 import { GameEndModal } from "../components/GameEndModal";
 import { Objectives } from "../components/Objectives";
+import { ObjectivesPopover } from "../components/ObjectivesPopover";
 import { RematchControls } from "../components/RematchControls";
 import { ReplayControls } from "../components/ReplayControls";
 import { Scoreboard } from "../components/Scoreboard";
@@ -463,6 +464,14 @@ export function GamePage() {
               Spectateur
             </span>
           )}
+          {/* Mobile-only: the inline Objectives panel below the board
+             takes ~150 px, vertical real estate we can ill afford on a
+             phone. Render a "?" button here that pops the same content
+             as a modal; desktop keeps the inline version (right rail
+             has room). */}
+          <div className="lg:hidden">
+            <ObjectivesPopover thresholds={game.thresholds} />
+          </div>
           <ConnStatus status={wsStatus} attempt={wsAttempt} />
           <UserNav />
         </div>
@@ -610,7 +619,11 @@ export function GamePage() {
         </main>
 
         <aside className="flex flex-col gap-3 lg:col-start-3">
-          <Objectives thresholds={game.thresholds} />
+          {/* Hidden on phones — same content is reachable via the "?"
+             button in the header (ObjectivesPopover above). */}
+          <div className="hidden lg:block">
+            <Objectives thresholds={game.thresholds} />
+          </div>
 
           {/*
             mobileBar groups the chrome that turns the action set into a

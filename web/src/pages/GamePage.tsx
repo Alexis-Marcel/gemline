@@ -22,7 +22,7 @@ import {
 } from "../components/GameBottomBar";
 import { GameEndModal } from "../components/GameEndModal";
 import { Objectives } from "../components/Objectives";
-import { RulesOverlay } from "../components/ObjectivesPopover";
+import { RulesOverlay } from "../components/RulesOverlay";
 import { PlayerStrip } from "../components/PlayerStrip";
 import { RematchControls } from "../components/RematchControls";
 import { ReplayNav } from "../components/ReplayNav";

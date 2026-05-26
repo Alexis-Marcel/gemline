@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -112,7 +113,7 @@ func parseSupabaseJWT(token string, verifier jwt.Keyfunc) (*supabaseClaims, erro
 // on missing/invalid JWT — endpoints that require auth check the context
 // themselves via requireUser. This way public endpoints (game CRUD,
 // anonymous join) keep working without a token.
-func jwtMiddleware(verifier jwt.Keyfunc, next http.Handler) http.Handler {
+func jwtMiddleware(verifier jwt.Keyfunc, log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := authorizationBearer(r)
 		if token == "" || verifier == nil {
@@ -137,7 +138,12 @@ func jwtMiddleware(verifier jwt.Keyfunc, next http.Handler) http.Handler {
 		if err != nil {
 			// Bad/expired token: behave as if anonymous rather than 401-ing
 			// every public endpoint. Endpoints that need a user surface their
-			// own 401 via requireUser.
+			// own 401 via requireUser. Log at Debug so it's silent in
+			// normal operation but visible when a user reports "I'm signed
+			// in but I keep getting 401s" — usually a refresh-token issue.
+			if log != nil {
+				log.Debug("jwt rejected", "err", err, "path", r.URL.Path)
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

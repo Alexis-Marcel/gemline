@@ -193,7 +193,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/users/{userId}", s.getPublicProfile)
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
-	app := loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, mux))))
+	app := loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, s.log, mux))))
 
 	// /metrics is scraped by Prometheus inside the cluster — bypass
 	// CORS, auth, and slog noise by registering it on a top-level mux

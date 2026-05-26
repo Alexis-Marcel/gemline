@@ -13,24 +13,19 @@ import { useGameSocket } from "../api/ws";
 import { AnonymousJoinModal } from "../components/AnonymousJoinModal";
 import { Board } from "../components/Board";
 import { ChatDrawer } from "../components/ChatDrawer";
-import { ChatPanel } from "../components/ChatPanel";
 import { ConnStatus } from "../components/ConnStatus";
-import { DrawOfferAndActions } from "../components/DrawOfferAndActions";
+import { DesktopGameAside } from "../components/DesktopGameAside";
+import { DesktopGameRail } from "../components/DesktopGameRail";
 import {
   GameBottomBar,
   type BottomBarMenuItem,
 } from "../components/GameBottomBar";
 import { GameEndModal } from "../components/GameEndModal";
-import { Objectives } from "../components/Objectives";
 import { RulesOverlay } from "../components/RulesOverlay";
 import { PlayerStrip } from "../components/PlayerStrip";
-import { RematchControls } from "../components/RematchControls";
-import { ReplayNav } from "../components/ReplayNav";
-import { Scoreboard } from "../components/Scoreboard";
 import { SearchingForOpponent } from "../components/SearchingForOpponent";
 import { SeatInviteModal } from "../components/SeatInviteModal";
 import { ShareCard } from "../components/ShareCard";
-import { StartButton } from "../components/StartButton";
 import { UserNav } from "../components/UserNav";
 import { useInPlayActions } from "../hooks/useInPlayActions";
 import { useRematchFlow } from "../hooks/useRematchFlow";
@@ -693,29 +688,20 @@ export function GamePage() {
         `lg:hidden` or `hidden lg:flex` to drop out of the other.
       */}
       <div className="mt-2 flex min-h-0 flex-1 flex-col gap-2 lg:mt-4 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_20rem] lg:grid-rows-[minmax(0,1fr)] lg:gap-4">
-        {/* Desktop-only left rail: per-seat scoreboard + lobby actions.
-           Same content as before the BoardFirst refactor. */}
-        <aside className="hidden flex-col gap-3 lg:flex lg:col-start-1 lg:self-start">
-          <Scoreboard
-            game={game}
-            mySeatIndex={creds?.seatIndex ?? null}
-            myUserId={user?.id ?? null}
-            presence={presence}
-            ratings={ratings}
-            onAddBot={stripCallbacks.onAddBot}
-            onRemoveBot={stripCallbacks.onRemoveBot}
-            onInviteSeat={stripCallbacks.onInviteSeat}
-            onCancelInvite={stripCallbacks.onCancelInvite}
-            onAcceptInvite={stripCallbacks.onAcceptInvite}
-            onDeclineInvite={stripCallbacks.onDeclineInvite}
-          />
-          {game.status === "waiting" &&
+        <DesktopGameAside
+          game={game}
+          mySeatIndex={creds?.seatIndex ?? null}
+          myUserId={user?.id ?? null}
+          presence={presence}
+          ratings={ratings}
+          seatCallbacks={stripCallbacks}
+          gameId={id}
+          onStart={
+            game.status === "waiting" &&
             game.visibility === "private" &&
             creds &&
-            creds.seatIndex === 0 && (
-              <StartButton
-                game={game}
-                onStart={async () => {
+            creds.seatIndex === 0
+              ? async () => {
                   if (!creds) return;
                   try {
                     const g = await api.startGame(id, creds.token);
@@ -725,11 +711,10 @@ export function GamePage() {
                       err instanceof ApiError ? err.message : "Erreur start",
                     );
                   }
-                }}
-              />
-            )}
-          {game.status === "waiting" && <ShareCard id={id} />}
-        </aside>
+                }
+              : undefined
+          }
+        />
 
         {/* Mobile-only player strip on top. */}
         <div className="lg:hidden">
@@ -801,85 +786,31 @@ export function GamePage() {
           </div>
         )}
 
-        {/* Desktop-only right rail. */}
-        <aside className="hidden flex-col gap-3 lg:flex lg:col-start-3 lg:self-start">
-          <Objectives thresholds={game.thresholds} />
-
-          {game.status === "playing" && creds && (
-            <DrawOfferAndActions
-              game={game}
-              mySeatIndex={creds.seatIndex}
-              onOfferDraw={handleOfferDraw}
-              onAcceptDraw={handleAcceptDraw}
-              onDeclineDraw={handleDeclineDraw}
-              onResign={handleResign}
-            />
-          )}
-
-          {game.status === "finished" && (
-            <div className="space-y-2">
-              {onNewGame && (
-                <button
-                  type="button"
-                  onClick={onNewGame}
-                  disabled={newGameBusy}
-                  className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
-                >
-                  {creatingNew ? "Création…" : "Nouvelle partie"}
-                </button>
-              )}
-              <RematchControls
-                game={game}
-                mySeatIndex={mySeatIndex}
-                busy={rematching}
-                onOffer={handleOfferRematch}
-                onDecline={handleDeclineRematch}
-                onGoToRematch={handleGoToRematch}
-              />
-              <button
-                type="button"
-                onClick={handleLeave}
-                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 transition hover:border-zinc-500"
-              >
-                Quitter
-              </button>
-            </div>
-          )}
-
-          {/* Replay nav — always visible when there are moves to step
-             through. Tapping ◀ on the live board enters replay; the
-             "live" chip exits. Same component as the mobile bottom-bar
-             middle slot, just rendered inline here. */}
-          {game.moveCount > 0 && (
-            <div className="rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-2">
-              <ReplayNav
-                totalMoves={game.moveCount}
-                step={inReplay ? replayStep : game.moveCount}
-                inReplay={inReplay}
-                onStep={setReplayStep}
-                openReplay={() => void openReplay()}
-                exitReplay={closeReplay}
-              />
-            </div>
-          )}
-
-          <ChatPanel gameId={id} playerToken={creds?.token ?? null} />
-
-          {creds && (
-            <button
-              onClick={handleLeave}
-              className="text-xs text-zinc-500 hover:text-zinc-300"
-            >
-              Quitter la partie (efface mon token local)
-            </button>
-          )}
-
-          {error && (
-            <p className="rounded-md border border-red-900/50 bg-red-950/30 p-3 text-sm text-red-300">
-              {error}
-            </p>
-          )}
-        </aside>
+        <DesktopGameRail
+          game={game}
+          gameId={id}
+          mySeatIndex={mySeatIndex}
+          playerToken={creds?.token ?? null}
+          onOfferDraw={handleOfferDraw}
+          onAcceptDraw={handleAcceptDraw}
+          onDeclineDraw={handleDeclineDraw}
+          onResign={handleResign}
+          onNewGame={onNewGame}
+          newGameBusy={newGameBusy}
+          creatingNew={creatingNew}
+          onOfferRematch={handleOfferRematch}
+          onDeclineRematch={handleDeclineRematch}
+          onGoToRematch={handleGoToRematch}
+          rematching={rematching}
+          totalMoves={game.moveCount}
+          step={inReplay ? replayStep : game.moveCount}
+          inReplay={inReplay}
+          onStep={setReplayStep}
+          openReplay={() => void openReplay()}
+          exitReplay={closeReplay}
+          onLeave={handleLeave}
+          error={error}
+        />
       </div>
 
       {/* Mobile error toast — fixed above the bottom bar so it stays

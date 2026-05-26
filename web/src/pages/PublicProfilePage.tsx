@@ -15,11 +15,17 @@ export function PublicProfilePage() {
   const [profile, setProfile] = useState<PublicProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Derived-state reset on userId change — the loading spinner shows
+  // on the same render the URL param changes, not the one after.
+  const [prevUserId, setPrevUserId] = useState(userId);
+  if (prevUserId !== userId) {
+    setPrevUserId(userId);
+    setLoading(true);
+    setError(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
     api
       .getPublicProfile(userId)
       .then((p) => {

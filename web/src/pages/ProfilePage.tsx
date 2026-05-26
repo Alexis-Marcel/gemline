@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import type { Profile, UserGame, UserStats } from "../api/types";
-import { useAuth } from "../auth/AuthProvider";
+import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 
 export function ProfilePage() {
@@ -17,6 +17,18 @@ export function ProfilePage() {
   const [error, setError] = useState<string | null>(null);
   const [loadingData, setLoadingData] = useState(true);
 
+  // Mark "fetching" as derived state on auth changes instead of
+  // setting it in the effect body — the loading flag becomes visible
+  // on the same render that observes the auth change.
+  const currUserId = user?.id ?? null;
+  const [prevUserId, setPrevUserId] = useState(currUserId);
+  const [prevLoading, setPrevLoading] = useState(loading);
+  if (prevUserId !== currUserId || prevLoading !== loading) {
+    setPrevUserId(currUserId);
+    setPrevLoading(loading);
+    if (!loading && currUserId) setLoadingData(true);
+  }
+
   useEffect(() => {
     if (loading) return;
     if (!user) {
@@ -24,7 +36,6 @@ export function ProfilePage() {
       return;
     }
     let cancelled = false;
-    setLoadingData(true);
     Promise.all([api.getMe(), api.getMyStats(), api.getMyGames()])
       .then(([p, s, g]) => {
         if (cancelled) return;

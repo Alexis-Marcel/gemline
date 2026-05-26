@@ -1,9 +1,7 @@
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import {
-  useInvitations,
-  type PendingInvitation,
-} from "../notifications/InvitationsProvider";
+import { type PendingInvitation } from "../notifications/InvitationsContext";
+import { useInvitations } from "../notifications/useInvitations";
 
 // InvitationToast renders the pending-invitations stack pinned to the
 // bottom-right of the viewport. State lives in InvitationsProvider (so

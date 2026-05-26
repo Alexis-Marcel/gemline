@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMatchmake, type MatchmakeState } from "../api/matchmake";
-import { useAuth } from "../auth/AuthProvider";
+import { useAuth } from "../auth/useAuth";
 import { saveCredentials } from "../lib/credentials";
 
 const MULTIPLAYER_MAX_SEATS = 6;

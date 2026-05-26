@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
-import { useAuth } from "../auth/AuthProvider";
+import { useAuth } from "../auth/useAuth";
 import type { Color, Game, GameRatings, Replay } from "../api/types";
 import {
   acquireMoveStream,
@@ -285,12 +285,23 @@ export function GamePage() {
     if (joining) return;
     if (user) {
       autoJoinAttempted.current = true;
+      // handleJoin internally setStates joining / creds / error. That's
+      // what we want — the join is a side-effect, not derived state —
+      // and the lint rule's complaint about setState-in-effect is the
+      // false-positive case it documents (effect responding to a
+      // server state change, dispatching an async network call).
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       void handleJoin(undefined);
     } else if (!nameModalOpen) {
       // Defer to the modal — once the user submits a name we'll
       // record the attempt below.
       setNameModalOpen(true);
     }
+    // handleJoin captures `id` via closure — it's stable enough for
+    // this effect's purpose (auto-join exactly once per mount on the
+    // current game). Listing it in deps would re-fire the effect on
+    // every render since handleJoin is recreated each render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game, creds, user, joining, nameModalOpen]);
 
   // handleCancelMatchmaking: vacate a seat in a still-waiting game and go

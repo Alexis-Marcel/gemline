@@ -12,35 +12,22 @@
 // (server re-publishes on reconnect, etc.) coalesce instead of stacking.
 
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from "react";
 import { api } from "../api/client";
-import { useAuth } from "../auth/AuthProvider";
+import { useAuth } from "../auth/useAuth";
 import { saveCredentials } from "../lib/credentials";
 import { playNotificationSound } from "../lib/notificationSound";
-import { userSocket, type InvitePayload } from "../api/userSocket";
-
-export interface PendingInvitation extends InvitePayload {
-  /** Wall-clock arrival, used for stable ordering + de-dup. */
-  receivedAt: number;
-}
-
-interface InvitationsContextValue {
-  invitations: PendingInvitation[];
-  /** Drop one entry from the stack (used by toast + badge). Doesn't
-   *  call the server — accept/decline do that separately. */
-  dismiss: (gameId: string, seatIndex: number) => void;
-  /** POST decline-invite then remove from the stack. */
-  decline: (gameId: string, seatIndex: number) => Promise<void>;
-}
-
-const InvitationsContext = createContext<InvitationsContextValue | null>(null);
+import { userSocket } from "../api/userSocket";
+import {
+  InvitationsContext,
+  type InvitationsContextValue,
+  type PendingInvitation,
+} from "./InvitationsContext";
 
 function inviteKey(gameId: string, seatIndex: number) {
   return `${gameId}::${seatIndex}`;
@@ -52,9 +39,15 @@ export function InvitationsProvider({ children }: { children: ReactNode }) {
 
   // Reset the stack on sign-out — the persistent socket also closes on
   // logout, but state is per-user and shouldn't survive an auth change.
-  useEffect(() => {
-    if (!user) setInvitations([]);
-  }, [user]);
+  // Implemented as derived state (compare prev user, reset during
+  // render) rather than an effect so the empty stack is visible on the
+  // same render that observed the sign-out, not the one after.
+  const [prevUserId, setPrevUserId] = useState(user?.id ?? null);
+  const currUserId = user?.id ?? null;
+  if (prevUserId !== currUserId) {
+    setPrevUserId(currUserId);
+    if (!currUserId) setInvitations([]);
+  }
 
   // Wire the lobby socket:
   //  - invite_received pushes onto the stack;
@@ -128,12 +121,4 @@ export function InvitationsProvider({ children }: { children: ReactNode }) {
       {children}
     </InvitationsContext.Provider>
   );
-}
-
-export function useInvitations(): InvitationsContextValue {
-  const ctx = useContext(InvitationsContext);
-  if (!ctx) {
-    throw new Error("useInvitations must be used inside <InvitationsProvider>");
-  }
-  return ctx;
 }

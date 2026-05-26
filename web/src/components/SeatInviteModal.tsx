@@ -44,17 +44,32 @@ export function SeatInviteModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  useEffect(() => {
-    const query = q.trim();
-    if (query === "") {
+  // Debounce the search query: only fire the API call after the user
+  // stops typing for SEARCH_DEBOUNCE_MS. The setSearching(true) inside
+  // the effect body would normally trip the lint rule for synchronous
+  // setState in an effect; the early-out for an empty query reads as
+  // derived state instead — we compare to the previous trimmed value
+  // during render and reset results / searching in a single batch.
+  const trimmedQ = q.trim();
+  const [prevTrimmed, setPrevTrimmed] = useState(trimmedQ);
+  if (prevTrimmed !== trimmedQ) {
+    setPrevTrimmed(trimmedQ);
+    if (trimmedQ === "") {
       setResults([]);
       setSearching(false);
-      return;
     }
-    setSearching(true);
+  }
+
+  useEffect(() => {
+    if (trimmedQ === "") return;
     const handle = window.setTimeout(() => {
+      // setSearching here is inside the timeout (async) — not an
+      // effect-body setState — so React Compiler is happy. We flip
+      // it on at the *start* of the debounced search instead of in
+      // the effect body for the same reason.
+      setSearching(true);
       api
-        .searchUsers(query)
+        .searchUsers(trimmedQ)
         .then((r) => setResults(r))
         .catch((err) =>
           setError(err instanceof ApiError ? err.message : "Erreur recherche"),
@@ -62,7 +77,7 @@ export function SeatInviteModal({
         .finally(() => setSearching(false));
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
-  }, [q]);
+  }, [trimmedQ]);
 
   async function handlePick(entry: ProfileSearchEntry) {
     setInviting(true);

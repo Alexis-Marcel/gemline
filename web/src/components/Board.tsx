@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
 import type { Color } from "../api/types";
 import { axialToScreen, boardPositions, cellIndex, inBoard } from "../lib/hex";
@@ -53,13 +53,20 @@ export function Board({
   // see `isCoarsePointer`. We clear it whenever the board state changes
   // out from under us (an opponent moved, the game ended, the player's
   // turn flipped) so a stale ghost can't survive a state transition and
-  // accidentally commit on the next tap.
+  // accidentally commit on the next tap. Implemented as a derived-state
+  // reset during render (React's recommended pattern for "reset state
+  // when a prop changes") rather than an effect: a useEffect setState
+  // would trigger an extra render every time cells/disabled change.
   const [pendingCell, setPendingCell] = useState<{ q: number; r: number } | null>(
     null,
   );
-  useEffect(() => {
+  const [prevCells, setPrevCells] = useState(cells);
+  const [prevDisabled, setPrevDisabled] = useState(disabled);
+  if (prevCells !== cells || prevDisabled !== disabled) {
+    setPrevCells(cells);
+    setPrevDisabled(disabled);
     setPendingCell(null);
-  }, [cells, disabled]);
+  }
 
   // Compute the bounding box from the actual rendered intersection positions
   // and pad it so stones don't get clipped.

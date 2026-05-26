@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useAuth } from "../auth/AuthProvider";
-import { useInvitations } from "../notifications/InvitationsProvider";
+import { useAuth } from "../auth/useAuth";
+import { useInvitations } from "../notifications/useInvitations";
 
 /**
  * UserNav renders the right-hand "who am I" affordance on top-level pages.

@@ -13,12 +13,13 @@ export function useGameSocket(gameId: string | null): ConnState {
   const [state, setState] = useState<ConnState>(INITIAL);
 
   useEffect(() => {
-    if (!gameId) {
-      setState(INITIAL);
-      return;
-    }
+    if (!gameId) return;
     return acquireSocket(gameId, setState);
   }, [gameId]);
 
-  return state;
+  // Derive INITIAL when there's no game id rather than resetting state in
+  // the effect — keeps the effect pure (no setState-in-effect lint hit)
+  // and the subscription path simpler. State from a previous subscription
+  // lingers in memory but is hidden behind this gate.
+  return gameId ? state : INITIAL;
 }

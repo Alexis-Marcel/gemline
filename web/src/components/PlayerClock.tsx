@@ -23,19 +23,39 @@ export function PlayerClock({
   isActive,
   frozen,
 }: PlayerClockProps) {
-  const [, setNow] = useState(0);
+  // displayMs is the *rendered* countdown — initialised from the
+  // server snapshot, recomputed by the interval tick below using
+  // Date.now() so the wall-clock reference stays out of render
+  // (React Compiler flags Date.now() during render as impure).
+  const [displayMs, setDisplayMs] = useState(remainingMs);
+  // Re-seed when the server pushes a fresh snapshot (a new turn starts
+  // or remainingMs changes). React's "derived state from props"
+  // pattern: compare to the previous value and reset during render.
+  const [prevRemainingMs, setPrevRemainingMs] = useState(remainingMs);
+  const [prevTurnStartedAt, setPrevTurnStartedAt] = useState(turnStartedAt);
+  if (
+    prevRemainingMs !== remainingMs ||
+    prevTurnStartedAt !== turnStartedAt
+  ) {
+    setPrevRemainingMs(remainingMs);
+    setPrevTurnStartedAt(turnStartedAt);
+    setDisplayMs(remainingMs);
+  }
 
   useEffect(() => {
-    if (!isActive || frozen) return;
-    const id = window.setInterval(() => setNow((n) => n + 1), 250);
+    if (!isActive || frozen || !turnStartedAt) return;
+    const turnStart = new Date(turnStartedAt).getTime();
+    const tick = () => {
+      // Date.now() lives inside the interval callback, not render —
+      // the lint rule that flags impure calls during render is
+      // satisfied, and the user-visible countdown stays smooth.
+      const elapsed = Date.now() - turnStart;
+      setDisplayMs(Math.max(0, remainingMs - elapsed));
+    };
+    tick();
+    const id = window.setInterval(tick, 250);
     return () => window.clearInterval(id);
-  }, [isActive, frozen]);
-
-  let displayMs = remainingMs;
-  if (isActive && !frozen && turnStartedAt) {
-    const elapsed = Date.now() - new Date(turnStartedAt).getTime();
-    displayMs = Math.max(0, remainingMs - elapsed);
-  }
+  }, [isActive, frozen, remainingMs, turnStartedAt]);
 
   const flagged = displayMs <= 0;
   return (

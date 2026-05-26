@@ -86,14 +86,30 @@ func TestPresence_DisconnectGraceForfeitsAfterTimeout(t *testing.T) {
 		t.Fatalf("2-player disconnect forfeit must declare the survivor; got Empty")
 	}
 
-	// gameEnded must have cleared the seatRefs entry so long-running
-	// servers don't leak one map per finished game.
-	s.mu.Lock()
-	_, present := s.seatRefs[rec.ID]
-	s.mu.Unlock()
-	if present {
-		t.Fatalf("seatRefs[%s] should be cleared after gameEnded", rec.ID)
+	// gameEnded must clear the seatRefs entry so long-running servers
+	// don't leak one map per finished game. waitForStatus only tells us
+	// rec.Status flipped — gameEnded runs after that under s.mu, so we
+	// poll the seatRefs view to avoid racing the cleanup.
+	waitForSeatRefsCleared(t, s, rec.ID, 1*time.Second)
+}
+
+// waitForSeatRefsCleared polls until s.seatRefs[gameID] is gone or the
+// budget elapses. Used by tests that need to observe the post-finish
+// cleanup, which happens after rec.Status flips and is not visible to
+// waitForStatus.
+func waitForSeatRefsCleared(t *testing.T, s *Store, gameID string, budget time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		_, present := s.seatRefs[gameID]
+		s.mu.Unlock()
+		if !present {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
+	t.Fatalf("seatRefs[%s] still present after %v", gameID, budget)
 }
 
 func TestPresence_ReconnectCancelsGrace(t *testing.T) {

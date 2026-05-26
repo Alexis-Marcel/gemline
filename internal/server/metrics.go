@@ -47,6 +47,16 @@ var (
 		Name: "gemline_moves_played_total",
 		Help: "Total moves played, partitioned by actor (human or bot).",
 	}, []string{"actor"})
+
+	// Counts persistence-layer failures the Store decided not to roll
+	// the in-memory state back from. `op` is a short, low-cardinality
+	// label naming the operation that failed (e.g. resign_persist,
+	// rating_apply) so an alert can fire on a sudden non-zero rate
+	// without exploding cardinality on the game id / user id axis.
+	persistErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gemline_persist_errors_total",
+		Help: "Persistence errors swallowed by the Store (in-memory state wins).",
+	}, []string{"op"})
 )
 
 // metricsHandler serves the Prometheus exposition format on /metrics.

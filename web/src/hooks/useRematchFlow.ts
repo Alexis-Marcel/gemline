@@ -75,10 +75,15 @@ export function useRematchFlow({ gameId, game, creds, onGame, onError }: UseRema
     }
   }, [creds, gameId, onError, onGame]);
 
+  // Pull the optional rematchGameId out of `game` into a local before
+  // the useCallback so the compiler sees a primitive dep (a string |
+  // undefined). The original `game?.rematchGameId` dep tripped the
+  // React Compiler memoization check.
+  const rematchGameId = game?.rematchGameId;
   const handleGoToRematch = useCallback(() => {
-    if (!game?.rematchGameId) return;
-    navigate(`/game/${game.rematchGameId}`);
-  }, [game?.rematchGameId, navigate]);
+    if (!rematchGameId) return;
+    navigate(`/game/${rematchGameId}`);
+  }, [rematchGameId, navigate]);
 
   // Auto-redirect on the empty → set transition. The two refs together
   // model "what value did we last observe?", so the *first* render

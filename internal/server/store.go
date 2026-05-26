@@ -232,6 +232,20 @@ func (s *Store) WithDisconnectGrace(d time.Duration) *Store {
 	return s
 }
 
+// noteSwallowedErr records and logs a persistence error that the store
+// opted to swallow (in-memory state is treated as the truth). Replaces
+// the previous `_ = err` pattern so an oncall has both a Prom counter
+// (gemline_persist_errors_total{op=...}) and a structured log to look
+// at. The `op` label stays low-cardinality on purpose — alerts can
+// then fire on a sudden non-zero rate without exploding cardinality.
+func noteSwallowedErr(op string, err error) {
+	if err == nil {
+		return
+	}
+	persistErrorsTotal.WithLabelValues(op).Inc()
+	slog.Default().Warn("store: persistence error", "op", op, "err", err)
+}
+
 // WithBotDelay overrides the artificial think-time between a bot's turn
 // coming up and its move being applied. Tests pass 0 for speed.
 func (s *Store) WithBotDelay(d time.Duration) *Store {
@@ -385,7 +399,7 @@ func (s *Store) startInternal(rec *GameRecord) error {
 	rec.Unlock()
 
 	if err := s.repo.FinalizeStart(context.Background(), gameID, status, cfg); err != nil {
-		_ = err
+		noteSwallowedErr("start_finalize", err)
 	}
 	if s.onState != nil {
 		s.onState(gameID)
@@ -1737,15 +1751,15 @@ func (s *Store) Resign(ctx context.Context, gameID, token string) (*GameRecord, 
 
 	s.gameEnded(gameID)
 	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
-		// In-memory truth wins (same policy as handleFlag) — log the persist
-		// failure but don't roll the engine back.
-		_ = err
+		// In-memory truth wins (same policy as handleFlag) — log + bump
+		// the persist-errors counter and keep going.
+		noteSwallowedErr("resign_outcome_persist", err)
 	}
 	if hadOffer {
 		// Best-effort: surface the clear to other pods. Persist failure
 		// here doesn't roll the engine's resign back — in-memory truth wins.
 		if err := s.publishDrawOffer(ctx, gameID, -1); err != nil {
-			_ = err
+			noteSwallowedErr("resign_draw_clear", err)
 		}
 	}
 	s.maybeApplyRating(rec)
@@ -1840,13 +1854,13 @@ func (s *Store) AcceptDraw(ctx context.Context, gameID, token string) (*GameReco
 
 	s.gameEnded(gameID)
 	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
-		_ = err
+		noteSwallowedErr("accept_draw_outcome_persist", err)
 	}
 	// Best-effort: surface a clear draw_offer_by to other pods so the
 	// finished DTO doesn't keep a phantom offerer. Persist failure here
 	// doesn't roll the engine back — in-memory truth still wins.
 	if err := s.publishDrawOffer(ctx, gameID, -1); err != nil {
-		_ = err
+		noteSwallowedErr("accept_draw_clear", err)
 	}
 	s.maybeApplyRating(rec)
 	if s.onState != nil {
@@ -1959,11 +1973,11 @@ func (s *Store) playBotTurnIfNeeded(rec *GameRecord) {
 	// since this is server-driven; Background is fine.
 	if err := s.repo.AppendMove(context.Background(), gameID, ordinal, move, winner, winKind, status); err != nil {
 		// In-memory truth wins (same policy as the human path).
-		_ = err
+		noteSwallowedErr("bot_move_persist", err)
 	}
 	if hadDrawOffer {
 		if err := s.repo.SaveDrawOffer(context.Background(), gameID, -1); err != nil {
-			_ = err
+			noteSwallowedErr("bot_move_draw_clear", err)
 		}
 	}
 

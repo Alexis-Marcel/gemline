@@ -1,8 +1,12 @@
-import { Fragment, useMemo, useState } from "react";
-import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
+import { Fragment, Suspense, lazy, useMemo, useState } from "react";
 import type { Color } from "../api/types";
 import { axialToScreen, boardPositions, cellIndex, inBoard } from "../lib/hex";
 import { gemColor } from "../lib/colors";
+
+// Lazy-load the pinch-zoom wrapper so its ~13 KB-gzipped JS chunk
+// only ships to clients that actually need it (coarse pointers).
+// Desktop never downloads it.
+const BoardPinchWrapper = lazy(() => import("./BoardPinchWrapper"));
 
 const UNIT = 36;
 const STONE_RADIUS = UNIT * 0.42;
@@ -276,18 +280,13 @@ export function Board({
   if (!isCoarsePointer) {
     return svgEl;
   }
+  // Suspense fallback is the bare SVG — while the pinch chunk loads
+  // (one-shot, the first game on a touch device), the user can still
+  // tap to play. Once it arrives, the wrapper hot-swaps in and gestures
+  // become available with no remount needed.
   return (
-    <TransformWrapper
-      initialScale={1}
-      minScale={1}
-      maxScale={3}
-      doubleClick={{ disabled: true }}
-      wheel={{ disabled: true }}
-      panning={{ velocityDisabled: true }}
-    >
-      <TransformComponent wrapperClass="!w-full !h-full" contentClass="!w-full !h-full">
-        {svgEl}
-      </TransformComponent>
-    </TransformWrapper>
+    <Suspense fallback={svgEl}>
+      <BoardPinchWrapper>{svgEl}</BoardPinchWrapper>
+    </Suspense>
   );
 }

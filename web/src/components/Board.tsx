@@ -1,4 +1,4 @@
-import { Fragment, Suspense, lazy, useMemo, useState } from "react";
+import { Fragment, Suspense, lazy, useMemo } from "react";
 import type { Color } from "../api/types";
 import { axialToScreen, boardPositions, cellIndex, inBoard } from "../lib/hex";
 import { gemColor } from "../lib/colors";
@@ -15,26 +15,35 @@ const DOT_RADIUS = 2.5;
 interface BoardProps {
   side: number;
   cells: Color[];
-  onPlay?: (q: number, r: number) => void;
+  /** Tap callback for free intersections. The parent decides whether to
+   *  commit immediately (mouse / fine pointer) or arm a preview ghost
+   *  via `pendingCell` and re-tap to commit (touch / coarse pointer).
+   *  Board itself is stateless w.r.t. the tap flow now. */
+  onCellTap?: (q: number, r: number) => void;
+  /** Tap callback for the surrounding board canvas (gridlines, existing
+   *  stones, dead space). Used by the parent to clear a pending preview
+   *  — "tap elsewhere = cancel" without a dedicated gesture. */
+  onBoardTap?: () => void;
+  /** Currently armed preview cell, or null. When set, Board paints a
+   *  semi-opaque ghost in `playerColor` with a dashed amber ring.
+   *  Stateless on Board's side — the parent owns when to set / clear. */
+  pendingCell?: { q: number; r: number } | null;
   highlight?: { q: number; r: number } | null;
   disabled?: boolean;
   /** Stones to animate as "just captured". Rendered on top of the live board
    *  with a fade-out so the user sees what was removed. */
   ghosts?: Array<{ q: number; r: number; color: Color; key: string }>;
-  /** The local player's stone color. When provided AND the user is on a
-   *  coarse-pointer device, a first tap on a free intersection paints a
-   *  preview ghost of this color and a second tap on the same cell commits
-   *  the move — tap-to-confirm guards against mis-taps on tight phone
-   *  hitboxes. Omit (or leave undefined) to keep the immediate-place
-   *  behaviour everywhere; mouse / desktop users always get immediate
-   *  placement regardless. */
+  /** Local player's stone colour. Used to tint the preview ghost when
+   *  `pendingCell` is set; ignored otherwise. */
   playerColor?: Color;
 }
 
 export function Board({
   side,
   cells,
-  onPlay,
+  onCellTap,
+  onBoardTap,
+  pendingCell,
   highlight,
   disabled,
   ghosts,
@@ -42,35 +51,16 @@ export function Board({
 }: BoardProps) {
   const positions = useMemo(() => boardPositions(side), [side]);
 
-  // Detect coarse pointers (touch / stylus) once at mount. matchMedia is
-  // a stable enough signal — devices don't switch input modes mid-game
-  // in practice — and it lets us skip the tap-to-confirm dance entirely
-  // for mouse users where mis-clicks are vanishingly rare.
+  // Coarse-pointer (touch / stylus) detection — used only to decide whether
+  // to mount the pinch-zoom wrapper around the SVG. The tap-to-confirm flow
+  // itself lives in the parent (GamePage) now, so the decision to arm a
+  // preview vs. commit immediately is taken there using the same check.
   const isCoarsePointer = useMemo(
     () =>
       typeof window !== "undefined" &&
       window.matchMedia("(pointer: coarse)").matches,
     [],
   );
-
-  // The pending placement preview. Only used on coarse-pointer devices —
-  // see `isCoarsePointer`. We clear it whenever the board state changes
-  // out from under us (an opponent moved, the game ended, the player's
-  // turn flipped) so a stale ghost can't survive a state transition and
-  // accidentally commit on the next tap. Implemented as a derived-state
-  // reset during render (React's recommended pattern for "reset state
-  // when a prop changes") rather than an effect: a useEffect setState
-  // would trigger an extra render every time cells/disabled change.
-  const [pendingCell, setPendingCell] = useState<{ q: number; r: number } | null>(
-    null,
-  );
-  const [prevCells, setPrevCells] = useState(cells);
-  const [prevDisabled, setPrevDisabled] = useState(disabled);
-  if (prevCells !== cells || prevDisabled !== disabled) {
-    setPrevCells(cells);
-    setPrevDisabled(disabled);
-    setPendingCell(null);
-  }
 
   // Compute the bounding box from the actual rendered intersection positions
   // and pad it so stones don't get clipped.
@@ -108,24 +98,6 @@ export function Board({
     return out;
   }, [positions, side]);
 
-  function handleCellClick(q: number, r: number) {
-    if (!onPlay) return;
-    if (!isCoarsePointer || !playerColor) {
-      onPlay(q, r);
-      return;
-    }
-    // Coarse pointer with a known player colour: first tap arms the
-    // preview, second tap on the same cell commits. A different cell
-    // moves the preview; a tap outside any clickable cell bubbles to
-    // the SVG and cancels (handled below).
-    if (pendingCell && pendingCell.q === q && pendingCell.r === r) {
-      setPendingCell(null);
-      onPlay(q, r);
-    } else {
-      setPendingCell({ q, r });
-    }
-  }
-
   const pendingColor =
     pendingCell && playerColor !== undefined ? gemColor(playerColor) : null;
   const pendingScreen = pendingCell
@@ -144,10 +116,9 @@ export function Board({
       role="img"
       aria-label="Plateau hexagonal Gemline"
       // A click on the SVG canvas that didn't land on a clickable cell
-      // (cell-circle clicks stopPropagation) cancels any pending preview.
-      // Gives users an escape hatch without having to invent another
-      // gesture — tap "elsewhere" reads as "nevermind".
-      onClick={() => setPendingCell(null)}
+      // bubbles here (cell circles stopPropagation). The parent typically
+      // uses this to cancel a pending preview — "tap elsewhere = nevermind".
+      onClick={onBoardTap}
     >
       <g stroke="#3f3f46" strokeWidth={0.6} strokeLinecap="round">
         {segments.map((s, i) => (
@@ -160,7 +131,7 @@ export function Board({
         const c = cells[cellIndex(q, r, side)];
         const color = gemColor(c);
         const isHighlight = highlight?.q === q && highlight?.r === r;
-        const clickable = !disabled && c === 0 && onPlay;
+        const clickable = !disabled && c === 0 && onCellTap;
 
         return (
           <Fragment key={`${q},${r}`}>
@@ -201,10 +172,10 @@ export function Board({
                 fill="transparent"
                 className="cursor-pointer hover:fill-white/10"
                 onClick={(e) => {
-                  // Don't bubble — the SVG-level onClick would otherwise
-                  // clear the preview we're about to arm.
+                  // Don't bubble — the SVG-level onClick (onBoardTap) would
+                  // otherwise clear the preview we're about to arm.
                   e.stopPropagation();
-                  handleCellClick(q, r);
+                  onCellTap?.(q, r);
                 }}
               />
             )}

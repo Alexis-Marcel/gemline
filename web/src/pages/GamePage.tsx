@@ -209,6 +209,42 @@ export function GamePage() {
     [creds, id, isMyTurn],
   );
 
+  // Tap-to-confirm flow for coarse pointers (touch / stylus). Lives at
+  // the page level — not in Board — because we want to render an
+  // explicit "Confirmer / Annuler" banner outside the board's SVG (so
+  // the buttons don't zoom with the pinch wrapper and the user has
+  // an unambiguous, thumb-reachable affordance separate from re-tapping
+  // a tiny hex cell). Detect coarse pointer once at mount; matchMedia
+  // is stable enough — devices don't switch input modes mid-game.
+  const isCoarsePointer = useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia("(pointer: coarse)").matches,
+    [],
+  );
+  const [pendingCell, setPendingCell] = useState<{ q: number; r: number } | null>(
+    null,
+  );
+  // Derived-state reset for `pendingCell`. We track moveCount and a
+  // computed `playableNow` flag (= caller is seated, it's their turn,
+  // not in replay): any shift in either (a move landed, the turn
+  // flipped, replay opened, game ended) clears a stale preview without
+  // a useEffect — React's recommended pattern for "reset state when a
+  // prop derives differently". These prev-state values must be declared
+  // at the top level (above the page's early returns) to keep hook
+  // order stable; the actual `boardDisabled` value also used as Board's
+  // `disabled` prop is computed further down where `inReplay` is.
+  const playableNow =
+    isMyTurn && !!game && game.status === "playing" && replay === null;
+  const moveCount = game?.moveCount ?? 0;
+  const [prevMoveCount, setPrevMoveCount] = useState(moveCount);
+  const [prevPlayableNow, setPrevPlayableNow] = useState(playableNow);
+  if (prevMoveCount !== moveCount || prevPlayableNow !== playableNow) {
+    setPrevMoveCount(moveCount);
+    setPrevPlayableNow(playableNow);
+    if (pendingCell !== null) setPendingCell(null);
+  }
+
   // If the server says the game is finished, clear stale local credentials so
   // that hitting "Accueil" then coming back doesn't show the user as seated.
   useEffect(() => {
@@ -443,6 +479,42 @@ export function GamePage() {
   const boardHighlight = inReplay
     ? lastMoveAt(replay.steps, replayStep)
     : (game.lastMove ?? null);
+
+  // Tap-to-confirm handlers — defined here (after the early returns)
+  // because they close over `inReplay` / final `game` / `boardDisabled`.
+  // The `pendingCell` state + auto-cancel derived-reset live above the
+  // early returns to keep hook order stable.
+  const boardDisabled = inReplay || !isMyTurn || game.status !== "playing";
+  const handleCellTap = (q: number, r: number) => {
+    // Mouse / desktop or disabled board: commit (or no-op) — the
+    // preview only earns its keep on touch where mis-taps on a 7 px
+    // hitbox are the real risk.
+    if (!isCoarsePointer || boardDisabled) {
+      void onPlay(q, r);
+      return;
+    }
+    // Re-tap on the armed cell → commit. Different cell → move the
+    // preview. The banner below is the primary commit affordance;
+    // re-tap stays as a power-user shortcut.
+    if (pendingCell && pendingCell.q === q && pendingCell.r === r) {
+      setPendingCell(null);
+      void onPlay(q, r);
+    } else {
+      setPendingCell({ q, r });
+    }
+  };
+  const handleBoardTap = () => {
+    if (pendingCell !== null) setPendingCell(null);
+  };
+  const handleConfirmPending = () => {
+    if (!pendingCell) return;
+    const { q, r } = pendingCell;
+    setPendingCell(null);
+    void onPlay(q, r);
+  };
+  const handleCancelPending = () => {
+    setPendingCell(null);
+  };
 
   const seatsFree = game.seats.filter((s) => !s.occupied).length;
   const seatsOccupied = game.seats.length - seatsFree;
@@ -739,8 +811,10 @@ export function GamePage() {
             <Board
               side={inReplay ? replay.boardSide : game.boardSide}
               cells={boardCells}
-              onPlay={inReplay ? undefined : onPlay}
-              disabled={inReplay || !isMyTurn || game.status !== "playing"}
+              onCellTap={inReplay ? undefined : handleCellTap}
+              onBoardTap={inReplay ? undefined : handleBoardTap}
+              pendingCell={pendingCell}
+              disabled={boardDisabled}
               highlight={boardHighlight}
               ghosts={inReplay ? undefined : ghosts}
               playerColor={
@@ -824,6 +898,33 @@ export function GamePage() {
         >
           {error}
         </button>
+      )}
+
+      {/* Tap-to-confirm banner — mobile only, only visible while a
+         preview is armed. Sits just above the bottom bar so the user's
+         thumb can reach Confirmer without re-tapping a tiny hex cell.
+         Re-tapping the same cell still works (the preview matches the
+         cell-tap path), but this is the unambiguous affordance. */}
+      {pendingCell && (
+        <div className="fixed inset-x-2 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-40 flex items-center gap-2 rounded-md border border-amber-400/40 bg-zinc-950/95 p-2 shadow-lg backdrop-blur lg:inset-x-auto lg:right-4 lg:bottom-4 lg:w-auto">
+          <span className="flex-1 px-1 text-sm text-amber-100 lg:flex-none">
+            Poser ta gemme ici&nbsp;?
+          </span>
+          <button
+            type="button"
+            onClick={handleCancelPending}
+            className="rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100"
+          >
+            Annuler
+          </button>
+          <button
+            type="button"
+            onClick={handleConfirmPending}
+            className="rounded-md bg-amber-400 px-3 py-1.5 text-sm font-medium text-zinc-950 transition hover:bg-amber-300"
+          >
+            Confirmer
+          </button>
+        </div>
       )}
 
       {/* Mobile-only fixed-bottom toolbar. Desktop has the equivalent

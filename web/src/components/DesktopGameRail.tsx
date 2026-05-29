@@ -8,11 +8,9 @@ import { ReplayNav } from "./ReplayNav";
 interface DesktopGameRailProps {
   game: Game;
   gameId: string;
-  /** Seat index of the local viewer in this game, or null for spectators
-   *  / pre-join state. Drives whether action buttons render. */
+  // Seat index of the local viewer, or null for spectators.
   mySeatIndex: number | null;
-  /** Seat token for the chat input. Null for spectators (input
-   *  becomes read-only). */
+  // Seat token for chat input; null for spectators (read-only).
   playerToken: string | null;
   // In-play action handlers
   onOfferDraw: () => void;
@@ -39,19 +37,6 @@ interface DesktopGameRailProps {
   error: string | null;
 }
 
-/**
- * DesktopGameRail is the right rail of the desktop 3-column layout —
- * everything that lives next to the board on a wide screen:
- *   - Objectives panel (rules card)
- *   - per-state action block (draw + resign / new game + rematch)
- *   - always-visible ReplayNav once a move has been played
- *   - inline ChatPanel
- *   - "Quitter la partie" link
- *   - inline error message
- *
- * Hidden on mobile via Tailwind in the caller — this component itself
- * doesn't carry visibility classes so it can be reused.
- */
 export function DesktopGameRail({
   game,
   gameId,
@@ -125,8 +110,6 @@ export function DesktopGameRail({
         </div>
       )}
 
-      {/* Replay nav — always visible once a move has been played, both
-         live and during replay mode. */}
       {totalMoves > 0 && (
         <div className="rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-2">
           <ReplayNav

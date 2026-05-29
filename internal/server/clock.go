@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// clockManager owns the per-game timer that fires when the active player's
-// chess clock runs out. There's at most one timer alive per game at any
-// time; (re)scheduling cancels the previous one.
+// clockManager owns at most one timer per game; (re)scheduling cancels the
+// previous one.
 type clockManager struct {
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -18,13 +17,10 @@ func newClockManager() *clockManager {
 	return &clockManager{cancels: make(map[string]context.CancelFunc)}
 }
 
-// Schedule fires `onFlag` after `remaining` if no Cancel/Schedule call
-// supersedes it first. A negative or zero `remaining` invokes onFlag
-// immediately on a background goroutine. Safe to call concurrently for the
-// same gameID — the cancel of any prior timer and the install of the new one
-// happen atomically under cm.mu, so two concurrent Schedules can never both
-// observe an empty slot and both write into it (which would orphan one
-// cancel func and leak a goroutine).
+// Schedule fires onFlag after `remaining` unless a later Cancel/Schedule
+// supersedes it first (<=0 fires immediately). Cancelling the previous timer
+// and installing the new one happen atomically under cm.mu, so two concurrent
+// Schedules can't both install a timer and leak a goroutine.
 func (cm *clockManager) Schedule(gameID string, remaining time.Duration, onFlag func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cm.mu.Lock()
@@ -50,7 +46,6 @@ func (cm *clockManager) Schedule(gameID string, remaining time.Duration, onFlag 
 	}()
 }
 
-// Cancel stops the current timer for `gameID`, if any.
 func (cm *clockManager) Cancel(gameID string) {
 	cm.mu.Lock()
 	if cancel, ok := cm.cancels[gameID]; ok {
@@ -60,7 +55,6 @@ func (cm *clockManager) Cancel(gameID string) {
 	cm.mu.Unlock()
 }
 
-// CancelAll stops every active timer. Used on server shutdown.
 func (cm *clockManager) CancelAll() {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()

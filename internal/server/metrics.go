@@ -11,9 +11,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Cardinality stays bounded because `route` is the http.ServeMux
-// *pattern* (e.g. `GET /api/games/{id}`), not the concrete path — so
-// 10k distinct game IDs collapse to a single label value.
+// Cardinality stays bounded because `route` is the http.ServeMux *pattern*
+// (e.g. `GET /api/games/{id}`), not the concrete path — distinct game IDs
+// collapse to a single label value.
 var (
 	httpRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gemline_http_requests_total",
@@ -48,25 +48,20 @@ var (
 		Help: "Total moves played, partitioned by actor (human or bot).",
 	}, []string{"actor"})
 
-	// Counts persistence-layer failures the Store decided not to roll
-	// the in-memory state back from. `op` is a short, low-cardinality
-	// label naming the operation that failed (e.g. resign_persist,
-	// rating_apply) so an alert can fire on a sudden non-zero rate
-	// without exploding cardinality on the game id / user id axis.
+	// Persistence failures the Store swallowed (in-memory state wins). `op`
+	// is a low-cardinality label naming the failed operation (e.g.
+	// resign_persist) so alerts can fire without exploding cardinality.
 	persistErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gemline_persist_errors_total",
 		Help: "Persistence errors swallowed by the Store (in-memory state wins).",
 	}, []string{"op"})
 )
 
-// metricsHandler serves the Prometheus exposition format on /metrics.
 func metricsHandler() http.Handler { return promhttp.Handler() }
 
-// metricsMiddleware records request count + latency for every routed
-// request. /ws/* is skipped because the upgrade keeps the handler
-// running for the connection lifetime — its duration is meaningless as
-// a request-latency observation, and active connection counts are
-// already tracked by wsConnections.
+// metricsMiddleware records request count + latency. /ws/* is skipped: the
+// upgrade keeps the handler alive for the connection lifetime, so its duration
+// is meaningless and live counts are already in wsConnections.
 func metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/ws/") {

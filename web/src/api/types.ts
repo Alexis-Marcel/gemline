@@ -22,9 +22,8 @@ export interface Seat {
   index: number;
   color: Color;
   name: string;
-  /** Public Supabase user id for authenticated seats. Empty/undefined
-   *  for anonymous players and bots. Surfaced so the UI can link a
-   *  seat name to that player's public profile page. */
+  /** Public Supabase user id for authed seats (empty for anon/bots);
+   *  lets the UI link a seat to its public profile. */
   userId?: string;
   occupied: boolean;
   isBot: boolean;
@@ -83,10 +82,8 @@ export interface Game {
   visibility: Visibility;
   /** ID of the rematch game spawned from this one, if any. */
   rematchGameId?: string;
-  /** Axial coordinate of the most recently placed stone. Undefined for
-   *  a game that has had no moves yet. Used to render the chess.com-style
-   *  last-move ring during live play; replay mode derives its own from
-   *  the step cursor. */
+  /** Axial coord of the most recent stone (undefined before any move).
+   *  Drives the last-move ring in live play. */
   lastMove?: { q: number; r: number };
   /** Pending rematch proposal on a finished game. Undefined when no offer
    *  is active or once rematchGameId is set (the new game takes over). */
@@ -120,14 +117,9 @@ export interface JoinResponse {
 }
 
 /**
- * Each WsEvent that originates from the server-side EventPublisher carries
- * a per-game monotonic sequence number. Events that bypass persistence
- * (typically the initial state snapshot sent at WS open time, which is
- * tagged with the current event_seq rather than allocating a new one)
- * still include a seq so the client can detect catch-up gaps. Events
- * fetched through the HTTP /events?since=N catch-up endpoint also carry
- * a seq, which the client uses to dedup against live WS events that
- * arrive concurrently with the catch-up fetch.
+ * Each event carries a per-game monotonic seq (even the initial snapshot,
+ * tagged with the current event_seq) so the client can detect catch-up
+ * gaps and dedup live events against the HTTP /events?since=N endpoint.
  */
 export type WsEvent =
   | { type: "state"; seq?: number; payload: Game }
@@ -143,11 +135,8 @@ export interface GameEventRow {
   payload: WsEvent["payload"];
 }
 
-/**
- * Per-seat rating snapshot. The applied-only fields (oldRating, newRating,
- * delta, result) are present when the game's Elo math has run, and absent
- * otherwise — the JSON tags use omitempty server-side.
- */
+/** Per-seat rating snapshot. The applied-only fields (oldRating, newRating,
+ *  delta, result) are present only once the Elo math has run (omitempty). */
 export interface SeatRating {
   seatIndex: number;
   userId: string;
@@ -158,12 +147,8 @@ export interface SeatRating {
   result?: "W" | "L" | "D";
 }
 
-/**
- * Returned by GET /api/games/:id/ratings and shipped as the payload of
- * the "rated" WS event. `rated` is the eligibility gate (public game,
- * no bots, no anon); `applied` becomes true once ApplyRatedGame has
- * run. Until then, seats only carry `currentRating`.
- */
+/** `rated` = eligibility gate (public, no bots/anon); `applied` flips true
+ *  once ApplyRatedGame runs — before that seats carry only currentRating. */
 export interface GameRatings {
   mode: "1v1" | "multi";
   rated: boolean;

@@ -15,12 +15,6 @@ interface PlayerStripProps {
   onDeclineInvite?: (seatIndex: number) => void;
 }
 
-/**
- * PlayerStrip is the mobile-rail seat list: one compact card per seat,
- * laid out horizontally with snap-scroll. The card rendering itself
- * lives in SeatCard (shared with Scoreboard's vertical desktop
- * variant); this component only owns the container.
- */
 export function PlayerStrip({
   game,
   mySeatIndex,

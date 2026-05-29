@@ -9,10 +9,7 @@ interface DesktopGameAsideProps {
   myUserId: string | null;
   presence: Record<number, boolean>;
   ratings: GameRatings | null;
-  /** Per-seat callbacks for the lobby — undefined outside the
-   *  (waiting + private + seated) trifecta so the Scoreboard renders
-   *  empty cards without action chrome. Mirrors the shape returned by
-   *  GamePage's stripCallbacks. */
+  // Per-seat lobby callbacks; undefined when actions don't apply.
   seatCallbacks: {
     onAddBot?: (seatIndex: number) => void;
     onRemoveBot?: (seatIndex: number) => void;
@@ -21,20 +18,11 @@ interface DesktopGameAsideProps {
     onAcceptInvite?: (seatIndex: number) => void;
     onDeclineInvite?: (seatIndex: number) => void;
   };
-  /** Host-only "Lancer la partie" affordance. Pass undefined to hide
-   *  the button (non-host viewers, non-waiting games). */
+  // Host-only start affordance; undefined to hide.
   onStart?: () => void;
-  /** The game id for the share-by-URL card. Only rendered while
-   *  the game is waiting + private. */
   gameId: string;
 }
 
-/**
- * DesktopGameAside is the left rail of the desktop 3-column layout:
- * scoreboard + lobby actions (StartButton on waiting+host games,
- * ShareCard on waiting games). Hidden on mobile via Tailwind in the
- * caller — this component itself doesn't carry visibility classes.
- */
 export function DesktopGameAside({
   game,
   mySeatIndex,

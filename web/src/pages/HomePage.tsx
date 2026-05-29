@@ -6,8 +6,8 @@ import { Button } from "../components/Button";
 import { UserNav } from "../components/UserNav";
 import { saveCredentials } from "../lib/credentials";
 
-// Private rooms open at the engine's max — the host decides who actually
-// plays via invites / bots before clicking Start.
+// Private rooms open at the engine's max; the host trims via invites/bots
+// before clicking Start.
 const PRIVATE_SEATS = 6;
 
 type Mode = "menu" | "private-name";
@@ -21,9 +21,7 @@ export function HomePage() {
   const [hostName, setHostName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  // findMatch routes the user to the dedicated matchmaking page. The queue
-  // lifecycle (enqueue / match_found / cancel) lives there — keeping it off
-  // HomePage lets this view stay a thin menu.
+  // Routes to the matchmaking page, which owns the queue lifecycle.
   function findMatch(target: "1v1" | "multi") {
     if (!user) {
       navigate(`/login?next=${encodeURIComponent(`/play/${target}`)}`);
@@ -54,11 +52,11 @@ export function HomePage() {
   function handlePrivateClick() {
     setError(null);
     if (user) {
-      // Authenticated — the server pulls the display name from the profile.
+      // Authed: server pulls the display name from the profile.
       createPrivate();
       return;
     }
-    // Anonymous — ask for a name once, here, so the GamePage never has to.
+    // Anonymous: ask for a name once, here, so the GamePage never has to.
     setMode("private-name");
   }
 

@@ -1,17 +1,7 @@
 ---
-# Rôle "argocd_apps" — apply les Application ArgoCD listées dans
-# group_vars/all/vars.yaml (sealed-secrets, monitoring, gemline).
-#
-# Une fois ces objets dans le cluster, ArgoCD prend la main : il pull
-# les manifests git (chacun pointe sur un chart Helm ou un dossier
-# kustomize) et synchronise. Ansible n'a plus rien à voir.
-#
-# Variables attendues :
-#   - argocd_apps_repo_raw : URL raw GitHub de deploy/argocd/
-#   - argocd_apps          : liste des fichiers à apply (yaml)
+# Applies the ArgoCD Applications listed in group_vars/all/vars.yaml.
+# Once they're in the cluster, ArgoCD takes over and syncs from git.
 
-# Étape 1 : Télécharger chaque manifest. `loop:` itère sur les noms de
-# fichiers ; `{{ item }}` est la valeur courante.
 - name: Download ArgoCD Application manifests
   ansible.builtin.get_url:
     url: "{{ argocd_apps_repo_raw }}/{{ item }}"
@@ -19,10 +9,7 @@
     mode: '0644'
   loop: "{{ argocd_apps }}"
 
-# Étape 2 : Apply chaque Application via k8s module. Comme pour
-# cert-manager / argocd, on prend l'ownership des champs via
-# server_side_apply + force_conflicts pour passer outre les anciens
-# stamps "kubectl-client-side-apply" laissés par cloud-init.
+# server_side_apply + force_conflicts: same field-ownership transition as cert-manager.
 - name: Apply ArgoCD Applications
   kubernetes.core.k8s:
     state: present

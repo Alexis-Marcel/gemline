@@ -2,10 +2,9 @@ package server
 
 import "net/http"
 
-// corsMiddleware echoes the request Origin if it matches one of the
-// allow-list entries (production mode). When `allowed` is empty/nil, falls
-// back to `*` — convenient for local dev but unsafe for any deployment that
-// uses cookies or relies on the Origin header as an authentication signal.
+// corsMiddleware echoes an allow-listed Origin. An empty allow-list falls back
+// to "*" — fine for local dev, unsafe for any deployment that treats the Origin
+// header as an auth signal.
 func corsMiddleware(allowed []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")

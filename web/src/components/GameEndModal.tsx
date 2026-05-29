@@ -7,23 +7,13 @@ import { RematchControls } from "./RematchControls";
 
 interface GameEndModalProps {
   game: Game;
-  /** Rating snapshot fetched/streamed from /api/games/:id/ratings. Null while
-   *  loading; rated=false hides the Elo block; applied=false shows
-   *  "calcul du rating en cours…" while the server crunches deltas. */
+  // null while loading; rated=false hides the Elo block; applied=false means
+  // the server is still crunching deltas (shows "calcul en cours").
   ratings: GameRatings | null;
-  /** Seat index of the local user, or null for spectators. Drives the
-   *  rematch state machine — only the actual participants can offer,
-   *  accept, or decline. */
+  // Seat index of the local user, or null for spectators.
   mySeatIndex: number | null;
-  /** True while any rematch action (offer/accept/decline) is in flight. */
   rematching: boolean;
-  /** True while a "Nouvelle partie" click is in flight — either
-   *  matchmaking is enqueueing (public) or a private createGame is
-   *  posting. Disables the button to prevent double-submit. */
   newGameBusy: boolean;
-  /** Optional in-progress label shown on the button while busy
-   *  ("Recherche…" for matchmaking, "Création…" for private). null
-   *  means the button keeps its idle label even while disabled. */
   newGameBusyLabel: string | null;
   onOfferRematch: () => void;
   onDeclineRematch: () => void;
@@ -33,19 +23,6 @@ interface GameEndModalProps {
   onLeave: () => void;
 }
 
-/**
- * GameEndModal takes over the screen on game.status === "finished".
- * Two halves:
- *   - top: winner + win kind, in big letters
- *   - bottom (only when ratings.rated): per-player Elo line. Before the
- *     server's "rated" event arrives, this shows currentRating only and
- *     a "calcul du rating en cours…" hint; once applied, it swaps to the
- *     old → new + delta layout.
- *
- * Closable by clicking the backdrop, pressing Escape, or hitting the X.
- * The parent decides whether to re-open (we don't — once dismissed the
- * banner-less game stays accessible behind for replay / chat).
- */
 export function GameEndModal({
   game,
   ratings,
@@ -182,15 +159,6 @@ export function GameEndModal({
   );
 }
 
-/**
- * RatingCell renders the per-seat Elo info in the modal's player list.
- * Three modes:
- *   - no rating row at all (sr undefined): "—" (game wasn't rated for
- *     this seat — shouldn't happen if ratings.rated is true, but cheap
- *     guard)
- *   - rated but not applied yet: just the current rating, dimmed
- *   - applied: oldRating → newRating + colored delta
- */
 function RatingCell({ sr }: { sr: SeatRatingMaybe }) {
   if (!sr) return <span className="text-zinc-500">—</span>;
   if (sr.oldRating === undefined || sr.delta === undefined) {
@@ -215,8 +183,6 @@ function RatingCell({ sr }: { sr: SeatRatingMaybe }) {
   );
 }
 
-// Local alias to keep RatingCell signature tight without exposing the
-// import surface. The actual type lives in api/types.ts.
 type SeatRatingMaybe = NonNullable<GameRatings["seats"][number]> | undefined;
 
 function winKindLabel(k: WinKind): string {

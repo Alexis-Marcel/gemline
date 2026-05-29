@@ -1,13 +1,8 @@
 import type { Color, ReplayStep } from "../api/types";
 import { cellIndex, inBoard } from "./hex";
 
-/**
- * cellsAtStep returns what the board's cell array looks like after `step`
- * steps of the replay have been applied (`step = 0` means the empty board,
- * `step = steps.length` means the final position).
- *
- * Captures are honoured: removed stones become Empty again in the array.
- */
+/** The cell array after `step` replay steps (0 = empty board, steps.length =
+ *  final). Captures are honoured: removed stones become Empty. */
 export function cellsAtStep(
   side: number,
   steps: ReplayStep[],

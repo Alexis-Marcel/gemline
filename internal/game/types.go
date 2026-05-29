@@ -2,13 +2,9 @@ package game
 
 import "errors"
 
-// Color identifies what is on a board intersection.
-//   Empty    (0) — playable intersection, no stone
-//   C1..C6   (1..6) — player colors
-//   OffBoard (-1) — the storage slot is outside the hexagonal play area
-//
-// The underlying type is `int` rather than `uint8` so that []Color does not
-// collide with Go's special-case JSON encoding of []byte (base64).
+// Color identifies what is on an intersection: Empty (0), C1..C6 (players),
+// OffBoard (-1, outside the hex). Backed by int, not uint8, so []Color isn't
+// JSON-encoded as base64 like []byte.
 type Color int
 
 const (
@@ -25,7 +21,7 @@ const (
 const (
 	MaxPlayers       = 6
 	GemsPerPlayer    = 50
-	DefaultBoardSide = 11 // intersections per side of the hexagon
+	DefaultBoardSide = 11
 )
 
 func (c Color) String() string {
@@ -41,24 +37,15 @@ func (c Color) String() string {
 	}
 }
 
-// Position is an axial coordinate (q, r) on the hex grid. The origin (0, 0)
-// is the center of the board. For a hex of side N, valid positions satisfy
-//
-//	|q| ≤ N-1   ∧   |r| ≤ N-1   ∧   |q+r| ≤ N-1
-//
-// which together describe the regular hexagonal outline.
+// Position is an axial coordinate (q, r); origin is the board center. For a hex
+// of side N, valid cells satisfy |q| ≤ N-1, |r| ≤ N-1, and |q+r| ≤ N-1.
 type Position struct {
 	Q, R int
 }
 
-// Player holds a player's running score. Alignment counters are computed
-// on demand (see GameState.CountAlignments) rather than stored, so the
-// scorecard cannot drift out of sync with the board.
-//
-// TimeRemainingMs is the chess-style clock — the amount of thinking time
-// the player has left in total. The active player's clock ticks down
-// between their TurnStartedAt and their next ApplyMove. A player whose
-// clock reaches zero forfeits the game (WinTimeout).
+// Player holds a player's running score. Alignment counts are computed on
+// demand (CountAlignments), not stored, so they can't drift from the board.
+// TimeRemainingMs is the chess clock; reaching zero forfeits (WinTimeout).
 type Player struct {
 	Color           Color
 	GemsRemaining   int
@@ -77,8 +64,7 @@ type Capture struct {
 	Pair     [2]Position
 }
 
-// MoveResult is everything that happened from a single placement: any
-// captures triggered, and the win state if the move ended the game.
+// MoveResult is the outcome of a single placement: captures and any win state.
 type MoveResult struct {
 	Captures []Capture
 	Winner   Color
@@ -93,9 +79,9 @@ const (
 	WinAlignment5
 	WinAlignment4
 	WinCapture
-	WinTimeout // the opponent ran out of time
-	WinResign  // the opponent voluntarily resigned
-	WinDraw    // both players agreed to a draw (2-player only)
+	WinTimeout
+	WinResign
+	WinDraw // 2-player only
 )
 
 func (k WinKind) String() string {

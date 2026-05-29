@@ -14,8 +14,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Pull the initial session synchronously from localStorage, then
-    // subscribe so we react to login / logout / token refresh.
+    // Initial session from localStorage, then subscribe to auth changes.
     supabase.auth
       .getSession()
       .then(({ data }) => setSession(data.session))
@@ -29,10 +28,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Mirror the current session into the persistent user socket. The
-  // socket opens on first authenticated render and reconnects in the
-  // background if the network blips; it closes on sign-out so a logged-
-  // out viewer doesn't keep an authenticated WS hanging around.
+  // Mirror the session into the user socket: open while authed, close on
+  // sign-out so a logged-out viewer doesn't keep an authed WS open.
   useEffect(() => {
     const token = session?.access_token;
     if (token) {
@@ -42,12 +39,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [session?.access_token]);
 
-  // Hand the socket a way to ask Supabase for a fresh access_token on
-  // reconnect failure. Covers the case where the browser slept past
-  // the regular auto-refresh: by the time we wake up the WS would
-  // otherwise loop forever with the expired JWT. refreshSession() is
-  // idempotent — Supabase no-ops when the current token still has
-  // time on it.
+  // Let the socket refresh the access_token on reconnect failure — covers
+  // the browser sleeping past the auto-refresh, which would otherwise loop
+  // forever on the expired JWT. refreshSession() no-ops a still-valid token.
   useEffect(() => {
     userSocket.setAuthRefresher(async () => {
       const { data, error } = await supabase.auth.refreshSession();

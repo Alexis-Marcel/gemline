@@ -1,23 +1,7 @@
 #!/usr/bin/env python3
-"""Dynamic Ansible inventory sourced from Terraform outputs.
-
-Ansible's contract for an executable inventory script:
-  * Called with --list  → print JSON for the full inventory
-  * Called with --host X → print JSON for that host's vars (or {} if
-    everything's already in --list under "_meta.hostvars")
-
-We use the "_meta.hostvars" shortcut so Ansible only calls us once
-(--list), not N+1 times.
-
-Reads Terraform outputs from the sibling deploy/terraform/ dir via
-`terraform output -json`. The CP IP, worker IPs, and private network
-config all come from there → no more IPs hardcoded in inventory.yaml.
-
-Usage from Ansible:
-  ANSIBLE_INVENTORY=./inventory.tf.py ansible-playbook playbook.yaml
-or (via ansible.cfg):
-  [defaults]
-  inventory = inventory.tf.py
+"""Dynamic Ansible inventory built from `terraform output -json` in the
+sibling deploy/terraform/ dir. Uses the _meta.hostvars shortcut so Ansible
+calls it once (--list) instead of N+1 times.
 """
 
 import json
@@ -27,8 +11,6 @@ import sys
 from pathlib import Path
 
 
-# Resolve where Terraform lives, relative to this script. Walking up
-# from deploy/ansible/inventory.tf.py → deploy/terraform/.
 SCRIPT_DIR = Path(__file__).resolve().parent
 TF_DIR = SCRIPT_DIR.parent / "terraform"
 
@@ -74,10 +56,7 @@ def build_inventory(outputs: dict) -> dict:
     the lists returned by Terraform; this script doesn't recompute IP
     allocation, just consumes what TF has already decided.
     """
-    # Lists of IPs straight from Terraform. control_plane_ipv4_all and
-    # *_private_ips were added in HA phase 1+3; fall back to the older
-    # scalar control_plane_ipv4 if we're running against a pre-phase-1
-    # state for any reason.
+    # Fall back to the older scalar control_plane_ipv4 for pre-HA state.
     cp_public_ips = outputs.get(
         "control_plane_ipv4_all",
         [outputs["control_plane_ipv4"]] if "control_plane_ipv4" in outputs else [],
@@ -87,9 +66,8 @@ def build_inventory(outputs: dict) -> dict:
     worker_private_ips = outputs.get("worker_private_ips", [])
     lb_ipv4 = outputs.get("load_balancer_ipv4", "")
 
-    # Common vars for all hosts (was: `all.vars` in inventory.yaml).
-    # lb_ipv4 is shared so k3s_server and k3s_agent roles can target
-    # the Load Balancer for --tls-san and --server flags.
+    # lb_ipv4 is shared so k3s_server/k3s_agent can target the LB for
+    # --tls-san and --server flags.
     common_vars = {
         "ansible_user": "root",
         "ansible_python_interpreter": "/usr/bin/python3",
@@ -99,9 +77,7 @@ def build_inventory(outputs: dict) -> dict:
         "lb_ipv4": lb_ipv4,
     }
 
-    # Naming convention: single-CP setups keep the historical
-    # "gemline-cp" alias (no suffix) so playbook tags and operator
-    # muscle memory keep working. Multi-CP uses cp1/cp2/cp3.
+    # Single-CP keeps the historical "gemline-cp" name; multi-CP uses cp1/cp2/...
     if len(cp_public_ips) == 1:
         cp_hostnames = ["gemline-cp"]
     else:
@@ -109,9 +85,7 @@ def build_inventory(outputs: dict) -> dict:
 
     hostvars = {}
     for i, name in enumerate(cp_hostnames):
-        # Fall back to computed private IP if the output wasn't
-        # available (older state). Phase 1+3 onwards, the list is
-        # always there.
+        # Fall back to computed private IP if the output is missing (older state).
         priv = cp_private_ips[i] if i < len(cp_private_ips) else f"10.0.1.{10 + i}"
         hostvars[name] = {
             "ansible_host": cp_public_ips[i],
@@ -144,14 +118,12 @@ def build_inventory(outputs: dict) -> dict:
 
 
 def main() -> None:
-    # Ansible calls us with --list or --host X. We only support --list
-    # (host vars come via _meta.hostvars in the --list output).
     if len(sys.argv) < 2 or sys.argv[1] not in ("--list", "--host"):
         sys.stderr.write("usage: inventory.tf.py --list | --host <name>\n")
         sys.exit(1)
 
     if sys.argv[1] == "--host":
-        # Empty dict — host vars already in --list output.
+        # Host vars already live in --list output under _meta.hostvars.
         print("{}")
         return
 

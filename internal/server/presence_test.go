@@ -8,10 +8,8 @@ import (
 	"github.com/alexis/gemline/internal/game"
 )
 
-// presenceTestStore returns a Store with a tiny disconnect-grace so the
-// timeout path runs in milliseconds. We exercise the presence layer at the
-// Store level (not via WS) so we don't have to fake a full WebSocket
-// connection.
+// presenceTestStore uses a tiny disconnect-grace so the timeout path runs in
+// milliseconds. Tests drive the Store directly to avoid faking a WebSocket.
 func presenceTestStore(t *testing.T) *Store {
 	t.Helper()
 	return NewStore(nil).
@@ -19,9 +17,8 @@ func presenceTestStore(t *testing.T) *Store {
 		WithDisconnectGrace(20 * time.Millisecond)
 }
 
-// waitForStatus polls until the record reaches `want`, or fails after
-// `budget`. Used to assert on the asynchronous outcome of a presence-grace
-// or clock-flag timer.
+// waitForStatus polls until the record reaches want or budget elapses, for
+// asserting on async presence-grace / clock-flag timers.
 func waitForStatus(t *testing.T, rec *GameRecord, want Status, budget time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(budget)
@@ -40,8 +37,8 @@ func waitForStatus(t *testing.T, rec *GameRecord, want Status, budget time.Durat
 	t.Fatalf("status %q did not become %q within %v", got, want, budget)
 }
 
-// playableTwoPlayer fills both seats and starts the game so seatRefs and
-// presence tracking have something real to attach to.
+// playableTwoPlayer fills both seats and starts the game so presence tracking
+// has something to attach to.
 func playableTwoPlayer(t *testing.T, s *Store) (*GameRecord, *Seat, *Seat) {
 	t.Helper()
 	ctx := context.Background()
@@ -86,17 +83,13 @@ func TestPresence_DisconnectGraceForfeitsAfterTimeout(t *testing.T) {
 		t.Fatalf("2-player disconnect forfeit must declare the survivor; got Empty")
 	}
 
-	// gameEnded must clear the seatRefs entry so long-running servers
-	// don't leak one map per finished game. waitForStatus only tells us
-	// rec.Status flipped — gameEnded runs after that under s.mu, so we
-	// poll the seatRefs view to avoid racing the cleanup.
+	// gameEnded clears seatRefs to avoid leaking a map per finished game. It
+	// runs after rec.Status flips, so poll rather than racing the cleanup.
 	waitForSeatRefsCleared(t, s, rec.ID, 1*time.Second)
 }
 
-// waitForSeatRefsCleared polls until s.seatRefs[gameID] is gone or the
-// budget elapses. Used by tests that need to observe the post-finish
-// cleanup, which happens after rec.Status flips and is not visible to
-// waitForStatus.
+// waitForSeatRefsCleared polls until s.seatRefs[gameID] is gone or budget
+// elapses, observing the post-finish cleanup that lands after rec.Status flips.
 func waitForSeatRefsCleared(t *testing.T, s *Store, gameID string, budget time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(budget)

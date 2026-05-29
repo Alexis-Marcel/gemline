@@ -13,10 +13,8 @@ import (
 	"time"
 )
 
-// memChatRepo embeds noopRepo and adds in-memory retention for chat
-// messages so we can drive the postChat/getChat handlers end-to-end without
-// a real Postgres. Every other repo method falls through to the no-op
-// behaviour, matching what other tests rely on.
+// memChatRepo adds in-memory chat retention over noopRepo so the chat handlers
+// can run end-to-end without a real Postgres.
 type memChatRepo struct {
 	noopRepo
 	mu   sync.Mutex
@@ -183,7 +181,7 @@ func TestPostChat_404ForUnknownGame(t *testing.T) {
 
 	resp := postChatMessage(t, ts, "does-not-exist", a.Token, "hi")
 	defer resp.Body.Close()
-	// Unknown game + wrong token → handler hits ErrGameNotFound first.
+	// Unknown game + foreign token: either ErrGameNotFound or auth may fire first.
 	if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("want 404 or 401 for unknown game, got %d", resp.StatusCode)
 	}

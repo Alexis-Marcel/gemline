@@ -7,19 +7,7 @@ interface ReplayNavProps {
   exitReplay: () => void;
 }
 
-/**
- * ReplayNav is the always-visible "◀ N/M ▶" stepper, used both in the
- * mobile GameBottomBar and in the desktop right rail. The previous
- * "Revoir la partie" button is gone: the nav exposes the same affordance
- * directly — tapping ◀ on a live game enters replay at the last step,
- * subsequent taps walk back, ▶ at the live boundary is a no-op. A small
- * "live" chip appears next to the counter while in replay so the user
- * has a one-tap exit.
- *
- * Renders nothing when there are no moves yet — there's nothing to step
- * through, so the bar / rail keeps a stable height by simply not
- * mounting the component upstream.
- */
+// Tapping ◀ on a live game enters replay at the last step.
 export function ReplayNav({
   totalMoves,
   step,

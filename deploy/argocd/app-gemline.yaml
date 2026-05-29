@@ -3,15 +3,12 @@ kind: Application
 metadata:
   name: gemline
   namespace: argocd
-  # When the Application is deleted, also delete the workloads it spun up
-  # in the cluster. Tagging with this finalizer makes it explicit.
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
 
   source:
-    # Edit this if you fork the repo.
     repoURL: https://github.com/Alexis-Marcel/gemline.git
     targetRevision: main
     path: deploy/k8s
@@ -22,14 +19,8 @@ spec:
 
   syncPolicy:
     automated:
-      # Reconcile changes pushed to main automatically.
       prune: true
-      # Revert manual edits to the cluster that drifted away from git.
       selfHeal: true
     syncOptions:
-      # The namespace is in our manifests, but if it ever isn't ArgoCD
-      # will create it itself.
       - CreateNamespace=true
-      # Forgive empty diffs caused by Kubernetes adding defaults
-      # (cluster-managed fields).
       - ServerSideApply=true

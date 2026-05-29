@@ -1,8 +1,5 @@
 ---
-# Dépend du rôle argocd (qui installe ArgoCD + ses CRDs). Sans ces
-# CRDs, les Application CRs qu'on apply ici n'auraient pas de schéma.
-#
-# kubernetes_python_deps remonte transitivement via argocd → on n'a
-# pas besoin de la déclarer ici.
+# Depends on argocd for the Application CRDs (and transitively for the
+# kubernetes Python SDK).
 dependencies:
   - role: argocd

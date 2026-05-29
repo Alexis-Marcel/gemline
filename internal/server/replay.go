@@ -7,9 +7,8 @@ import (
 	"github.com/alexis/gemline/internal/game"
 )
 
-// getReplay returns the full move-by-move replay of a game. It works on any
-// game (in progress or finished) and re-runs every move through a fresh
-// rule engine to surface captures per step.
+// getReplay re-runs every move of a game through a fresh engine to surface
+// captures per step. Works on in-progress or finished games.
 func (s *Server) getReplay(w http.ResponseWriter, r *http.Request) {
 	rec, ok, err := s.store.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -31,10 +30,8 @@ func (s *Server) getReplay(w http.ResponseWriter, r *http.Request) {
 	}
 	rec.Unlock()
 
-	// Replay against a fresh GameState so we can capture per-move MoveResults
-	// without touching the cached record. We don't care about clock progression
-	// here — the captures/wins are what the replay UI consumes — so a fixed
-	// zero `now` is enough.
+	// Replay against a fresh GameState; clock progression is irrelevant here,
+	// so a zero `now` is fine.
 	replay := game.NewGame(colors, cfg)
 	steps := make([]replayStepDTO, 0, len(history))
 	var zeroTime time.Time

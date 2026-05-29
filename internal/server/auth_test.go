@@ -12,9 +12,8 @@ import (
 
 const testJWTSecret = "test-secret-do-not-use-in-prod"
 
-// testHS256Keyfunc forges a Keyfunc that validates HS256 tokens signed
-// with the given secret. Only used in tests — production code only
-// understands the asymmetric scheme served by Supabase's JWKS.
+// testHS256Keyfunc validates HS256 tokens signed with the given secret.
+// Production only understands Supabase's asymmetric JWKS scheme.
 func testHS256Keyfunc(secret string) jwt.Keyfunc {
 	return func(t *jwt.Token) (interface{}, error) {
 		if t.Method.Alg() != jwt.SigningMethodHS256.Alg() {

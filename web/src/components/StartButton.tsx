@@ -5,14 +5,8 @@ interface StartButtonProps {
   onStart: () => void;
 }
 
-/**
- * StartButton is the host-only "Lancer la partie" affordance in a private
- * lobby. Disabled until at least two seats are occupied; the empty seats
- * are dropped on click (the server lets the host start with N occupied
- * players regardless of the room's max). Visibility / authorisation rules
- * (host-only, private only) are enforced by the caller — this component
- * just renders the button.
- */
+// Disabled until 2+ seats are occupied; the server starts with N occupied
+// players and drops the empty seats regardless of the room's max.
 export function StartButton({ game, onStart }: StartButtonProps) {
   const occupied = game.seats.filter((s) => s.occupied).length;
   const ready = occupied >= 2;

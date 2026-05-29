@@ -1,9 +1,4 @@
-/**
- * ShareCard renders the read-only invite URL for a private waiting lobby.
- * Clicking selects the field so the host can copy + paste in their chat
- * channel of choice. No "copy" button on purpose — the field is short
- * enough that selection-then-copy is one keystroke faster than a button.
- */
+// Focus selects the URL; no copy button on purpose (select-then-copy is faster).
 export function ShareCard({ id }: { id: string }) {
   const url = `${window.location.origin}/game/${id}`;
   return (

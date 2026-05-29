@@ -8,8 +8,6 @@ import (
 	"strings"
 )
 
-// ProfileDTO is the user-controlled portion of the profile (display name,
-// timestamps). Email comes from the JWT and is returned alongside.
 type ProfileDTO struct {
 	UserID      string `json:"userId"`
 	Email       string `json:"email"`
@@ -31,12 +29,8 @@ func (s *Server) getMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not load profile")
 		return
 	}
-	// Lazy first-time profile creation: every authenticated user that
-	// ever calls /api/auth/me ends up with a profile row, so the
-	// leaderboard's INNER JOIN doesn't drop them just because they
-	// never went through the explicit "set display name" form.
-	// EnsureProfile is no-overwrite — a user who already chose a name
-	// won't have it stomped.
+	// Lazy first-time profile creation so the leaderboard's INNER JOIN doesn't
+	// drop users who never set a name. EnsureProfile won't overwrite an existing one.
 	if p == nil {
 		fallback := s.displayNameFor(r.Context(), u)
 		if err := s.store.EnsureProfile(r.Context(), u.ID, fallback); err != nil {
@@ -97,10 +91,8 @@ func (s *Server) getMyGames(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, games)
 }
 
-// getPublicProfile serves GET /api/users/:userId — a read-only view of
-// another player's profile. No auth required: everything in the
-// response (display name, ratings, win/loss counts) is meant to be
-// publicly visible, same as the leaderboard.
+// getPublicProfile serves a read-only view of another player's profile. No auth
+// — the response is public, same as the leaderboard.
 func (s *Server) getPublicProfile(w http.ResponseWriter, r *http.Request) {
 	userID := r.PathValue("userId")
 	if userID == "" {
@@ -120,10 +112,8 @@ func (s *Server) getPublicProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
-// searchProfiles serves GET /api/users/search?q=&limit=. Auth-gated
-// to stop unauthenticated scraping of the user table. Empty q
-// returns an empty list (the repo guards on this too — belt and
-// braces).
+// searchProfiles serves user search for invites. Auth-gated to stop
+// unauthenticated scraping of the user table.
 func (s *Server) searchProfiles(w http.ResponseWriter, r *http.Request) {
 	u := requireUser(w, r)
 	if u == nil {
@@ -162,9 +152,8 @@ func (s *Server) getMyStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
-// getLeaderboard returns the top rated players for one mode (1v1 or
-// multi). Anonymous — anyone can see the board. ?limit= caps at 100
-// to keep responses cheap; ?mode= defaults to "1v1".
+// getLeaderboard returns the top rated players for a mode (1v1 or multi).
+// Anonymous; ?limit= caps the response, ?mode= defaults to 1v1.
 func (s *Server) getLeaderboard(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if q := r.URL.Query().Get("limit"); q != "" {
@@ -200,7 +189,6 @@ func normalizeDisplayName(s string) string {
 		}
 		out = append(out, r)
 	}
-	// Trim ASCII whitespace.
 	for len(out) > 0 && out[0] == ' ' {
 		out = out[1:]
 	}

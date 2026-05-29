@@ -6,7 +6,6 @@ metadata:
   labels:
     app: gemline-web
 spec:
-  # Stateless static-file server; safe to scale horizontally.
   replicas: 3
   selector:
     matchLabels:
@@ -16,10 +15,7 @@ spec:
       labels:
         app: gemline-web
     spec:
-      # Spread replicas across nodes so losing one node doesn't take down
-      # the whole web tier. With replicas=3 and 2 nodes we get 2/1 split;
-      # with 3+ nodes we get one per node. ScheduleAnyway means we
-      # tolerate skew during rollouts instead of getting stuck.
+      # Spread replicas across nodes; ScheduleAnyway tolerates skew during rollouts.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -54,10 +50,6 @@ spec:
             initialDelaySeconds: 1
             periodSeconds: 5
           securityContext:
-            # The Caddy binary has cap_net_bind_service set as a file
-            # capability, so dropping all capabilities at the pod level
-            # makes the kernel refuse to exec it (EPERM). The image runs
-            # as root by default but the container is a plain static-file
-            # server behind the ingress; allowPrivilegeEscalation:false
-            # is enough hardening here.
+            # Don't drop ALL caps: the Caddy binary's cap_net_bind_service
+            # file capability makes the kernel refuse to exec it (EPERM).
             allowPrivilegeEscalation: false

@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# Minimal cloud-init for k3s worker nodes.
-#
-# Same scope as the control-plane variant: bring up the private NIC so
-# the node is reachable on its private IP, then hand off to Ansible.
-# Ansible installs k3s-agent, joins the cluster, etc. (see
-# deploy/ansible/roles/k3s_agent/).
+# cloud-init for k3s workers: bring up the private NIC, then hand off to
+# Ansible (which installs k3s-agent and joins the cluster).
 
 set -euo pipefail
 exec > >(tee /var/log/gemline-cloud-init.log) 2>&1

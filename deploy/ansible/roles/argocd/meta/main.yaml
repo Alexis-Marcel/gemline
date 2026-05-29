@@ -1,6 +1,4 @@
 ---
-# argocd a besoin du SDK Python kubernetes pour utiliser les modules
-# kubernetes.core. Cette dépendance garantit que le SDK est installé
-# sur le CP avant qu'on touche au moindre objet K8s.
+# Ensures the kubernetes Python SDK is installed before any K8s task runs.
 dependencies:
   - role: kubernetes_python_deps

@@ -5,10 +5,9 @@ import (
 	"time"
 )
 
-// pair1v1 + pairMulti are pure: same input → same pairing, no DB, no
-// time-of-day surprises. Tests here pin the contract the matcher ticker
-// relies on. The integration story (FOR UPDATE SKIP LOCKED, NOTIFY,
-// game creation in tx) is tested at the repo level with a real DB.
+// pair1v1 + pairMulti are pure functions; these pin their pairing contract.
+// The DB integration story (SKIP LOCKED, NOTIFY, tx) is tested at the repo
+// level.
 
 func TestPair1v1_EmptyOrSingle(t *testing.T) {
 	if got := pair1v1(nil, time.Now()); len(got) != 0 {
@@ -50,9 +49,8 @@ func TestPair1v1_FarRatingsDontPairAtZeroAge(t *testing.T) {
 
 func TestPair1v1_AgeWidensBandEnoughToPair(t *testing.T) {
 	now := time.Now()
-	// User a has been waiting 30s → band = 100 + 30*10 = 400 (delta
-	// 300 fits). Either user's wider band wins, so this pair forms
-	// even though b just enqueued.
+	// a waited 30s → band = 100 + 30*10 = 400, fits the 300 delta. The wider
+	// band wins even though b just enqueued.
 	qs := []QueuedUser{
 		{UserID: "a", Rating: 1000, EnqueuedAt: now.Add(-30 * time.Second)},
 		{UserID: "b", Rating: 1300, EnqueuedAt: now},
@@ -65,8 +63,7 @@ func TestPair1v1_AgeWidensBandEnoughToPair(t *testing.T) {
 
 func TestPair1v1_GreedyPicksClosestRatingPartner(t *testing.T) {
 	now := time.Now()
-	// a is the oldest, scans b and c. b's delta = 100, c's delta = 20.
-	// Greedy picks c. b is left for the next tick.
+	// a scans b (delta 100) and c (delta 20); greedy picks c, b waits.
 	qs := []QueuedUser{
 		{UserID: "a", Rating: 1200, EnqueuedAt: now.Add(-5 * time.Second)},
 		{UserID: "b", Rating: 1100, EnqueuedAt: now.Add(-3 * time.Second)},
@@ -98,9 +95,7 @@ func TestPair1v1_MultiplePairsFromBatch(t *testing.T) {
 
 func TestPair1v1_OnceMatchedNotReusedInSameTick(t *testing.T) {
 	now := time.Now()
-	// b is closer to a than c is, AND closer to c than a is. The
-	// greedy pass takes (a,b) first; c is then left alone (no other
-	// unmatched candidate in band).
+	// Greedy takes (a,b) first; c is then left with no in-band candidate.
 	qs := []QueuedUser{
 		{UserID: "a", Rating: 1200, EnqueuedAt: now},
 		{UserID: "b", Rating: 1210, EnqueuedAt: now},
@@ -121,12 +116,8 @@ func TestPair1v1_OnceMatchedNotReusedInSameTick(t *testing.T) {
 	}
 }
 
-// pairMulti now decides:
-//   - below quorum (<3) → wait
-//   - full or over (≥players) → immediate group of `players`
-//   - in between → wait until oldest queuer has aged past threshold(N)
-//
-// The tests below pin each branch.
+// The tests below pin each pairMulti branch: below quorum waits, full/over
+// forms a group of `players`, in-between waits past threshold(N).
 
 func now0() time.Time { return time.Unix(0, 0).UTC() }
 
@@ -154,9 +145,7 @@ func TestPairMulti_FullQueueStartsImmediately(t *testing.T) {
 }
 
 func TestPairMulti_OverflowCapsAtPlayers(t *testing.T) {
-	// pairMulti never returns more than `players` per group. With 8 in
-	// queue and players=6, the first 6 leave together; the remaining 2
-	// stay queued (below quorum next tick).
+	// 8 queued, players=6: first 6 leave, remaining 2 stay (below quorum).
 	qs := queued(now0(), "a", "b", "c", "d", "e", "f", "g", "h")
 	got := pairMulti(qs, 6, now0())
 	if len(got) != 1 || len(got[0]) != 6 {
@@ -167,11 +156,9 @@ func TestPairMulti_OverflowCapsAtPlayers(t *testing.T) {
 func TestPairMulti_ThreePlayersWaitUntilThreshold(t *testing.T) {
 	enq := now0()
 	qs := queued(enq, "a", "b", "c")
-	// Below threshold: 3 users at quorum need 20s wait.
 	if got := pairMulti(qs, 6, enq.Add(19*time.Second)); len(got) != 0 {
 		t.Fatalf("3 users at 19s: still below 20s threshold, got %+v", got)
 	}
-	// At threshold: group forms with exactly 3.
 	got := pairMulti(qs, 6, enq.Add(20*time.Second))
 	if len(got) != 1 || len(got[0]) != 3 {
 		t.Fatalf("3 users at 20s: want group of 3, got %+v", got)
@@ -191,8 +178,8 @@ func TestPairMulti_FivePlayersWaitFiveSeconds(t *testing.T) {
 }
 
 func TestPairMulti_FIFOOrderPreserved(t *testing.T) {
-	// SQL feeds rows ORDER BY enqueued_at ASC; pairMulti must keep that
-	// order so seat indices are stable.
+	// SQL feeds rows ORDER BY enqueued_at ASC; pairMulti must keep that order
+	// so seat indices stay stable.
 	enq := now0()
 	qs := queued(enq, "a", "b", "c")
 	got := pairMulti(qs, 6, enq.Add(30*time.Second))
@@ -208,11 +195,10 @@ func TestBuildQueueUpdates_MultiQuorumComputesEta(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("want 1 update per user, got %d", len(got))
 	}
-	// 3 users threshold = 20s, oldest age = 8s → 12s remaining.
+	// 3-user threshold 20s − 8s age = 12s remaining.
 	if got[0].ETASeconds == nil || *got[0].ETASeconds != 12 {
 		t.Fatalf("want eta=12s, got %v", got[0].ETASeconds)
 	}
-	// All entries share the same eta + count.
 	for _, u := range got {
 		if u.Count != 3 {
 			t.Fatalf("want count=3, got %d", u.Count)
@@ -252,8 +238,8 @@ func TestBuildQueueUpdates_PastThresholdClampsToZero(t *testing.T) {
 }
 
 func TestPairMulti_AgeMeasuredFromOldest(t *testing.T) {
-	// "a" enqueued at T=0, "b" at T=15s, "c" at T=18s. At T=20s, oldest
-	// (a) has waited 20s. With 3 users the threshold is 20s → start.
+	// Staggered enqueue; at T=20s the oldest (a) has waited 20s = the 3-user
+	// threshold, so the group forms even though b/c are younger.
 	a := now0()
 	qs := []QueuedUser{
 		{UserID: "a", EnqueuedAt: a},

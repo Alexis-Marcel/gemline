@@ -47,10 +47,8 @@ export function GamePage() {
     status: wsStatus,
     attempt: wsAttempt,
   } = useGameSocket(id);
-  // optimisticGame holds the server's response to the caller's own
-  // mutations (postMove, draw offers, leaves, ...). It's merged with
-  // liveGame via mergeGameSnapshot — see lib/gameSnapshot.ts for the
-  // tie-breaking rule and the bug history that justifies it.
+  // Server's response to the caller's own mutations, merged with liveGame
+  // via mergeGameSnapshot (see lib/gameSnapshot.ts for the tie-breaking rule).
   const [optimisticGame, setOptimisticGame] = useState<Game | null>(null);
   const [name, setName] = useState("");
   const [joining, setJoining] = useState(false);
@@ -60,31 +58,21 @@ export function GamePage() {
   const [replayStep, setReplayStep] = useState(0);
   const [, setReplayLoading] = useState(false);
 
-  // Per-seat presence map fed by the shared socket. true = at least one live
-  // WebSocket; false = nobody is on this seat right now; undefined = unknown
-  // (we haven't received a presence event yet, default to optimistic online).
+  // Per-seat presence: true = online, false = nobody on the seat,
+  // undefined = no presence event yet (default to optimistic online).
   const [presence, setPresence] = useState<Record<number, boolean>>({});
 
-  // Per-game rating snapshot for the in-Scoreboard Elo line and the
-  // end-of-game modal. We seed from an HTTP fetch on mount and let the
-  // WS "rated" event overwrite once the server applies deltas — those
-  // two paths converge on the same shape (api.getGameRatings == the
-  // event payload), so we can replace the whole object on each update.
+  // HTTP fetch on mount seeds this; the WS "rated" event overwrites once
+  // the server applies deltas (both paths share the same shape).
   const [ratings, setRatings] = useState<GameRatings | null>(null);
-  // Modal dismissal flag — once the user closes the GameEndModal we
-  // don't reopen it unless they navigate away and back. Lets them get
-  // to the chat + replay underneath without nagging.
   const [endModalDismissed, setEndModalDismissed] = useState(false);
 
-  // Chat drawer open/closed (used on every breakpoint now — desktop's
-  // inline chat panel is gone, the drawer is the only entry point).
   const [chatOpen, setChatOpen] = useState(false);
-  // Rules overlay open/closed. Triggered from the bottom-bar kebab.
   const [rulesOpen, setRulesOpen] = useState(false);
 
-  // Stones captured by the most recent move, kept around briefly so the
-  // Board can animate them out. Each entry has a unique key so React doesn't
-  // re-use a dying ghost when a subsequent capture lands on the same cell.
+  // Stones captured by the most recent move, kept briefly for the fade-out.
+  // Unique keys avoid reusing a dying ghost when a later capture lands on
+  // the same cell.
   const [ghosts, setGhosts] = useState<
     Array<{ q: number; r: number; color: Color; key: string }>
   >([]);
@@ -94,14 +82,12 @@ export function GamePage() {
     [liveGame, optimisticGame],
   );
 
-  // Creds tracks the seat token for this game id and stays reactive to
-  // out-of-band writes — the lobby's rematch_ready event can save creds
-  // while the page is already mounted on the new game id, and the
-  // auto-join effect + WS hello pick them up automatically.
+  // Reactive to out-of-band writes — the lobby's rematch_ready event can
+  // save creds while we're already mounted on the new game id.
   const creds = useCredentials(id);
 
-  // Push our seat token to the shared socket so the server can mark us as
-  // online (and cancel any disconnect-grace timer that was running).
+  // Push our seat token so the server marks us online and cancels any
+  // disconnect-grace timer.
   useEffect(() => {
     const socket = getSocket(id);
     socket.setHelloToken(creds?.token ?? null);
@@ -110,17 +96,14 @@ export function GamePage() {
     };
   }, [id, creds?.token]);
 
-  // Subscribe to presence events for everyone in this game.
   useEffect(() => {
     return acquirePresenceStream(id, (seatIndex, online) => {
       setPresence((prev) => ({ ...prev, [seatIndex]: online }));
     });
   }, [id]);
 
-  // Initial ratings fetch on mount, plus a refetch on the
-  // playing→finished transition so the modal has data even if the WS
-  // "rated" event was missed. The "rated" subscription below handles
-  // the live case; this is the resync safety net.
+  // Initial ratings fetch; the "rated" subscription and finished-transition
+  // refetch below cover the live case and missed-event resync.
   useEffect(() => {
     let cancelled = false;
     api
@@ -129,28 +112,21 @@ export function GamePage() {
         if (!cancelled) setRatings(gr);
       })
       .catch(() => {
-        /* server returns 404 for unknown games or a transient error
-         * — either way the UI gracefully degrades to "no Elo info"
-         * via ratings:null and the modal falls back to a generic
-         * end-of-game card. */
+        // 404/transient: UI degrades to "no Elo info" (ratings stays null).
       });
     return () => {
       cancelled = true;
     };
   }, [id]);
 
-  // The end-of-game modal needs `applied: true` to show deltas. The
-  // server emits a "rated" WS event right after ApplyRatedGame
-  // commits; subscribing here is the live path. Refetch fallback is
-  // below (on finished transition) in case the event arrives before
-  // the modal can render.
+  // Live path for the modal's delta section: server emits "rated" right
+  // after ApplyRatedGame commits.
   useEffect(() => {
     return acquireRatedStream(id, (gr) => {
       setRatings(gr);
     });
   }, [id]);
 
-  // Subscribe to move events so we can render captured stones with a fade-out.
   useEffect(() => {
     return acquireMoveStream(id, (move) => {
       if (move.captures.length === 0) return;
@@ -163,10 +139,7 @@ export function GamePage() {
         })),
       );
       setGhosts((prev) => [...prev, ...added]);
-      // Buzz on captures so the player feels the take-off even when not
-      // looking at the screen mid-typing. No-op on iOS Safari (no
-      // navigator.vibrate) and on desktop browsers without a haptic
-      // device — see lib/haptics for the gate.
+      // No-op on iOS Safari and desktop without a haptic device (see lib/haptics).
       hapticCapture();
       const keys = new Set(added.map((g) => g.key));
       window.setTimeout(() => {
@@ -175,10 +148,8 @@ export function GamePage() {
     });
   }, [id]);
 
-  // Vibrate once on the playing → finished transition so the player knows
-  // the result landed without having to look. Refs guard against a fresh
-  // mount on a finished game (would buzz on every page load) and against
-  // a state event that didn't actually flip status.
+  // Buzz once on the playing → finished transition. The ref guards against
+  // a fresh mount on an already-finished game buzzing on every page load.
   const lastStatusRef = useRef<string | null>(null);
   useEffect(() => {
     if (!game) return;
@@ -209,13 +180,10 @@ export function GamePage() {
     [creds, id, isMyTurn],
   );
 
-  // Tap-to-confirm flow for coarse pointers (touch / stylus). Lives at
-  // the page level — not in Board — because we want to render an
-  // explicit "Confirmer / Annuler" banner outside the board's SVG (so
-  // the buttons don't zoom with the pinch wrapper and the user has
-  // an unambiguous, thumb-reachable affordance separate from re-tapping
-  // a tiny hex cell). Detect coarse pointer once at mount; matchMedia
-  // is stable enough — devices don't switch input modes mid-game.
+  // Tap-to-confirm for coarse pointers (touch/stylus): renders a
+  // Confirmer/Annuler banner outside the board SVG so the buttons don't
+  // zoom with the pinch wrapper and stay thumb-reachable. Detected once
+  // at mount — devices don't switch input modes mid-game.
   const isCoarsePointer = useMemo(
     () =>
       typeof window !== "undefined" &&
@@ -225,15 +193,10 @@ export function GamePage() {
   const [pendingCell, setPendingCell] = useState<{ q: number; r: number } | null>(
     null,
   );
-  // Derived-state reset for `pendingCell`. We track moveCount and a
-  // computed `playableNow` flag (= caller is seated, it's their turn,
-  // not in replay): any shift in either (a move landed, the turn
-  // flipped, replay opened, game ended) clears a stale preview without
-  // a useEffect — React's recommended pattern for "reset state when a
-  // prop derives differently". These prev-state values must be declared
-  // at the top level (above the page's early returns) to keep hook
-  // order stable; the actual `boardDisabled` value also used as Board's
-  // `disabled` prop is computed further down where `inReplay` is.
+  // Derived-state reset of `pendingCell`: any shift in moveCount or
+  // playableNow (move landed, turn flipped, replay opened, game ended)
+  // clears a stale preview without an effect. Declared above the early
+  // returns to keep hook order stable.
   const playableNow =
     isMyTurn && !!game && game.status === "playing" && replay === null;
   const moveCount = game?.moveCount ?? 0;
@@ -245,19 +208,15 @@ export function GamePage() {
     if (pendingCell !== null) setPendingCell(null);
   }
 
-  // If the server says the game is finished, clear stale local credentials so
-  // that hitting "Accueil" then coming back doesn't show the user as seated.
   useEffect(() => {
     if (game?.status === "finished" && creds && game.winner) {
-      // keep creds; just used for the "you" highlight in the final scoreboard
+      // Keep creds for the "you" highlight in the final scoreboard.
     }
   }, [game, creds]);
 
-  // On the playing→finished transition, refetch ratings as a safety
-  // net in case the WS "rated" event was lost (rare, but the live
-  // path is fire-and-forget so we don't depend on it). If the server
-  // hasn't applied yet we'll get applied:false now and the WS
-  // subscription will swap to applied:true a moment later.
+  // Refetch ratings on the playing→finished transition in case the WS
+  // "rated" event was lost. applied:false now, the WS subscription swaps
+  // to applied:true a moment later.
   const isFinished = game?.status === "finished";
   useEffect(() => {
     if (!isFinished) return;
@@ -293,19 +252,11 @@ export function GamePage() {
     }
   }
 
-  // Auto-join when a viewer lands on a still-waiting game without
-  // creds. Authenticated users skip straight to /join (the server
-  // resolves their name from the profile); anonymous users get a
-  // modal asking for a one-time display name and join on submit.
-  // Either way we never dangle a "Rejoindre" button — being a
-  // spectator is reserved for games that are already in progress
-  // or finished.
-  //
-  // autoJoinAttempted is a ref so the effect re-fires safely across
-  // game state pushes without re-firing the actual join. If the auto
-  // attempt fails (full game, all seats reserved for others, …) the
-  // user falls back to spectator mode silently — they can refresh
-  // to retry.
+  // Auto-join a still-waiting game without creds: authed users join
+  // directly, anonymous users get a name modal first. Spectating is
+  // reserved for in-progress/finished games. autoJoinAttempted is a ref
+  // so the effect re-fires across state pushes without re-joining; a
+  // failed attempt falls back to spectator silently.
   const [nameModalOpen, setNameModalOpen] = useState(false);
   const autoJoinAttempted = useRef(false);
   useEffect(() => {
@@ -316,28 +267,19 @@ export function GamePage() {
     if (joining) return;
     if (user) {
       autoJoinAttempted.current = true;
-      // handleJoin internally setStates joining / creds / error. That's
-      // what we want — the join is a side-effect, not derived state —
-      // and the lint rule's complaint about setState-in-effect is the
-      // false-positive case it documents (effect responding to a
-      // server state change, dispatching an async network call).
+      // The join is an intended side-effect, not derived state.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       void handleJoin(undefined);
     } else if (!nameModalOpen) {
-      // Defer to the modal — once the user submits a name we'll
-      // record the attempt below.
       setNameModalOpen(true);
     }
-    // handleJoin captures `id` via closure — it's stable enough for
-    // this effect's purpose (auto-join exactly once per mount on the
-    // current game). Listing it in deps would re-fire the effect on
-    // every render since handleJoin is recreated each render.
+    // handleJoin is recreated each render; listing it would re-fire the
+    // effect every render. We only want auto-join once per mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game, creds, user, joining, nameModalOpen]);
 
-  // handleCancelMatchmaking: vacate a seat in a still-waiting game and go
-  // home. Clear local creds eagerly so a stale WS state event doesn't put
-  // us back in the seat we just vacated.
+  // Vacate a seat in a still-waiting game and go home. Clear creds eagerly
+  // so a stale WS state event doesn't re-seat us.
   async function handleCancelMatchmaking() {
     if (!creds) return;
     const token = creds.token;
@@ -351,9 +293,7 @@ export function GamePage() {
     navigate("/");
   }
 
-  // Seat index of the local user in this finished game, derived from
-  // saved credentials. null means "spectator" — the rematch controls
-  // render in read-only mode for these viewers.
+  // null = spectator (rematch controls render read-only).
   const mySeatIndex = creds?.seatIndex ?? null;
 
   const { handleResign, handleOfferDraw, handleAcceptDraw, handleDeclineDraw } =
@@ -397,36 +337,23 @@ export function GamePage() {
   }
 
   function handleLeave() {
-    // Drop the local seat token and navigate home. We deliberately do
-    // not stay on the game page after "Quitter" — the user's intent
-    // is to leave the match, not to keep watching it. Anyone who
-    // wants to reopen the game later can do so by URL.
     clearCredentials(id);
     setOptimisticGame(null);
     navigate("/");
   }
 
-  // "Nouvelle partie" mirrors the visibility of the game that just
-  // ended: a public/matchmade game funnels back into matchmaking
-  // (via the dedicated /play/<mode> page), a private game spawns a
-  // fresh empty private lobby at the engine's max seat count — same
-  // shape as HomePage's "Créer une partie privée", so the host can
-  // re-decide who plays (invite, add bot, leave empty) rather than
-  // being locked into the previous game's seat count.
-  // handleNewPrivateGame reuses the caller's seat name (held in creds)
-  // so an anonymous host doesn't have to retype it.
+  // "Nouvelle partie" mirrors the ended game's visibility: public funnels
+  // back into matchmaking, private spawns a fresh empty private lobby so
+  // the host can re-decide who plays. handleNewPrivateGame reuses the
+  // caller's seat name so an anonymous host doesn't retype it.
   const [creatingNew, setCreatingNew] = useState(false);
-  // Seat index currently being invited via the SeatInviteModal. -1
-  // means the modal is closed; an integer value pins the modal to a
-  // specific empty seat in the lobby.
   const [inviteSeatIdx, setInviteSeatIdx] = useState<number | null>(null);
   async function handleNewPrivateGame() {
     if (!game) return;
     setCreatingNew(true);
     setError(null);
     try {
-      // 6 = engine's max seats; matches HomePage.PRIVATE_SEATS so the
-      // two private-creation entrypoints behave identically.
+      // 6 = engine's max seats; matches HomePage.PRIVATE_SEATS.
       const res = await api.createGame(6, creds?.name);
       saveCredentials(res.game.id, {
         token: res.token,
@@ -442,12 +369,8 @@ export function GamePage() {
   }
   const isPrivate = game?.visibility === "private";
   const playerCount = game?.seats.length ?? 2;
-  // Private branch needs creds (we use the seat name for anon hosts;
-  // for authed users the server falls back to the profile name, but
-  // having creds at all means we know who's asking). Public/matchmade
-  // branch needs auth — matchmaking 401s anonymous callers server-side.
-  // Public branch just hands the user off to the dedicated matchmaking
-  // page; the queue lifecycle lives there.
+  // Private branch needs creds; public/matchmade branch needs auth
+  // (matchmaking 401s anonymous callers server-side).
   const onNewGame =
     isPrivate && creds
       ? handleNewPrivateGame
@@ -466,36 +389,27 @@ export function GamePage() {
     );
   }
 
-  // While replay is active, render the board from the replay's reconstructed
-  // cells; clicks are disabled (we don't move from the past).
+  // In replay, render reconstructed cells with clicks disabled.
   const inReplay = replay !== null;
   const boardCells = inReplay
     ? cellsAtStep(replay.boardSide, replay.steps, replayStep)
     : game.cells;
-  // In replay mode the highlight tracks the step cursor; in live play it
-  // follows the server-reported last move (mirrors the chess.com "last
-  // played" ring so a returning player can spot where the action just
-  // happened). A waiting game with no moves has no lastMove → no ring.
+  // Highlight tracks the step cursor in replay, the last move in live play.
   const boardHighlight = inReplay
     ? lastMoveAt(replay.steps, replayStep)
     : (game.lastMove ?? null);
 
-  // Tap-to-confirm handlers — defined here (after the early returns)
-  // because they close over `inReplay` / final `game` / `boardDisabled`.
-  // The `pendingCell` state + auto-cancel derived-reset live above the
-  // early returns to keep hook order stable.
+  // Defined after the early returns because they close over `inReplay` /
+  // final `game` / `boardDisabled`.
   const boardDisabled = inReplay || !isMyTurn || game.status !== "playing";
   const handleCellTap = (q: number, r: number) => {
-    // Mouse / desktop or disabled board: commit (or no-op) — the
-    // preview only earns its keep on touch where mis-taps on a 7 px
-    // hitbox are the real risk.
+    // Mouse/desktop or disabled board: commit directly. The preview only
+    // earns its keep on touch where mis-taps on a tiny hitbox are the risk.
     if (!isCoarsePointer || boardDisabled) {
       void onPlay(q, r);
       return;
     }
-    // Re-tap on the armed cell → commit. Different cell → move the
-    // preview. The banner below is the primary commit affordance;
-    // re-tap stays as a power-user shortcut.
+    // Re-tap the armed cell → commit; different cell → move the preview.
     if (pendingCell && pendingCell.q === q && pendingCell.r === r) {
       setPendingCell(null);
       void onPlay(q, r);
@@ -519,14 +433,7 @@ export function GamePage() {
   const seatsFree = game.seats.filter((s) => !s.occupied).length;
   const seatsOccupied = game.seats.length - seatsFree;
 
-  // "Recherche d'adversaire" / "Salle d'attente multijoueur" — the
-  // matchmaking-style screen. Renders whenever the caller is seated in a
-  // public game still in waiting state. For 1v1, the second player's
-  // arrival flips status to playing immediately (AllSeated path), so this
-  // only ever shows briefly with 1/2 occupied. For multi, the room stays
-  // waiting until the auto-promoter has at least 3 occupants AND the
-  // threshold time for that occupancy has elapsed, so the user sees a
-  // populated queue ("3/6 joueurs en attente") before play starts.
+  // Matchmaking-style screen: caller seated in a public game still waiting.
   const isSearching =
     game.status === "waiting" &&
     !!creds &&
@@ -541,10 +448,8 @@ export function GamePage() {
     );
   }
 
-  // Lobby-only seat callbacks pass through to PlayerStrip's inline
-  // +Inviter / +Bot affordances. Each one is undefined outside the
-  // (waiting + private + seated) trifecta so the strip just renders
-  // the empty card without action chrome.
+  // Lobby-only seat callbacks for PlayerStrip's inline +Inviter / +Bot
+  // affordances; undefined outside (waiting + private + seated).
   const isPrivateLobby =
     game.status === "waiting" && game.visibility === "private" && !!creds;
   const stripCallbacks = {
@@ -600,10 +505,8 @@ export function GamePage() {
         : undefined,
   };
 
-  // Build the kebab menu items for the bottom bar from the current state.
-  // The order is loosely "primary action first, destructive last".
+  // Kebab menu items, ordered primary-first, destructive-last.
   const menuItems: BottomBarMenuItem[] = [];
-  // Lobby: host's Lancer la partie.
   if (
     game.status === "waiting" &&
     game.visibility === "private" &&
@@ -626,7 +529,6 @@ export function GamePage() {
       },
     });
   }
-  // In-play: draw + resign.
   if (game.status === "playing" && creds) {
     const drawSupported = game.seats.length === 2;
     const offeredBy = game.drawOfferBy ?? -1;
@@ -644,7 +546,6 @@ export function GamePage() {
       onClick: handleResign,
     });
   }
-  // Finished: new game / rematch state machine.
   if (game.status === "finished") {
     if (onNewGame) {
       menuItems.push({
@@ -690,12 +591,10 @@ export function GamePage() {
       }
     }
   }
-  // Always available — quick access to the rules card.
   menuItems.push({
     label: "Règles de la partie",
     onClick: () => setRulesOpen(true),
   });
-  // Seated players can leave the game (clears the local token).
   if (creds) {
     menuItems.push({
       label: "Quitter la partie",
@@ -704,10 +603,8 @@ export function GamePage() {
     });
   }
 
-  // Banner shown above the bottom bar when the opponent has just
-  // offered a draw and the local player hasn't responded yet. Kept
-  // out of the kebab menu so the decision is one tap away rather
-  // than two and the affordance is unmissable.
+  // Draw-offer banner above the bottom bar — kept out of the kebab so the
+  // accept/decline decision is one tap away.
   const drawOfferBy = game.drawOfferBy ?? -1;
   const showDrawOfferBanner =
     game.status === "playing" &&
@@ -716,12 +613,9 @@ export function GamePage() {
     drawOfferBy !== creds.seatIndex;
 
   return (
-    // Single-viewport layout (h-dvh + overflow-hidden) at every
-    // breakpoint — the board's pinch-pan wrapper captures touches and
-    // competes with page scroll on phones, and on desktop the layout
-    // already fits one viewport. pb-24 reserves room for the fixed
-    // mobile GameBottomBar; on desktop the bar is gone and the action
-    // chrome lives in the right rail, so we drop the bottom padding.
+    // Single-viewport layout (h-dvh + overflow-hidden): the board's
+    // pinch-pan wrapper competes with page scroll on phones. pb-24
+    // reserves room for the fixed mobile GameBottomBar (dropped on desktop).
     <div className="mx-auto flex h-dvh max-w-[88rem] flex-col overflow-hidden px-2 pb-24 pt-2 lg:px-4 lg:pb-4 lg:pt-4">
       <header className="flex items-center justify-between">
         <Link
@@ -748,17 +642,9 @@ export function GamePage() {
         </div>
       </header>
 
-      {/*
-        Two layouts share the same DOM with `lg:` gates:
-          - Mobile (default): flex-col with PlayerStrip on top, board
-            taking flex-1, optional ShareCard / draw banner under the
-            board. The fixed GameBottomBar lives outside this column
-            (below).
-          - Desktop (lg+): 3-col grid — Scoreboard rail | board | info
-            + actions rail. Same board renders in the centre cell.
-        Elements that only make sense in one of the two paths use
-        `lg:hidden` or `hidden lg:flex` to drop out of the other.
-      */}
+      {/* Mobile: flex-col (strip on top, board flex-1). Desktop (lg+):
+          3-col grid (scoreboard | board | actions). Per-layout elements
+          use lg:hidden / hidden lg:flex. */}
       <div className="mt-2 flex min-h-0 flex-1 flex-col gap-2 lg:mt-4 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_20rem] lg:grid-rows-[minmax(0,1fr)] lg:gap-4">
         <DesktopGameAside
           game={game}
@@ -788,7 +674,6 @@ export function GamePage() {
           }
         />
 
-        {/* Mobile-only player strip on top. */}
         <div className="lg:hidden">
           <PlayerStrip
             game={game}
@@ -801,12 +686,8 @@ export function GamePage() {
         </div>
 
         <main className="@container flex min-h-0 flex-1 items-center justify-center lg:col-start-2">
-          {/*
-            w-[min(100cqw,100cqh)] reads container query units off <main>
-            and picks the smaller of its width / height, so the board is
-            a square that fills its slot regardless of which axis is
-            constraining.
-          */}
+          {/* min(100cqw,100cqh) keeps the board square, filling whichever
+              axis of <main> is more constraining. */}
           <div className="aspect-square w-[min(100cqw,100cqh)] bg-zinc-950/60 p-0.5 lg:rounded-xl lg:border lg:border-zinc-800 lg:p-3">
             <Board
               side={inReplay ? replay.boardSide : game.boardSide}
@@ -826,7 +707,6 @@ export function GamePage() {
           </div>
         </main>
 
-        {/* Mobile-only below-board chrome — share card and draw banner. */}
         {game.status === "waiting" && game.visibility === "private" && (
           <div className="lg:hidden">
             <ShareCard id={id} />
@@ -887,9 +767,7 @@ export function GamePage() {
         />
       </div>
 
-      {/* Mobile error toast — fixed above the bottom bar so it stays
-         visible in the no-scroll layout. Tap to dismiss. Desktop
-         renders the same message inline in the right rail. */}
+      {/* Mobile error toast, fixed above the bottom bar (no-scroll layout). */}
       {error && (
         <button
           type="button"
@@ -900,11 +778,7 @@ export function GamePage() {
         </button>
       )}
 
-      {/* Tap-to-confirm banner — mobile only, only visible while a
-         preview is armed. Sits just above the bottom bar so the user's
-         thumb can reach Confirmer without re-tapping a tiny hex cell.
-         Re-tapping the same cell still works (the preview matches the
-         cell-tap path), but this is the unambiguous affordance. */}
+      {/* Tap-to-confirm banner, shown while a preview is armed. */}
       {pendingCell && (
         <div className="fixed inset-x-2 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-40 flex items-center gap-2 rounded-md border border-amber-400/40 bg-zinc-950/95 p-2 shadow-lg backdrop-blur lg:inset-x-auto lg:right-4 lg:bottom-4 lg:w-auto">
           <span className="flex-1 px-1 text-sm text-amber-100 lg:flex-none">
@@ -927,9 +801,7 @@ export function GamePage() {
         </div>
       )}
 
-      {/* Mobile-only fixed-bottom toolbar. Desktop has the equivalent
-         actions in the right rail and a permanent chat panel, so the
-         bar isn't needed there. */}
+      {/* Mobile-only fixed-bottom toolbar (desktop uses the right rail). */}
       <div className="lg:hidden">
         <GameBottomBar
           totalMoves={game.moveCount}

@@ -15,9 +15,8 @@ export interface InvitationsContextValue {
   decline: (gameId: string, seatIndex: number) => Promise<void>;
 }
 
-// Exported separately from InvitationsProvider so the provider file
-// can satisfy the react-refresh "only export components" rule.
-// useInvitations in ./useInvitations.ts reads this context.
+// Separate module so the provider file satisfies react-refresh's
+// "only export components" rule.
 export const InvitationsContext = createContext<InvitationsContextValue | null>(
   null,
 );

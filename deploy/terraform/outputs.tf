@@ -62,20 +62,16 @@ output "next_steps" {
   value       = <<-EOT
 
     Cluster provisioned with ${var.cp_count} control-plane(s) + ${var.worker_count} worker(s).
+    The DNS A record (${var.dns_subdomain}.${var.dns_zone} -> Load Balancer) is managed by Terraform.
 
-    1. The DNS A record is already created by Terraform:
-         ${var.dns_subdomain}.${var.dns_zone}.   A   ${hcloud_server.control_plane[0].ipv4_address}
-       Propagation is near-instant (TTL 60s).
+    Next: configure the cluster with Ansible, then fetch the kubeconfig.
 
-    2. Wait ~10 minutes for cloud-init to finish on the control plane
-       (k3s + cert-manager + ArgoCD + Applications), then copy the
-       kubeconfig:
-         ssh root@${hcloud_server.control_plane[0].ipv4_address} cat /etc/rancher/k3s/k3s.yaml > ~/.kube/gemline.yaml
-         sed -i '' "s/127.0.0.1/${hcloud_server.control_plane[0].ipv4_address}/" ~/.kube/gemline.yaml
-         export KUBECONFIG=~/.kube/gemline.yaml
-         kubectl get nodes
-       You should see ${var.cp_count + var.worker_count} Ready nodes.
+      cd ${path.cwd}/..        # the deploy/ directory
+      make ansible             # installs k3s + cert-manager + ArgoCD + apps
+      make kubeconfig          # writes ~/.kube/gemline.yaml
+      export KUBECONFIG=~/.kube/gemline.yaml
+      kubectl get nodes        # expect ${var.cp_count + var.worker_count} Ready nodes
 
-    3. Continue with DEPLOY.md from "Edit hostnames in the manifests".
+    (`make deploy` runs terraform apply + ansible in one shot.) See DEPLOY.md.
   EOT
 }

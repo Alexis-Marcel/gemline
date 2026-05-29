@@ -8,12 +8,10 @@ import (
 	"testing"
 )
 
-// EventPublisher integrates Repository + Hub + Backplane. The Backplane
-// itself requires a real Postgres for any meaningful test, so what we
-// pin here is the wiring around it: the noop-repo fallback (Publish
-// becomes a direct local Deliver) and the cache-invalidation hook
-// semantics (self-originated NOTIFYs skip invalidate, cross-pod ones
-// don't).
+// The Backplane needs a real Postgres, so these tests pin the wiring around it:
+// the noop-repo fallback (Publish becomes a local Deliver) and the
+// cache-invalidation rule (self-originated NOTIFYs skip invalidate, cross-pod
+// ones don't).
 
 func newTestPublisher(t *testing.T, podID string, invalidate func(string)) (*EventPublisher, *Hub, Repository) {
 	t.Helper()
@@ -32,7 +30,6 @@ func TestPublish_NoopFallsBackToLocalDeliver(t *testing.T) {
 
 	pub.Publish("game-1", Event{Type: "state", Payload: map[string]string{"hello": "world"}})
 
-	// Local Hub.Deliver writes a marshalled Event to the sub's channel.
 	select {
 	case raw := <-sub.ch:
 		var ev Event
@@ -48,8 +45,7 @@ func TestPublish_NoopFallsBackToLocalDeliver(t *testing.T) {
 }
 
 func TestPublish_NoopWithNoSubscribersIsHarmless(t *testing.T) {
-	// No subscribers, no DB, no backplane: Publish must be a no-op
-	// rather than blocking or panicking.
+	// No subs, no DB, no backplane: Publish must not block or panic.
 	pub, _, _ := newTestPublisher(t, "pod-a", nil)
 	pub.Publish("game-1", Event{Type: "state", Payload: nil})
 }
@@ -93,9 +89,8 @@ func TestHandleGameEventNotif_OtherPodInvalidates(t *testing.T) {
 }
 
 func TestHandleGameEventNotif_EmptyPodIDDoesNotInvalidate(t *testing.T) {
-	// Older / hand-crafted envelopes without a PodID should not
-	// trigger invalidation; we can't tell who sent them so we err on
-	// the side of "don't drop the cache".
+	// Envelopes without a PodID: sender is unknown, so err toward keeping
+	// the cache rather than invalidating.
 	var called bool
 	pub, _, _ := newTestPublisher(t, "pod-self", func(string) { called = true })
 
@@ -108,15 +103,10 @@ func TestHandleGameEventNotif_EmptyPodIDDoesNotInvalidate(t *testing.T) {
 }
 
 func TestHandleGameEventNotif_NoSubsSkipsDelivery(t *testing.T) {
-	// HasSubs is false → no LoadEvent, no Hub.Deliver. Cache
-	// invalidation still happens for cross-pod notifs (tested above),
-	// but the delivery path is short-circuited.
+	// HasSubs false → delivery is short-circuited (no LoadEvent, no Deliver);
+	// cross-pod invalidation still runs (covered above).
 	pub, hub, _ := newTestPublisher(t, "pod-self", nil)
-	// No Subscribe call: hub has no subs for "game-1".
 
-	// Even without subs, HandleGameEventNotif should return cleanly
-	// (no LoadEvent attempt — noopRepo would return (zero, nil)
-	// anyway, but we want to verify we don't even try).
 	env, _ := json.Marshal(notifyEnvelope{GameID: "game-1", Seq: 7, PodID: "pod-other"})
 	pub.HandleGameEventNotif(env)
 

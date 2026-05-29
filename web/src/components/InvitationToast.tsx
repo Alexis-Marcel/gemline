@@ -3,14 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { type PendingInvitation } from "../notifications/InvitationsContext";
 import { useInvitations } from "../notifications/useInvitations";
 
-// InvitationToast renders the pending-invitations stack pinned to the
-// bottom-right of the viewport. State lives in InvitationsProvider (so
-// the UserNav badge can read the same list); this component is purely
-// presentational + dispatches accept / decline to the provider.
-//
-// Newest invitation sits at the top of the column. Toasts auto-hide
-// when the viewer is already on the invited game's page (the inline
-// Accepter/Refuser controls take over there).
+// State lives in InvitationsProvider so the UserNav badge reads the same list.
 export function InvitationToast() {
   const { invitations } = useInvitations();
   if (invitations.length === 0) return null;
@@ -32,10 +25,8 @@ function InvitationCard({ invite }: { invite: PendingInvitation }) {
   const location = useLocation();
   const [busy, setBusy] = useState(false);
 
-  // Hide the card when the user is already on the invited game's page —
-  // the in-page Accepter/Refuser controls handle it. We still keep the
-  // entry in the provider's stack so the header badge stays accurate
-  // and navigating away brings the card back.
+  // Hide on the invited game's page (in-page controls take over), but keep
+  // the provider entry so the header badge stays accurate.
   if (location.pathname === `/game/${invite.gameId}`) return null;
 
   const hostLabel = invite.fromName?.trim()

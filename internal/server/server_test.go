@@ -19,7 +19,7 @@ import (
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	// Bots play instantly in tests so assertions don't have to sleep.
+	// Bots play instantly so assertions don't have to sleep.
 	store := NewStore(nil).WithBotDelay(0)
 	return httptest.NewServer(New(log, store, nil, Config{}).Routes())
 }
@@ -55,8 +55,8 @@ func TestCreateGameStartsWaiting(t *testing.T) {
 func TestCreateGameRejectsPublicVisibility(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	// Public games can only come from matchmaking now — accept-as-public
-	// on the create endpoint would let anyone open a permanent public room.
+	// Public games come only from matchmaking; create-as-public would let
+	// anyone open a permanent public room.
 	_ = createGameWithBody(t, ts, `{"players":2,"visibility":"public","name":"Host"}`, http.StatusBadRequest)
 }
 
@@ -69,7 +69,7 @@ func TestCreateGameRejectsBadVisibility(t *testing.T) {
 func TestCreateGameRejectsAnonymousWithoutName(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	// No JWT, no name → can't auto-join the creator anywhere.
+	// No JWT and no name → can't auto-join the creator anywhere.
 	_ = createGameWithBody(t, ts, `{"players":2}`, http.StatusBadRequest)
 }
 
@@ -78,21 +78,19 @@ func TestRematchOfferRequiresFinishedGame(t *testing.T) {
 	defer ts.Close()
 	g := createGame(t, ts, 2)
 	j1 := joinGame(t, ts, g.ID, "Alice", nil)
-	// Game still waiting → /rematch/offer must 409 even with a valid token.
+	// Still waiting → /rematch/offer must 409 even with a valid token.
 	_ = postRematchOffer(t, ts, g.ID, j1.Token, http.StatusConflict)
 }
 
 func TestRematchOfferUnanimous(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	// Private 2-player so we can join anonymously. The acceptance flow is
-	// what we're testing; visibility carries through identically to before.
 	g := createGame(t, ts, 2)
 	j1 := joinGame(t, ts, g.ID, "Alice", nil)
 	j2 := joinGame(t, ts, g.ID, "Bob", nil)
 	finishGame(t, ts, g.ID, j1.Token, j2.Token)
 
-	// Alice proposes — offer is created, no rematch game yet.
+	// Alice proposes — offer created, no rematch game yet.
 	d1 := postRematchOffer(t, ts, g.ID, j1.Token, http.StatusOK)
 	if d1.RematchGameID != "" {
 		t.Fatalf("rematch should not exist yet after one acceptance, got %q", d1.RematchGameID)
@@ -100,13 +98,12 @@ func TestRematchOfferUnanimous(t *testing.T) {
 	if d1.RematchOffer == nil || len(d1.RematchOffer.PendingSeats) != 1 || d1.RematchOffer.PendingSeats[0] != 1 {
 		t.Fatalf("want Bob (seat 1) pending after Alice accepts, got %#v", d1.RematchOffer)
 	}
-	// Alice clicking again is idempotent: still pending Bob.
+	// Alice re-clicking is idempotent.
 	d1b := postRematchOffer(t, ts, g.ID, j1.Token, http.StatusOK)
 	if d1b.RematchGameID != "" {
 		t.Fatalf("re-accept by Alice must not create rematch, got %q", d1b.RematchGameID)
 	}
-	// Bob accepts → rematch is created. The response is the original game's
-	// DTO with RematchGameID populated; the new game has its own ID.
+	// Bob accepts → rematch created under a new ID.
 	d2 := postRematchOffer(t, ts, g.ID, j2.Token, http.StatusOK)
 	if d2.RematchGameID == "" {
 		t.Fatalf("rematch must be created once both seats have accepted")
@@ -114,13 +111,11 @@ func TestRematchOfferUnanimous(t *testing.T) {
 	if d2.RematchGameID == g.ID {
 		t.Fatalf("rematch must spawn a *new* game, got the original ID back")
 	}
-	// Subsequent calls remain successful and resolve to the same rematch.
+	// Repeat accepts resolve to the same rematch.
 	d3 := postRematchOffer(t, ts, g.ID, j1.Token, http.StatusOK)
 	if d3.RematchGameID != d2.RematchGameID {
 		t.Fatalf("rematch ID must stay stable on repeat accept; got %s then %s", d2.RematchGameID, d3.RematchGameID)
 	}
-	// Sanity: the rematch game itself exists, is waiting, and matches the
-	// original's player count + visibility.
 	rematch := getGameViaHTTP(t, ts, d2.RematchGameID)
 	if rematch.Status != StatusWaiting {
 		t.Fatalf("rematch should start in waiting, got %s", rematch.Status)
@@ -141,7 +136,6 @@ func TestRematchOfferDecline(t *testing.T) {
 	j2 := joinGame(t, ts, g.ID, "Bob", nil)
 	finishGame(t, ts, g.ID, j1.Token, j2.Token)
 
-	// Alice offers, then Bob declines → offer cleared, no rematch.
 	_ = postRematchOffer(t, ts, g.ID, j1.Token, http.StatusOK)
 	d := postRematchDecline(t, ts, g.ID, j2.Token, http.StatusOK)
 	if d.RematchOffer != nil {
@@ -150,13 +144,12 @@ func TestRematchOfferDecline(t *testing.T) {
 	if d.RematchGameID != "" {
 		t.Fatalf("decline must not create a rematch, got %q", d.RematchGameID)
 	}
-	// Declining when no offer is pending → 409.
+	// Declining with no pending offer → 409.
 	_ = postRematchDecline(t, ts, g.ID, j1.Token, http.StatusConflict)
 }
 
-// TestRematchOffer_RequiresToken locks in the auth posture: the propose /
-// accept path runs through a player's seat token, not a JWT, so calling it
-// without an X-Player-Token must 401.
+// TestRematchOffer_RequiresToken: the propose/accept path authenticates via the
+// seat token, not a JWT, so a missing X-Player-Token must 401.
 func TestRematchOffer_RequiresToken(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -167,9 +160,8 @@ func TestRematchOffer_RequiresToken(t *testing.T) {
 	_ = postRematchOffer(t, ts, g.ID, "", http.StatusUnauthorized)
 }
 
-// TestRematchOffer_ThreePlayers_NeedsAllThreeAccepts exercises the multi-N
-// case: with three humans seated, the rematch only fires after every one of
-// them has accepted. The pendingSeats projection shrinks at each step.
+// TestRematchOffer_ThreePlayers_NeedsAllThreeAccepts: with three humans, the
+// rematch fires only after all accept; pendingSeats shrinks each step.
 func TestRematchOffer_ThreePlayers_NeedsAllThreeAccepts(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -177,8 +169,7 @@ func TestRematchOffer_ThreePlayers_NeedsAllThreeAccepts(t *testing.T) {
 	a := joinGame(t, ts, g.ID, "Alice", nil)
 	b := joinGame(t, ts, g.ID, "Bob", nil)
 	c := joinGame(t, ts, g.ID, "Carol", nil)
-	// Quickest finish for a 3P game: one player resigns. Game flips to
-	// finished regardless of how many humans are left.
+	// One resign finishes a 3P game.
 	postResign(t, ts, g.ID, a.Token, http.StatusOK)
 
 	d1 := postRematchOffer(t, ts, g.ID, a.Token, http.StatusOK)
@@ -201,19 +192,13 @@ func TestRematchOffer_ThreePlayers_NeedsAllThreeAccepts(t *testing.T) {
 	}
 }
 
-// TestRematchOffer_BotIsPreAccepted documents the bot shortcut: with a bot
-// at the table, only the human needs to click "Revanche" — the bot's
-// acceptance is implicit since there's nobody to ask. This keeps the UX
-// instant for the "play vs bot" loop.
+// TestRematchOffer_BotIsPreAccepted: with a bot at the table, only the human
+// clicks "Revanche" — the bot's acceptance is implicit.
 func TestRematchOffer_BotIsPreAccepted(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	g := createGame(t, ts, 2)
 	a := joinGame(t, ts, g.ID, "Alice", nil)
-	// Bot fills seat 1; AllSeated flips status to playing. The bot's
-	// scheduled goroutine may attempt a move before Alice's resign acquires
-	// the lock, but either ordering ends with the bot Occupied + IsBot, so
-	// the offer's pre-acceptance check still picks it up.
 	_ = postAddBot(t, ts, g.ID, 1, http.StatusOK)
 	postResign(t, ts, g.ID, a.Token, http.StatusOK)
 
@@ -221,19 +206,15 @@ func TestRematchOffer_BotIsPreAccepted(t *testing.T) {
 	if d.RematchGameID == "" {
 		t.Fatalf("rematch must be created on Alice's single accept (bot pre-accepted), got %#v", d)
 	}
-	// The rematch must carry the bot forward — same seat, same IsBot — so
-	// "play vs bot again" doesn't ask the host to re-add the bot. And with
-	// the human (Alice) pre-seated alongside, the new game starts in
-	// `playing` straight away.
+	// The bot carries forward on its original seat so "play vs bot again"
+	// doesn't re-prompt the host.
 	rematch := getGameViaHTTP(t, ts, d.RematchGameID)
 	if !rematch.Seats[1].Occupied || !rematch.Seats[1].IsBot {
 		t.Fatalf("bot must be pre-seated in the rematch on its original seat, got %+v", rematch.Seats[1])
 	}
-	// Alice is anon (joinGame with nil userID), so her seat is *not*
-	// pre-seated — we have no way to deliver her a token. Seat 0 stays
-	// empty and Alice auto-rejoins client-side. The rematch therefore
-	// starts in `waiting` until she joins. (The authed counterpart is
-	// covered by TestRematchOffer_AuthedHumansArePreSeated below.)
+	// Alice is anon, so we can't deliver her a token: her seat stays empty and
+	// the rematch waits until she re-joins client-side. (Authed counterpart:
+	// TestRematchOffer_AuthedHumansArePreSeated.)
 	if rematch.Seats[0].Occupied {
 		t.Fatalf("anon human must not be pre-seated, got %+v", rematch.Seats[0])
 	}
@@ -242,12 +223,9 @@ func TestRematchOffer_BotIsPreAccepted(t *testing.T) {
 	}
 }
 
-// TestRematchOffer_AuthedHumansArePreSeated pins the pre-seating contract
-// for authenticated players: the rematch carries the same UserIDs at the
-// same seats, with fresh tokens (delivered out-of-band via the lobby
-// rematch_ready event), and the game starts in `playing` since every seat
-// is filled. This is the path that powers the public 1v1 / multi rematch
-// without a "Recherche d'adversaire" flash.
+// TestRematchOffer_AuthedHumansArePreSeated: the rematch carries the same
+// UserIDs at the same seats (with fresh tokens delivered via rematch_ready) and
+// starts in `playing` since every seat is filled — no "Recherche" flash.
 func TestRematchOffer_AuthedHumansArePreSeated(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -256,7 +234,6 @@ func TestRematchOffer_AuthedHumansArePreSeated(t *testing.T) {
 	b := joinGameAs(t, ts, g.ID, "Bob", "bob-uuid", nil)
 	finishGame(t, ts, g.ID, a.Token, b.Token)
 
-	// Alice proposes, Bob accepts → rematch created.
 	_ = postRematchOffer(t, ts, g.ID, a.Token, http.StatusOK)
 	d := postRematchOffer(t, ts, g.ID, b.Token, http.StatusOK)
 	if d.RematchGameID == "" {
@@ -291,8 +268,7 @@ func TestLastMove_PopulatedOnDTOAfterMove(t *testing.T) {
 	if mr.Game.LastMove.Q != 0 || mr.Game.LastMove.R != 0 {
 		t.Fatalf("lastMove must point at the played coord, got %+v", mr.Game.LastMove)
 	}
-	// /api/games/{id} carries the same shape (the WS state event reuses
-	// toGameDTO), so verify it survives the round-trip.
+	// The GET endpoint reuses toGameDTO, so verify lastMove round-trips there too.
 	again := getGameViaHTTP(t, ts, g.ID)
 	if again.LastMove == nil || again.LastMove.Q != 0 || again.LastMove.R != 0 {
 		t.Fatalf("HTTP get must surface lastMove identically, got %+v", again.LastMove)
@@ -316,7 +292,7 @@ func TestDeclineSeatInvite_RejectsNonInvitee(t *testing.T) {
 	defer ts.Close()
 	g := createGame(t, ts, 2)
 	_ = postInviteSeat(t, ts, g.ID, 1, "alice-uuid", "Alice", http.StatusOK)
-	// Bob tries to decline Alice's invitation → 403.
+	// Bob declining Alice's invite → 403.
 	_ = postDeclineInviteAs(t, ts, g.ID, 1, "bob-uuid", http.StatusForbidden)
 }
 
@@ -328,12 +304,9 @@ func TestDeclineSeatInvite_RejectsEmptySeat(t *testing.T) {
 	_ = postDeclineInviteAs(t, ts, g.ID, 1, "alice-uuid", http.StatusConflict)
 }
 
-// TestInviteSeat_PushesInviteReceivedOverLobbyWS pins the cross-page
-// notification path: the host's POST /seats/{idx}/invite must wake up
-// the invitee's lobby WS (the persistent per-user connection that
-// AuthProvider keeps open) with an `invite_received` event so the
-// global toast can render even when the invitee is not on the game
-// page yet.
+// TestInviteSeat_PushesInviteReceivedOverLobbyWS: the host's invite must reach
+// the invitee's persistent lobby WS as `invite_received` so the global toast
+// renders even when the invitee isn't on the game page yet.
 func TestInviteSeat_PushesInviteReceivedOverLobbyWS(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -352,8 +325,7 @@ func TestInviteSeat_PushesInviteReceivedOverLobbyWS(t *testing.T) {
 	}
 	defer conn.CloseNow()
 
-	// Fire the invite from another goroutine; we'll block on Read
-	// until the event lands.
+	// Fire the invite from another goroutine; we block on Read below.
 	go func() {
 		_ = postInviteSeat(t, ts, g.ID, 1, aliceID, "Alice", http.StatusOK)
 	}()
@@ -362,13 +334,9 @@ func TestInviteSeat_PushesInviteReceivedOverLobbyWS(t *testing.T) {
 	if ev.Type != "invite_received" {
 		t.Fatalf("want invite_received, got %s", ev.Type)
 	}
-	// Payload arrives as json.RawMessage on the wire — decode and
-	// verify the routable fields. We don't assert FromName because
-	// the inviter goes through anonymous in the hermetic test.
+	// FromName is unasserted: the inviter is anonymous in the hermetic test.
 	raw, ok := ev.Payload.(map[string]any)
 	if !ok {
-		// readEvent decodes Payload as interface{}; a JSON object lands
-		// as map[string]any when unmarshalled into Event.
 		t.Fatalf("want object payload, got %T", ev.Payload)
 	}
 	if got, _ := raw["gameId"].(string); got != g.ID {
@@ -379,16 +347,14 @@ func TestInviteSeat_PushesInviteReceivedOverLobbyWS(t *testing.T) {
 	}
 }
 
-// TestCancelSeatInvite_PushesInviteCancelledOverLobbyWS covers the
-// inverse: a host clicking "× Annuler" while the invitee's toast is
-// open must dismiss it cleanly via an `invite_cancelled` push.
+// TestCancelSeatInvite_PushesInviteCancelledOverLobbyWS: cancelling an invite
+// must dismiss the invitee's toast via an `invite_cancelled` push.
 func TestCancelSeatInvite_PushesInviteCancelledOverLobbyWS(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	const aliceID = "alice-uuid"
 	g := createGame(t, ts, 2)
-	// Reserve the seat before opening the WS so the invitee subscribes
-	// in time for the cancel notification.
+	// Reserve the seat before opening the WS so the invitee is subscribed.
 	_ = postInviteSeat(t, ts, g.ID, 1, aliceID, "Alice", http.StatusOK)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -418,8 +384,7 @@ func TestDeclineSeatInvite_RequiresAuth(t *testing.T) {
 	defer ts.Close()
 	g := createGame(t, ts, 2)
 	_ = postInviteSeat(t, ts, g.ID, 1, "alice-uuid", "Alice", http.StatusOK)
-	// No X-Test-User-ID → JWT middleware leaves the context unauthenticated,
-	// and the handler 401s before reaching the store.
+	// No X-Test-User-ID → unauthenticated → 401 before the store.
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+g.ID+"/seats/1/invite/decline", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -445,12 +410,12 @@ func TestJoinAndMove(t *testing.T) {
 		t.Fatalf("game should transition to playing once all seats are filled")
 	}
 
-	// Player 1 (Alice, seat 0, color C1) plays first.
+	// Alice (seat 0) plays first.
 	mr := postMove(t, ts, g.ID, j1.Token, 0, 0, http.StatusOK)
 	if mr.Game.Turn != 1 {
 		t.Fatalf("want turn=1 after first move, got %d", mr.Game.Turn)
 	}
-	// Bob plays on Alice's cell → should fail (occupied).
+	// Bob plays Alice's occupied cell → rejected.
 	_ = postMove(t, ts, g.ID, j2.Token, 0, 0, http.StatusBadRequest)
 }
 
@@ -480,8 +445,7 @@ func TestMoveRejectsForeignToken(t *testing.T) {
 	g := createGame(t, ts, 2)
 	j1 := joinGame(t, ts, g.ID, "Alice", nil)
 	_ = joinGame(t, ts, g.ID, "Bob", nil)
-	// Alice's token but it's Alice's turn first anyway; play once, then Alice
-	// tries to play again with her token → ErrWrongTurn (server's color check).
+	// Alice plays, then plays again out of turn → ErrWrongTurn.
 	_ = postMove(t, ts, g.ID, j1.Token, 0, 0, http.StatusOK)
 	_ = postMove(t, ts, g.ID, j1.Token, 1, 0, http.StatusBadRequest)
 }
@@ -492,7 +456,7 @@ func TestJoinRejectsFullGame(t *testing.T) {
 	g := createGame(t, ts, 2)
 	_ = joinGame(t, ts, g.ID, "Alice", nil)
 	_ = joinGame(t, ts, g.ID, "Bob", nil)
-	// third join on a 2-player game should fail
+	// Third join on a 2-player game must 409.
 	body := bytes.NewBufferString(`{"name":"Charlie"}`)
 	resp, err := http.Post(ts.URL+"/api/games/"+g.ID+"/join", "application/json", body)
 	if err != nil {
@@ -521,13 +485,12 @@ func TestWebSocketBroadcastsMoves(t *testing.T) {
 	}
 	defer conn.CloseNow()
 
-	// First message should be the initial state snapshot.
+	// First message is the initial state snapshot.
 	first := readEvent(t, ctx, conn)
 	if first.Type != "state" {
 		t.Fatalf("want first event type=state, got %s", first.Type)
 	}
 
-	// Trigger a move; we should receive a "move" event over the WS.
 	_ = postMove(t, ts, g.ID, j1.Token, 0, 0, http.StatusOK)
 
 	got := readEvent(t, ctx, conn)
@@ -561,7 +524,7 @@ func TestResignRequiresPlaying(t *testing.T) {
 	defer ts.Close()
 	g := createGame(t, ts, 2)
 	j1 := joinGame(t, ts, g.ID, "Alice", nil)
-	// Not started yet (Bob hasn't joined) → resign returns 409.
+	// Not started (Bob hasn't joined) → resign 409.
 	postResignRaw(t, ts, g.ID, j1.Token, http.StatusConflict)
 }
 
@@ -581,12 +544,10 @@ func TestDrawOfferAcceptEndsAsDraw(t *testing.T) {
 	j1 := joinGame(t, ts, g.ID, "Alice", nil)
 	j2 := joinGame(t, ts, g.ID, "Bob", nil)
 
-	// Alice offers; the snapshot returned reflects the pending offer.
 	dto := postDraw(t, ts, g.ID, "offer", j1.Token, http.StatusOK)
 	if dto.DrawOfferBy != 0 {
 		t.Fatalf("want drawOfferBy=0 after Alice offered, got %d", dto.DrawOfferBy)
 	}
-	// Bob accepts → game ends as a draw (Winner=Empty, WinKind=WinDraw).
 	dto = postDraw(t, ts, g.ID, "accept", j2.Token, http.StatusOK)
 	if dto.Status != StatusFinished {
 		t.Fatalf("want status finished, got %s", dto.Status)
@@ -638,7 +599,7 @@ func TestDrawAutoCancelsOnMove(t *testing.T) {
 	_ = joinGame(t, ts, g.ID, "Bob", nil)
 
 	_ = postDraw(t, ts, g.ID, "offer", j1.Token, http.StatusOK)
-	// Alice (the offerer) plays a move → the pending offer must be cleared.
+	// The offerer playing a move must auto-cancel the pending offer.
 	mr := postMove(t, ts, g.ID, j1.Token, 0, 0, http.StatusOK)
 	if mr.Game.DrawOfferBy != -1 {
 		t.Fatalf("move must auto-cancel pending draw, got drawOfferBy=%d", mr.Game.DrawOfferBy)
@@ -658,7 +619,7 @@ func TestDrawRejectedInMultiplayer(t *testing.T) {
 func TestAddBotFillsEmptySeat(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := createGame(t, ts, 2) // private by default
+	g := createGame(t, ts, 2)
 	out := postAddBot(t, ts, g.ID, 1, http.StatusOK)
 	if !out.Seats[1].IsBot || !out.Seats[1].Occupied {
 		t.Fatalf("seat 1 should be bot+occupied, got %+v", out.Seats[1])
@@ -731,8 +692,7 @@ func TestCancelSeatInvite_RejectedOnHumanSeat(t *testing.T) {
 	defer ts.Close()
 	g := createGame(t, ts, 2)
 	_ = joinGame(t, ts, g.ID, "Alice", nil)
-	// Alice is on seat 0 as a real player, not as an invite — cancel-invite
-	// must refuse rather than evict her.
+	// Alice is a real player, not an invite — cancel must refuse, not evict her.
 	postCancelSeatInviteRaw(t, ts, g.ID, 0, http.StatusConflict)
 }
 
@@ -740,10 +700,8 @@ func TestJoin_InvitedUserGetsReservedSeat(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	g := createGame(t, ts, 2)
-	// Reserve seat 1 for alice-uuid.
 	_ = postInviteSeat(t, ts, g.ID, 1, "alice-uuid", "Alice", http.StatusOK)
-	// Then alice joins (auto-pick, no seat=). The reserved seat takes
-	// priority over the empty seat 0.
+	// Auto-pick join: the reserved seat 1 wins over the empty seat 0.
 	j := joinGameAs(t, ts, g.ID, "Alice", "alice-uuid", nil)
 	if j.Seat.Index != 1 {
 		t.Fatalf("invited user must land on their reserved seat (1), got %d", j.Seat.Index)
@@ -755,7 +713,7 @@ func TestJoin_OtherUserCannotClaimReservedSeat(t *testing.T) {
 	defer ts.Close()
 	g := createGame(t, ts, 2)
 	_ = postInviteSeat(t, ts, g.ID, 1, "alice-uuid", "Alice", http.StatusOK)
-	// Bob explicitly asks for seat 1 → blocked (reserved for Alice).
+	// Bob explicitly asks for Alice's reserved seat 1 → 403.
 	one := 1
 	body, _ := json.Marshal(map[string]any{"name": "Bob", "seat": one})
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+g.ID+"/join", bytes.NewReader(body))
@@ -775,7 +733,6 @@ func TestRemoveBotFreesSeat(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	g := createGame(t, ts, 2)
-	// Add then remove — seat 1 ends back at empty.
 	_ = postAddBot(t, ts, g.ID, 1, http.StatusOK)
 	out := postRemoveBot(t, ts, g.ID, 1, http.StatusOK)
 	if out.Seats[1].Occupied || out.Seats[1].IsBot {
@@ -788,7 +745,7 @@ func TestRemoveBotRejectedOnHumanSeat(t *testing.T) {
 	defer ts.Close()
 	g := createGame(t, ts, 2)
 	_ = joinGame(t, ts, g.ID, "Alice", nil)
-	// Alice is in seat 0; removeBot must refuse — it's not a bot seat.
+	// Seat 0 is human, not a bot → removeBot 409.
 	postRemoveBotRaw(t, ts, g.ID, 0, http.StatusConflict)
 }
 
@@ -820,8 +777,6 @@ func TestAddBotStartsGameWhenLastSeatFilled(t *testing.T) {
 	if out.Status != StatusPlaying {
 		t.Fatalf("want status playing after bot fills last seat, got %s", out.Status)
 	}
-	// And the bot should eventually play if Alice (seat 0) doesn't move.
-	// We don't assert that here — covered by TestBotPlaysWhenItIsItsTurn.
 }
 
 func TestBotPlaysWhenItIsItsTurn(t *testing.T) {
@@ -851,7 +806,6 @@ func TestBotPlaysWhenItIsItsTurn(t *testing.T) {
 func TestMatchmakeRejectsAnonymous(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	// No X-Test-User-ID header → 401.
 	resp, err := http.Post(ts.URL+"/api/games/matchmake", "application/json", strings.NewReader(`{"players":2}`))
 	if err != nil {
 		t.Fatal(err)
@@ -897,9 +851,7 @@ func TestMatchmakeSkipsGameWhereUserAlreadySeated(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	first := postMatchmake(t, ts, 2, "alice", http.StatusOK)
-	// Alice clicks 1v1 again — she's already seated in `first`, so the
-	// matchmaker must create a new public game rather than handing her
-	// back the one she's already in.
+	// Alice clicks again: already seated in `first`, so she must get a new game.
 	second := postMatchmake(t, ts, 2, "alice", http.StatusOK)
 	if second.Game.ID == first.Game.ID {
 		t.Fatalf("matchmake should not return a game the caller is already seated in")
@@ -914,8 +866,7 @@ func TestMatchmakeSkipsFullGames(t *testing.T) {
 	if a.Game.ID != b.Game.ID || b.Game.Status != StatusPlaying {
 		t.Fatalf("setup broke: a.id=%s b.id=%s status=%s", a.Game.ID, b.Game.ID, b.Game.Status)
 	}
-	// Now a third caller — the game above is full/playing, so matchmake
-	// must spawn a fresh one.
+	// The game above is full/playing, so a third caller must get a fresh one.
 	c := postMatchmake(t, ts, 2, "carol", http.StatusOK)
 	if c.Game.ID == a.Game.ID {
 		t.Fatalf("matchmake should not return a full game")
@@ -939,7 +890,6 @@ func TestLeaveSeatFreesIt(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	j := postMatchmake(t, ts, 2, "alice", http.StatusOK)
-	// Alice cancels → her seat is freed.
 	resp, err := postLeave(t, ts, j.Game.ID, j.Token)
 	if err != nil {
 		t.Fatal(err)
@@ -957,11 +907,9 @@ func TestLeaveSeatFreesIt(t *testing.T) {
 func TestStartTrimsToOccupiedSeats(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := createGame(t, ts, 6) // private, 6 seats, all empty
+	g := createGame(t, ts, 6)
 	a := joinGame(t, ts, g.ID, "Alice", nil)
 	b := joinGame(t, ts, g.ID, "Bob", nil)
-	// Private games must NOT auto-start when AllSeated — but here only 2/6
-	// are seated so the assertion is doubly safe.
 	if a.Game.Status != StatusWaiting || b.Game.Status != StatusWaiting {
 		t.Fatalf("game must stay waiting before Start (status=%s)", b.Game.Status)
 	}
@@ -969,8 +917,7 @@ func TestStartTrimsToOccupiedSeats(t *testing.T) {
 	if out.Status != StatusPlaying {
 		t.Fatalf("want playing after Start, got %s", out.Status)
 	}
-	// Trim: only the previously-occupied 2 seats survive — empty ones are
-	// gone entirely from the wire view.
+	// Start trims the 6 seats down to the 2 that were occupied.
 	if len(out.Seats) != 2 {
 		t.Fatalf("want 2 seats after Start (trim of 6→2), got %d", len(out.Seats))
 	}
@@ -984,17 +931,13 @@ func TestStartTrimsToOccupiedSeats(t *testing.T) {
 	}
 }
 
-// TestStartRecomputesThresholdsForOccupiedCount: a 6-slot private game
-// started with only 3 occupied seats must play under the 3-player rulebook
-// (Align4ToWin=6, Align5ToWin=3, CapturePairsWin=10), not the 6-player one.
-// The thresholds are picked at Start, not at Create.
+// TestStartRecomputesThresholdsForOccupiedCount: a 6-slot game started with 3
+// occupied seats plays under the 3-player rulebook. Thresholds are picked at
+// Start, not Create.
 func TestStartRecomputesThresholdsForOccupiedCount(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := createGame(t, ts, 6) // 6-slot private; would default to 6-player rules
-	// During waiting with 0 occupied seats, the preview falls back to the
-	// 2-player table (the minimum) — this is intentional: the host's
-	// thresholds preview should never claim 6-player rules with 0 seated.
+	g := createGame(t, ts, 6)
 	a := joinGame(t, ts, g.ID, "Alice", nil)
 	joinGame(t, ts, g.ID, "Bob", nil)
 	joinGame(t, ts, g.ID, "Carol", nil)
@@ -1008,14 +951,13 @@ func TestStartRecomputesThresholdsForOccupiedCount(t *testing.T) {
 	}
 }
 
-// TestWaitingPreviewsThresholdsByOccupiedCount: the thresholds surfaced on
-// the wire while the room is still waiting must reflect the *current*
-// occupancy, not the slot count. This is what the lobby UI binds to so the
-// host sees the rules they're about to commit to.
+// TestWaitingPreviewsThresholdsByOccupiedCount: while waiting, the previewed
+// thresholds reflect current occupancy (what the lobby UI binds to), not the
+// slot count — falling back to 2-player rules at 0 seated.
 func TestWaitingPreviewsThresholdsByOccupiedCount(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	g := createGame(t, ts, 6) // 6-slot private
+	g := createGame(t, ts, 6)
 	want2 := game.DefaultConfig(2)
 	if g.Thresholds.Align4ToWin != want2.Align4ToWin ||
 		g.Thresholds.Align5ToWin != want2.Align5ToWin {
@@ -1037,16 +979,13 @@ func TestStartPreservesUserColors(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	g := createGame(t, ts, 6)
-	// Alice on seat 0 (the host slot — only that one may call Start),
-	// Bob on seat 4 (C5) so the pair is non-contiguous and the trim
-	// has actual gaps to close.
+	// Non-contiguous seats (0 and 4) so the trim has gaps to close.
 	zero := 0
 	four := 4
 	a := joinGame(t, ts, g.ID, "Alice", &zero)
 	b := joinGame(t, ts, g.ID, "Bob", &four)
 	out := postStart(t, ts, g.ID, a.Token, http.StatusOK)
-	// After trim, Alice keeps C1 and Bob keeps C5 — the engine doesn't
-	// re-colour them, just re-orders. Names follow the colour.
+	// Trim re-orders but preserves colours: Alice keeps C1, Bob keeps C5.
 	colors := []game.Color{out.Seats[0].Color, out.Seats[1].Color}
 	if colors[0] != a.Seat.Color || colors[1] != b.Seat.Color {
 		t.Fatalf("trim should preserve original colours, got %v (wanted Alice=%v, Bob=%v)",
@@ -1063,11 +1002,8 @@ func TestStart_OnlyHostMayStart(t *testing.T) {
 	host := joinGame(t, ts, g.ID, "Host", &zero)
 	guest := joinGame(t, ts, g.ID, "Guest", &one)
 
-	// A guest's token must NOT start the game even though they hold a
-	// valid seat token — otherwise anyone who joined could race the
-	// host on Start before the lobby is fully arranged.
+	// Only the host (seat 0) may Start; a guest's valid token must 403.
 	postStartRaw(t, ts, g.ID, guest.Token, http.StatusForbidden)
-	// The host can.
 	_ = postStart(t, ts, g.ID, host.Token, http.StatusOK)
 }
 
@@ -1082,6 +1018,7 @@ func TestStartRejectsWithFewerThanTwo(t *testing.T) {
 func TestStartRejectsOnPublic(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
+	// Public games auto-start via matchmaking; manual Start must 409.
 	pub := postMatchmake(t, ts, 2, "alice", http.StatusOK)
 	postStartRaw(t, ts, pub.Game.ID, pub.Token, http.StatusConflict)
 }
@@ -1098,9 +1035,8 @@ func TestStartRejectsWithoutToken(t *testing.T) {
 func TestJoinPublicRejectsAnonymous(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	// A public game spawned via matchmake by Alice. The URL is technically
-	// reachable by anyone who knows the ID — anonymous join must be
-	// rejected so this surface can't bypass the matchmaking-only contract.
+	// The public game's URL is reachable by anyone with the ID; anonymous join
+	// must 401 so it can't bypass the matchmaking-only contract.
 	pub := postMatchmake(t, ts, 2, "alice", http.StatusOK)
 	body := bytes.NewBufferString(`{"name":"Bob"}`)
 	resp, err := http.Post(ts.URL+"/api/games/"+pub.Game.ID+"/join", "application/json", body)
@@ -1116,8 +1052,7 @@ func TestJoinPublicRejectsAnonymous(t *testing.T) {
 func TestJoinPrivateStillAllowsAnonymous(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	// createGame defaults to private — anonymous join must keep working
-	// so URL-sharing for casual play isn't broken.
+	// Private games must still accept anonymous joins for URL-share play.
 	g := createGame(t, ts, 2)
 	_ = joinGame(t, ts, g.ID, "Anon", nil)
 }
@@ -1126,7 +1061,7 @@ func TestLeaveSeatRejectedAfterStart(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	a := postMatchmake(t, ts, 2, "alice", http.StatusOK)
-	_ = postMatchmake(t, ts, 2, "bob", http.StatusOK) // fills the game → playing
+	_ = postMatchmake(t, ts, 2, "bob", http.StatusOK) // fills → playing
 	resp, _ := postLeave(t, ts, a.Game.ID, a.Token)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
@@ -1134,10 +1069,9 @@ func TestLeaveSeatRejectedAfterStart(t *testing.T) {
 	}
 }
 
-// TestGameRatings_NoopFallsBackToUnrated guards the API contract of
-// the rated-game-end modal: in hermetic mode (no DB) the endpoint
-// always reports rated:false with an empty seats list, so the client
-// can render a generic end-of-game card instead of crashing.
+// TestGameRatings_NoopFallsBackToUnrated: in hermetic mode (no DB) the ratings
+// endpoint reports rated:false with empty seats so the client can render a
+// generic end-of-game card.
 func TestGameRatings_NoopFallsBackToUnrated(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -1184,20 +1118,16 @@ func TestLeaderboardEmptyByDefault(t *testing.T) {
 	}
 }
 
-// TestGetMe_AutoFillsDisplayName guards the leaderboard-visibility fix.
-// A user that authenticates without having gone through the explicit
-// "set display name" form must still get a usable displayName from
-// /api/auth/me — derived from their email when nothing else is on
-// record. Without the fix, the response was {displayName: ""} and the
-// matching profile row was never created.
+// TestGetMe_AutoFillsDisplayName: a user who never set a display name must still
+// get a usable one from /api/auth/me, derived from their email. The pre-fix bug
+// returned {displayName: ""} and never created the profile row.
 func TestGetMe_AutoFillsDisplayName(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/auth/me", nil)
-	// X-Test-User-ID is the hermetic auth back door: the JWT
-	// middleware turns it into AuthUser{ID, Email: id+"@test.local"}
-	// when no JWT verifier is configured.
+	// X-Test-User-ID is the hermetic auth back door → AuthUser{ID,
+	// Email: id+"@test.local"} when no JWT verifier is configured.
 	req.Header.Set("X-Test-User-ID", "11111111-1111-1111-1111-111111111111")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1211,11 +1141,8 @@ func TestGetMe_AutoFillsDisplayName(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&dto); err != nil {
 		t.Fatal(err)
 	}
-	// Email is <id>@test.local, local-part = the UUID, so the fallback
-	// derives that. Anything non-empty proves we hit the EnsureProfile
-	// path; the noop repo doesn't persist, so we're really asserting
-	// the handler builds and returns a synthetic Profile when none
-	// exists in the store.
+	// Non-empty proves the handler builds a synthetic Profile (fallback derives
+	// it from the email) since the noop repo persists nothing.
 	if dto.DisplayName == "" {
 		t.Fatalf("displayName must be auto-filled even when no profile row exists; got %+v", dto)
 	}
@@ -1223,10 +1150,8 @@ func TestGetMe_AutoFillsDisplayName(t *testing.T) {
 
 // ---- helpers ----
 
-// createGame produces a private game with every seat still empty, matching
-// the old test convention. The HTTP endpoint atomically auto-joins the
-// caller now, so we do create-then-leave under the hood so the legacy
-// tests can treat the returned game as "fresh, nobody seated yet".
+// createGame returns a private game with every seat empty. The HTTP endpoint
+// auto-joins the caller, so we create-then-leave to hand back a "fresh" game.
 func createGame(t *testing.T, ts *httptest.Server, players int) gameDTO {
 	t.Helper()
 	body := strings.NewReader(`{"players":` + itoa(players) + `,"name":"__seed__"}`)
@@ -1243,13 +1168,11 @@ func createGame(t *testing.T, ts *httptest.Server, players int) gameDTO {
 	if err := json.NewDecoder(resp.Body).Decode(&j); err != nil {
 		t.Fatal(err)
 	}
-	// Vacate the seed seat so the caller can treat the game as empty.
 	leaveResp, err := postLeave(t, ts, j.Game.ID, j.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
 	leaveResp.Body.Close()
-	// Re-fetch the now-empty game state.
 	return getGameViaHTTP(t, ts, j.Game.ID)
 }
 
@@ -1418,11 +1341,8 @@ func postCancelSeatInviteRaw(t *testing.T, ts *httptest.Server, gameID string, s
 	return resp
 }
 
-// joinGameAs is the authenticated variant of joinGame — it sends the
-// hermetic X-Test-User-ID so the server treats the join as coming
-// from a logged-in user with the given user id. Needed for the
-// reserved-seat tests: only an authed caller can land on a seat that
-// was invited for them.
+// joinGameAs is the authenticated variant of joinGame, sending X-Test-User-ID
+// so the join is treated as a logged-in user (needed for reserved-seat tests).
 func joinGameAs(t *testing.T, ts *httptest.Server, id, name, userID string, seat *int) joinResponse {
 	t.Helper()
 	payload := map[string]any{"name": name}
@@ -1479,9 +1399,8 @@ func postLeave(t *testing.T, ts *httptest.Server, gameID, token string) (*http.R
 	return http.DefaultClient.Do(req)
 }
 
-// postMatchmake calls /api/games/matchmake as `userID`, which the hermetic
-// auth middleware turns into an AuthUser via the X-Test-User-ID back door.
-// Returns the joinResponse — the caller is automatically seated.
+// postMatchmake calls /api/games/matchmake as userID (via the X-Test-User-ID
+// back door); the caller is auto-seated in the returned joinResponse.
 func postMatchmake(t *testing.T, ts *httptest.Server, players int, userID string, wantStatus int) joinResponse {
 	t.Helper()
 	body := strings.NewReader(`{"players":` + itoa(players) + `}`)
@@ -1517,10 +1436,8 @@ func postRematchDecline(t *testing.T, ts *httptest.Server, id, token string, wan
 	return postWithToken(t, ts, "/api/games/"+id+"/rematch/decline", token, wantStatus)
 }
 
-// postDeclineInviteAs sends the invitee-side decline call with the
-// hermetic X-Test-User-ID header — the handler uses userFromContext
-// (not a player token) to identify the caller, so this mirrors the
-// joinGameAs auth path.
+// postDeclineInviteAs declines an invite as userID via X-Test-User-ID; the
+// handler identifies the caller from the JWT context, not a player token.
 func postDeclineInviteAs(t *testing.T, ts *httptest.Server, gameID string, seatIdx int, userID string, wantStatus int) gameDTO {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+gameID+"/seats/"+itoa(seatIdx)+"/invite/decline", nil)
@@ -1569,17 +1486,14 @@ func postWithToken(t *testing.T, ts *httptest.Server, path, token string, wantSt
 	return g
 }
 
-// finishGame plays an 11-move sequence in `gameID` that lands a 6-alignment
-// for Alice on the q-axis (instant win, regardless of config thresholds).
-// Bob plays parallel one row up, so neither side ever sandwiches the other —
-// no captures interfere.
+// finishGame lands a 6-alignment for Alice on the q-axis (instant win). Bob
+// plays one row up so neither side sandwiches the other — no captures interfere.
 func finishGame(t *testing.T, ts *httptest.Server, gameID, aliceTok, bobTok string) {
 	t.Helper()
 	for q := 0; q < 5; q++ {
 		_ = postMove(t, ts, gameID, aliceTok, q, 0, http.StatusOK)
 		_ = postMove(t, ts, gameID, bobTok, q, 1, http.StatusOK)
 	}
-	// Final Alice stone completes the 6-alignment.
 	mr := postMove(t, ts, gameID, aliceTok, 5, 0, http.StatusOK)
 	if mr.Game.Status != StatusFinished {
 		t.Fatalf("finishGame: game still %s after 6-alignment", mr.Game.Status)

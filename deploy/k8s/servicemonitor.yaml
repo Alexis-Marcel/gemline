@@ -1,8 +1,6 @@
-# ServiceMonitor is a CRD installed by kube-prometheus-stack (see
-# deploy/argocd/app-monitoring.yaml). The annotation below tells ArgoCD
-# to skip the dry-run when that CRD isn't registered yet — without it,
-# a fresh cluster sync fails on the chicken-and-egg between this object
-# and the chart that introduces its kind.
+# ServiceMonitor CRD comes from kube-prometheus-stack. The SkipDryRun
+# annotation below avoids a fresh-sync failure when the CRD isn't
+# registered yet.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

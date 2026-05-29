@@ -18,12 +18,8 @@ import (
 )
 
 func main() {
-	// Load .env (and .env.local if present) before reading any env var so
-	// local dev can keep secrets out of the shell. .env.local takes
-	// precedence over .env because godotenv.Load doesn't overwrite vars
-	// that are already set — we load the override file first.
-	// Production deployments won't have these files; godotenv.Load
-	// returns "file not found" errors we deliberately ignore.
+	// .env.local first: godotenv.Load doesn't overwrite already-set vars,
+	// so the override file must win over .env. Missing files are ignored.
 	_ = godotenv.Load(".env.local")
 	_ = godotenv.Load(".env")
 
@@ -47,12 +43,6 @@ func main() {
 		defer pool.Close()
 		repo = server.NewPostgresRepo(pool)
 		log.Info("persistence enabled", "driver", "postgres")
-
-		// Postgres backplane: LISTEN/NOTIFY bus shared by the WS
-		// event scaler and (later) the matchmaking lobby. We only
-		// build the object here; Start happens after the server has
-		// registered its handlers, so the first session LISTENs on
-		// the right set of channels.
 		bp = backplane.New(dsn, pool, log)
 	} else {
 		log.Info("persistence disabled — running with in-memory store only")
@@ -64,23 +54,18 @@ func main() {
 	}
 
 	store := server.NewStore(repo)
-	// Hourly cleaner: deletes waiting games older than StaleWaitingTTL
-	// (7 days). Safe to run on every pod — DELETE is idempotent and
-	// multiple pods just race to clean the same rows.
 	store.StartStaleGameCleaner(log)
 	defer store.Close()
 
-	// server.New registers backplane.Subscribe(ChannelGameEvents, …)
-	// before we Start the listener — so the first LISTEN session
-	// includes the event channel.
+	// server.New registers the backplane handlers; Start the listener only
+	// afterwards so the first LISTEN session subscribes to the right channels.
 	apiServer := server.New(log, store, bp, cfg)
 	if bp != nil {
 		bp.Start(ctx)
 		defer bp.Close()
 	}
-	// The matcher needs the backplane to be live so its match
-	// notifications reach lobby WS subscribers on other pods. Start
-	// after Start above. Cancel propagates via ctx on shutdown.
+	// Start after the backplane is live so match notifications reach lobby
+	// subscribers on other pods.
 	apiServer.StartMatcher(ctx)
 
 	srv := &http.Server{
@@ -118,9 +103,8 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-// parseOrigins turns a comma-separated env var into a trimmed slice. Empty
-// or whitespace-only values are skipped so a stray comma can't smuggle in an
-// empty entry that would silently match the empty Origin header.
+// parseOrigins splits a comma-separated list, dropping empty entries so a
+// stray comma can't smuggle in a "" that would match the empty Origin header.
 func parseOrigins(raw string) []string {
 	if raw == "" {
 		return nil

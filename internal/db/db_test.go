@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// TestOpen_AppliesMigrations is a live integration test against the database
-// referenced by GEMLINE_TEST_DATABASE_URL. It is skipped when the variable is
-// unset so plain `go test ./...` stays hermetic.
+// TestOpen_AppliesMigrations is a live integration test, skipped unless
+// GEMLINE_TEST_DATABASE_URL is set so plain `go test ./...` stays hermetic.
 func TestOpen_AppliesMigrations(t *testing.T) {
 	dsn := os.Getenv("GEMLINE_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -21,10 +20,9 @@ func TestOpen_AppliesMigrations(t *testing.T) {
 	}
 	defer pool.Close()
 
-	// Verify the three expected tables now exist.
 	for _, table := range []string{"games", "seats", "moves"} {
 		var n int
-		err := pool.QueryRow("SELECT COUNT(*) FROM "+table).Scan(&n)
+		err := pool.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n)
 		if err != nil {
 			t.Errorf("query %s: %v", table, err)
 		}

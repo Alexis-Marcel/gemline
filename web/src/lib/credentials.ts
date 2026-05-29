@@ -10,11 +10,8 @@ interface Credentials {
 
 const KEY = (gameId: string) => `gemline:auth:${gameId}`;
 
-// In-memory pubsub so React components can react to credential updates
-// that happen during a session (e.g. a rematch_ready lobby push saving
-// fresh creds while the GamePage is already mounted on the new game).
-// localStorage's `storage` event only fires across tabs, not within the
-// same one, so we maintain our own subscriber set.
+// In-memory pubsub for in-session credential updates (localStorage's
+// `storage` event only fires across tabs, not within the same one).
 type Listener = (gameId: string) => void;
 const listeners = new Set<Listener>();
 
@@ -23,7 +20,7 @@ function emit(gameId: string) {
     try {
       fn(gameId);
     } catch {
-      /* listener error shouldn't break the writer */
+      // listener error shouldn't break the writer
     }
   }
 }
@@ -55,18 +52,13 @@ export function subscribeCredentials(listener: Listener): () => void {
   };
 }
 
-// useCredentials yields the live seat credentials for `gameId` as React
-// state — re-renders whenever saveCredentials/clearCredentials fires for
-// the same id. Built on useSyncExternalStore so out-of-band writes (e.g.
-// a rematch_ready lobby push landing while the page is already mounted)
+// Live seat credentials for `gameId` as React state, via
+// useSyncExternalStore so out-of-band writes (e.g. a rematch_ready push)
 // flow through React's scheduling rather than a setState-in-effect dance.
 export function useCredentials(gameId: string): Credentials | null {
-  // Cache the parsed credentials per game id so useSyncExternalStore's
-  // getSnapshot returns referentially-stable values between writes —
-  // otherwise loadCredentials would build a fresh object on every call
-  // and React would treat each render as a change. The ref outlives any
-  // single render so the cache survives re-renders; the effect below
-  // resets it when `gameId` changes.
+  // Cache the parsed creds so getSnapshot returns referentially-stable
+  // values between writes — otherwise a fresh object each call would make
+  // React see every render as a change. The effect resets it on gameId change.
   const cacheRef = useRef<Credentials | null>(loadCredentials(gameId));
   useEffect(() => {
     cacheRef.current = loadCredentials(gameId);

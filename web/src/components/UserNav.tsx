@@ -3,12 +3,6 @@ import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/useAuth";
 import { useInvitations } from "../notifications/useInvitations";
 
-/**
- * UserNav renders the right-hand "who am I" affordance on top-level pages.
- * Logged out → "Se connecter" link. Logged in → profile avatar plus an
- * invitations bell that badges the count of pending seat invitations and
- * opens a small dropdown listing them (Accepter / Refuser inline).
- */
 export function UserNav() {
   const { user, loading } = useAuth();
 
@@ -49,12 +43,7 @@ export function UserNav() {
   );
 }
 
-// InvitationsBell renders a bell icon with a count badge when one or
-// more seat invitations are pending. Clicking it toggles a dropdown
-// that lists each invitation with Accepter/Refuser actions — same
-// affordances as the InvitationToast but discoverable after the toast
-// has scrolled off. Hidden entirely when the user has no invites so
-// it doesn't clutter the header in the steady state.
+// Header fallback for invitations after the toast has scrolled off.
 function InvitationsBell() {
   const { invitations, dismiss, decline } = useInvitations();
   const [open, setOpen] = useState(false);

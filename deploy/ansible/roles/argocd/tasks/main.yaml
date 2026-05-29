@@ -1,15 +1,7 @@
 ---
-# Rôle "argocd" — installe ArgoCD via le manifest officiel et attend
-# que les composants soient up. Pas d'install des Applications ici —
-# c'est le rôle `argocd_apps` qui s'en charge ensuite.
-#
-# Variables attendues :
-#   - argocd_install_manifest : URL du manifest officiel
-#                               (group_vars/all/vars.yaml)
+# Installs ArgoCD from the official manifest and waits for it to be up.
+# The Applications themselves are applied by the argocd_apps role.
 
-# Étape 1 : Créer le namespace `argocd`. Le module k8s sait créer une
-# ressource depuis une `definition:` inline (plus propre que de la
-# coller en YAML séparé pour un truc aussi simple).
 - name: Ensure argocd namespace exists
   kubernetes.core.k8s:
     state: present
@@ -20,17 +12,14 @@
         name: argocd
     kubeconfig: /etc/rancher/k3s/k3s.yaml
 
-# Étape 2 : Télécharger le manifest officiel.
 - name: Download ArgoCD install manifest
   ansible.builtin.get_url:
     url: "{{ argocd_install_manifest }}"
     dest: /tmp/argocd-install.yaml
     mode: '0644'
 
-# Étape 3 : Apply le manifest. server-side apply + force_conflicts pour
-# les mêmes raisons que cert-manager (transition d'un manager à l'autre).
-# `namespace: argocd` force le scope (les ressources sans namespace dans
-# le YAML — Deployments, Services, etc. — atterrissent dans argocd).
+# server_side_apply + force_conflicts: same field-ownership transition as
+# cert-manager. namespace: argocd scopes the unscoped resources in the YAML.
 - name: Apply ArgoCD resources
   kubernetes.core.k8s:
     state: present
@@ -42,7 +31,6 @@
       field_manager: ansible-bootstrap
       force_conflicts: true
 
-# Étape 4 : Attendre les 4 Deployments d'ArgoCD.
 - name: Wait for ArgoCD deployments to be Available
   kubernetes.core.k8s_info:
     api_version: apps/v1
@@ -61,10 +49,7 @@
     - argocd-applicationset-controller
     - argocd-notifications-controller
 
-# Étape 5 : Attendre le pod du StatefulSet `argocd-application-controller`.
-# On wait sur le POD (qui a une condition `Ready` standard) plutôt que
-# sur le StatefulSet (qui n'en a pas). `label_selectors:` cible les
-# pods qui matchent les labels — pareil que `kubectl get pod -l ...`.
+# Wait on the pod (which has a Ready condition), not the StatefulSet (which doesn't).
 - name: Wait for ArgoCD application-controller pod to be Ready
   kubernetes.core.k8s_info:
     api_version: v1

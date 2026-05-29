@@ -15,7 +15,6 @@ func TestScoreBand_GrowsWithAge(t *testing.T) {
 }
 
 func TestScoreBand_CapsAtMax(t *testing.T) {
-	// Anything past ~90s should hit the ceiling.
 	if got := scoreBandFor(10 * time.Minute); got != matchBandMax {
 		t.Fatalf("expected cap at %v, got %v", matchBandMax, got)
 	}
@@ -31,8 +30,7 @@ func TestWithinBand_TightAtZeroAge(t *testing.T) {
 }
 
 func TestWithinBand_WidensOverTime(t *testing.T) {
-	// 200 pts apart is rejected at t=0, accepted at t=20s (band grows to
-	// 100 + 200 = 300).
+	// 200-pt gap: rejected at t=0, accepted at t=20s (band 100 + 200 = 300).
 	if withinBand(1500, 1300, 0) {
 		t.Fatalf("200-pt gap should not pair instantly")
 	}
@@ -42,9 +40,7 @@ func TestWithinBand_WidensOverTime(t *testing.T) {
 }
 
 func TestMultiWaitThreshold_Schedule(t *testing.T) {
-	// 6+ players → start immediately; thresholds widen as the queue
-	// shrinks. The exact numbers are part of the matchmaking UX so
-	// they're pinned here.
+	// Exact thresholds are part of the matchmaking UX, so they're pinned here.
 	cases := []struct {
 		occupied int
 		want     time.Duration
@@ -62,10 +58,8 @@ func TestMultiWaitThreshold_Schedule(t *testing.T) {
 }
 
 func TestMultiWaitThreshold_BelowFloorIsSentinel(t *testing.T) {
-	// Fewer than minMultiSeats → return a very large duration so any
-	// `age < threshold` check trivially refuses to start. Callers should
-	// short-circuit on the count before consulting the threshold, but
-	// the sentinel is here as a safety net.
+	// Below minMultiSeats returns a huge duration so any age < threshold check
+	// refuses to start, as a safety net behind the count short-circuit.
 	if got := multiWaitThreshold(2); got < time.Hour {
 		t.Fatalf("≤2 occupants should never trigger a start, got %v", got)
 	}

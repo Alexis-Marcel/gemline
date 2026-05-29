@@ -113,10 +113,8 @@ variable "dns_subdomain" {
   default     = "gemline"
 }
 
-# `argocd_version` and `argocd_apps_repo_raw` used to live here when
-# cloud-init installed ArgoCD. They've moved to deploy/ansible/group_vars/
-# all/vars.yaml (`argocd_install_manifest`, `argocd_apps_repo_raw`). TF
-# doesn't need to know about them anymore.
+# ArgoCD vars moved to deploy/ansible/group_vars/all/vars.yaml; TF no
+# longer needs them.
 
 variable "kubeapi_allowed_ips" {
   description = <<-EOT

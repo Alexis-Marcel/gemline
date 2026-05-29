@@ -1,15 +1,6 @@
-# ArgoCD Application for ESO configuration (cross-namespace).
-#
-# Separate from `app-gemline` because it carries resources in multiple
-# namespaces and cluster-scoped objects (the gemline app kustomize
-# forces namespace=gemline on everything).
-#
-# What lives here:
-#   - SealedSecret with Infisical machine-identity creds (in
-#     external-secrets namespace) — the only Sealed Secret we keep,
-#     used as bootstrap auth for ESO.
-#   - ClusterSecretStore pointing at Infisical (added later).
-#   - ExternalSecret resources for each consuming app (added later).
+# ESO config app, separate from app-gemline because its resources span
+# multiple namespaces and include cluster-scoped objects (the gemline
+# kustomize forces namespace=gemline on everything).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -27,8 +18,6 @@ spec:
 
   destination:
     server: https://kubernetes.default.svc
-    # Default namespace for resources without one in their manifest.
-    # Cluster-scoped objects (ClusterSecretStore) ignore this.
     namespace: external-secrets
 
   syncPolicy:

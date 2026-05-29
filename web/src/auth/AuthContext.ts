@@ -10,7 +10,6 @@ export interface AuthContextValue {
   signOut: () => Promise<void>;
 }
 
-// Lives in its own module so AuthProvider.tsx can export only the
-// React component (fast refresh requires single-export component
-// files). useAuth in ./useAuth.ts reads this context.
+// Separate module so AuthProvider.tsx exports only the component
+// (fast-refresh requires single-export component files).
 export const AuthContext = createContext<AuthContextValue | null>(null);

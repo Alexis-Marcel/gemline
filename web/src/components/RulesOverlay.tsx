@@ -8,15 +8,6 @@ interface RulesOverlayProps {
   onClose: () => void;
 }
 
-/**
- * RulesOverlay paints the Objectives panel as a centered modal over
- * the page. Controlled — the parent owns the open/closed state so the
- * trigger can live anywhere. Today it's the GameBottomBar kebab
- * "Règles de la partie" item on mobile; desktop has the same content
- * always inline in the right rail and never opens this overlay.
- *
- * Dismissal: backdrop click, the X button, or Escape.
- */
 export function RulesOverlay({ thresholds, open, onClose }: RulesOverlayProps) {
   useEffect(() => {
     if (!open) return;

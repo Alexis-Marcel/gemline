@@ -1,25 +1,13 @@
 import type { Game } from "../api/types";
 
 /**
- * mergeGameSnapshot picks the freshest view of a game between the
- * server-pushed `live` snapshot (from the per-game WebSocket) and the
- * caller's `optimistic` snapshot (returned by their own HTTP mutation
- * before the WS state event has caught up).
- *
- * The rule: optimistic wins ONLY if it has strictly more moves than
- * live. On ties we MUST defer to live, because many server-side
- * transitions don't bump moveCount — waiting → playing on AllSeated,
- * draw offer set / cleared, seat invitations, rematch state, presence
- * tweaks. A `>=` here used to mask those updates until a refresh, see
- * the bug fixed in commit 64aba2a.
- *
- * In practice this means optimistic state is only ever surfaced for the
- * very next move the caller just played, before the WS state event
- * arrives (typically a few ms). For every non-move action, optimistic
- * is set but immediately superseded by live — that's intentional: the
- * setter still gives an API mismatch a chance to surface as an updated
- * DTO (e.g. action rejected, error path), it just doesn't override
- * server reality.
+ * Picks the freshest game view between the WS `live` snapshot and the
+ * caller's `optimistic` one (their own HTTP mutation before the WS event
+ * lands). Optimistic wins ONLY with strictly more moves; on ties we defer
+ * to live because many server transitions (waiting→playing, draw/rematch
+ * state, presence) don't bump moveCount — a `>=` here masked those until a
+ * refresh (bug fixed in 64aba2a). So optimistic only ever surfaces the
+ * caller's just-played move for the few ms before the WS state event.
  */
 export function mergeGameSnapshot(
   live: Game | null,

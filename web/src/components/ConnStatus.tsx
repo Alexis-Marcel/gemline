@@ -5,11 +5,7 @@ interface ConnStatusProps {
   attempt: number;
 }
 
-/**
- * ConnStatus renders the small "en ligne / connexion… / reconnexion / hors-ligne"
- * indicator in the GamePage header. Fed by the per-game WebSocket reconnect
- * state machine (see useGameSocket / gameSocket.ts).
- */
+// Fed by the per-game WebSocket reconnect state machine (gameSocket.ts).
 export function ConnStatus({ status, attempt }: ConnStatusProps) {
   const meta = statusMeta(status, attempt);
   return (

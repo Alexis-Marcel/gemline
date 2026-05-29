@@ -15,8 +15,8 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Open opens a connection pool to `dsn` and applies any pending migrations.
-// The returned *sql.DB is ready for use; the caller must Close it on shutdown.
+// Open opens a connection pool to dsn and applies any pending migrations. The
+// caller must Close the returned pool on shutdown.
 func Open(ctx context.Context, dsn string) (*sql.DB, error) {
 	pool, err := sql.Open("pgx", dsn)
 	if err != nil {

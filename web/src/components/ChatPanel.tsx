@@ -9,12 +9,9 @@ const MAX_LEN = 500;
 
 interface ChatPanelProps {
   gameId: string;
-  /** Seat token of the current player, or null for spectators. */
+  // Seat token of the current player, or null for spectators.
   playerToken: string | null;
-  /** When true, the component skips its own header + card chrome and
-   *  lets the messages list grow to fill the parent height. Used by
-   *  the mobile chat drawer which provides its own header. Defaults
-   *  to false (renders the standalone card used on the desktop rail). */
+  // Drop the card chrome and fill parent height; used by the mobile drawer.
   embedded?: boolean;
 }
 
@@ -35,7 +32,7 @@ export function ChatPanel({ gameId, playerToken, embedded = false }: ChatPanelPr
         if (!cancelled) setMessages(msgs);
       })
       .catch(() => {
-        /* non-fatal: chat starts empty */
+        // non-fatal: chat starts empty
       });
 
     const unsubscribe = acquireChatStream(gameId, (msg) => {
@@ -50,7 +47,6 @@ export function ChatPanel({ gameId, playerToken, embedded = false }: ChatPanelPr
     };
   }, [gameId]);
 
-  // Auto-scroll to bottom whenever a new message arrives.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -74,10 +70,6 @@ export function ChatPanel({ gameId, playerToken, embedded = false }: ChatPanelPr
     }
   }
 
-  // The `embedded` variant lives inside a drawer that already provides
-  // its own header and a fixed-height shell — drop the card chrome and
-  // let the messages list stretch (flex-1) to fill the available
-  // space. The standalone variant keeps the rounded card.
   const containerCls = embedded
     ? "flex h-full flex-col bg-zinc-950"
     : "flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/40";

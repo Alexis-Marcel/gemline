@@ -1,21 +1,10 @@
-// Persistent per-user WebSocket on /ws/lobby. Opens at login, stays
-// open across pages, reconnects on transient disconnect. Carries all
-// cross-page notifications that aren't tied to a single game:
-//   - match_found      — matchmaker paired the user (lobby/matchmake hook)
-//   - invite_received  — someone reserved a seat for them in a private game
-//   - invite_cancelled — that reservation was withdrawn
+// Persistent per-user WebSocket on /ws/lobby, carrying cross-page
+// notifications (match_found, invite_received/cancelled, ...). A singleton
+// outside React so any number of subscribers share one connection;
+// AuthProvider owns the open/close lifecycle.
 //
-// The singleton lives outside React so subscribers in different
-// components share the same connection. AuthProvider owns the
-// open/close lifecycle (open when a session exists, close on sign-out).
-//
-// We deliberately don't model match_found's old "owned by one hook"
-// pattern from matchmake.ts: any number of subscribers can listen to
-// any event type. useMatchmake just picks the events it cares about.
-//
-// Auth: the browser can't set Authorization on a WS upgrade, so the
-// Supabase JWT travels as ?access_token=. The server's
-// authorizationBearer reads it.
+// The browser can't set Authorization on a WS upgrade, so the Supabase
+// JWT travels as ?access_token=.
 
 export type LobbyEventType =
   | "match_found"
@@ -31,10 +20,8 @@ export interface MatchFoundPayload {
   name: string;
 }
 
-// rematch_ready carries the same shape as match_found — fresh per-seat
-// credentials for a game the server just created. Sent to each authed
-// player pre-seated in a rematch so the client can save the token and
-// pick up where it left off, without a re-join roundtrip.
+// Same shape as match_found: fresh per-seat creds for a rematch game,
+// letting pre-seated players save the token without a re-join roundtrip.
 export type RematchReadyPayload = MatchFoundPayload;
 
 export interface InvitePayload {
@@ -63,11 +50,9 @@ export type LobbyEvent =
 
 type Listener = (ev: LobbyEvent) => void;
 
-/** Returns the freshest valid access token, or null if the user has
- *  no session. Called by the socket before each reconnect attempt
- *  after the first failure so a stale token (Supabase refresh missed
- *  while the tab was backgrounded, network blip, etc.) is replaced
- *  before we burn more reconnect attempts on the bad credential. */
+/** Returns the freshest access token (or null). Called before each
+ *  reconnect past the first so a stale token (Supabase refresh missed
+ *  while backgrounded) is replaced before burning more attempts. */
 export type AuthRefresher = () => Promise<string | null>;
 
 const RECONNECT_BASE_MS = 1000;
@@ -80,14 +65,12 @@ class UserSocket {
   private reconnectAttempt = 0;
   private reconnectTimer: number | null = null;
   private refreshAuth: AuthRefresher | null = null;
-  // closed=true means the caller explicitly invoked close() — don't
-  // attempt to reconnect. open() resets this.
+  // true after an explicit close() — suppresses reconnect. open() resets it.
   private closed = true;
 
   open(accessToken: string) {
     if (this.accessToken === accessToken && this.ws) return;
-    // Token rotation: close the existing socket so the next reconnect
-    // carries the new JWT in the query string.
+    // Token rotation: reconnect so the new JWT travels in the query string.
     this.accessToken = accessToken;
     this.closed = false;
     this.clearReconnectTimer();
@@ -102,12 +85,9 @@ class UserSocket {
     this.disconnect();
   }
 
-  /** AuthProvider installs this on mount so reconnects can pull a
-   *  freshly-refreshed Supabase token when the current one is bad. We
-   *  can't tell from the browser WS API whether a close was caused
-   *  by a 401 specifically (the status code isn't exposed), so we
-   *  trigger a refresh after every reconnect attempt past the first
-   *  — cheap when the token is still valid (Supabase no-ops). */
+  /** The browser WS API doesn't expose the close status code, so we can't
+   *  detect a 401 specifically — instead we refresh after every reconnect
+   *  past the first (cheap: Supabase no-ops a still-valid token). */
   setAuthRefresher(fn: AuthRefresher | null) {
     this.refreshAuth = fn;
   }
@@ -137,19 +117,16 @@ class UserSocket {
       } catch {
         return;
       }
-      // Defensive copy: pass the same object to every listener so they
-      // don't see mutations from each other.
       for (const fn of this.listeners) {
         try {
           fn(ev);
         } catch {
-          /* listener error shouldn't crash the socket */
+          // listener error shouldn't crash the socket
         }
       }
     };
     ws.onerror = () => {
-      // Defer the failure surfacing to onclose — onerror is always
-      // followed by onclose and we want a single transition.
+      // onerror is always followed by onclose; let onclose handle the retry.
     };
     ws.onclose = () => {
       if (this.ws === ws) {
@@ -170,7 +147,7 @@ class UserSocket {
     try {
       ws.close();
     } catch {
-      /* already closing */
+      // already closing
     }
     this.ws = null;
   }
@@ -185,12 +162,9 @@ class UserSocket {
     this.reconnectAttempt += 1;
     this.reconnectTimer = window.setTimeout(async () => {
       this.reconnectTimer = null;
-      // After the first failure, ask AuthProvider for the freshest
-      // token — guards against "tab was asleep when Supabase rotated
-      // our access_token and now the WS upgrade keeps 401-ing". The
-      // refresher is allowed to return null (user signed out
-      // mid-retry); in that case we abandon the reconnect chain
-      // entirely until open() is called again with a new token.
+      // After the first failure, refresh the token (guards against the tab
+      // sleeping past a Supabase rotation). A null result means signed out
+      // mid-retry — abandon the chain until open() is called again.
       if (attempt > 0 && this.refreshAuth) {
         try {
           const fresh = await this.refreshAuth();
@@ -201,9 +175,7 @@ class UserSocket {
           }
           this.accessToken = fresh;
         } catch {
-          // Refresh failed (network, IdP down). Try connecting with
-          // whatever token we have; if it's also bad, the next
-          // reconnect will refresh again.
+          // Refresh failed; try the existing token, refresh again next time.
         }
       }
       this.connect();

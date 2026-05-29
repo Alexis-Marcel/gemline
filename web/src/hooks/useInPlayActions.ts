@@ -11,25 +11,16 @@ interface Credentials {
 interface UseInPlayActionsOpts {
   gameId: string;
   creds: Credentials | null;
-  /** Called with the updated Game DTO returned by each successful action.
-   *  The parent typically pipes it into `setLocalGame` so the UI updates
-   *  optimistically while the WS state event catches up. */
+  /** Updated DTO from each successful action; fed back optimistically while
+   *  the WS state event catches up. */
   onGame: (g: Game) => void;
-  /** Called with a user-facing message on failure. Null clears the error. */
+  /** User-facing failure message; null clears the error. */
   onError: (msg: string | null) => void;
 }
 
-/**
- * useInPlayActions bundles the four buttons available to a seated player
- * during a playing game: forfait (resign), propose / accept / decline draw.
- * They share the same shape — POST with the seat token, surface the new
- * DTO, translate ApiError to a localized message — so wrapping them in a
- * single hook keeps the page wiring layer thin.
- *
- * Each handler short-circuits without creds (a spectator clicking should
- * be impossible from the rendered UI anyway, but defensive). handleResign
- * pops a window.confirm before the request; the rest are immediate.
- */
+// Bundles the seated-player in-play actions (resign + offer/accept/decline
+// draw), which share the POST-token / surface-DTO / translate-error shape.
+// handleResign confirms first; the rest are immediate.
 export function useInPlayActions({ gameId, creds, onGame, onError }: UseInPlayActionsOpts) {
   const handleResign = useCallback(async () => {
     if (!creds) return;

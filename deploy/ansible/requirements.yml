@@ -1,21 +1,9 @@
-# Collections Ansible utilisées par les playbooks. Installées en local
-# (sur ton laptop, pas sur les VMs) via :
-#
-#   ansible-galaxy collection install -r requirements.yml
-#
-# Versionnées explicitement pour qu'un futur "ça marche sur ma machine
-# pas sur la tienne" devienne impossible — l'équivalent d'un go.mod ou
-# d'un package.json pour Ansible.
+# Install with: ansible-galaxy collection install -r requirements.yml
 
 collections:
-  # kubernetes.core : modules natifs pour parler à l'API K8s (k8s,
-  # k8s_info, helm, helm_repository...). Bien plus propre que de
-  # shell out vers kubectl.
-  # Doc : https://docs.ansible.com/ansible/latest/collections/kubernetes/core/
+  # K8s API modules (k8s, k8s_info, helm) instead of shelling out to kubectl.
   - name: kubernetes.core
     version: ">=3.0.0"
 
-  # community.general : utilitaires divers (modules, callbacks, lookup
-  # plugins). On en aura besoin pour des trucs annexes plus tard.
   - name: community.general
     version: ">=8.0.0"

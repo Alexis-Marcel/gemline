@@ -10,12 +10,7 @@ interface DrawOfferAndActionsProps {
   onResign: () => void;
 }
 
-/**
- * DrawOfferAndActions renders the per-seat action area while a game is in
- * play: forfait + nul-related buttons, plus the offer banner when one is
- * pending. Multi-player games drop the draw controls entirely since draws
- * are only supported in 2-player (Store.OfferDraw rejects N≠2).
- */
+// Draw controls only show for 2-player games; the server rejects draws for N≠2.
 export function DrawOfferAndActions({
   game,
   mySeatIndex,

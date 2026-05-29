@@ -9,52 +9,20 @@ export interface BottomBarMenuItem {
 }
 
 interface GameBottomBarProps {
-  /** Number of moves played — when 0, the replay-nav block hides. */
   totalMoves: number;
-  /** Currently displayed step (0..totalMoves). Equal to totalMoves when
-   *  the user is on the live board; less when stepping through history. */
   step: number;
-  /** True while the user is in replay mode (i.e. the board renders a
-   *  past step rather than live state). */
   inReplay: boolean;
-  /** Called with the new step on ◀ / ▶ taps. The host owns the live →
-   *  replay transition: tapping ◀ on a live game opens replay at the
-   *  last step (totalMoves), then subsequent taps decrement. */
   onStep: (step: number) => void;
-  /** Asynchronous "enter replay" hook for the live → replay transition.
-   *  Tapping ◀ when not yet in replay calls this; subsequent ◀ taps go
-   *  through onStep. The bar waits for openReplay to finish before
-   *  considering the move applied. */
+  // Async live -> replay transition; subsequent ◀ taps go through onStep.
   openReplay: () => void;
-  /** Called when the user taps the live/exit button to leave replay
-   *  mode. No-op when not in replay. */
   exitReplay: () => void;
-  /** Called when the chat icon is tapped. The chat surface itself
-   *  (ChatDrawer on mobile, inline panel on desktop) is owned by the
-   *  parent. */
   onOpenChat: () => void;
-  /** Menu items rendered behind the ⋯ kebab. Empty array → kebab still
-   *  renders but disabled (gives the bar a stable layout). */
+  // Empty array still renders the kebab (disabled) for stable layout.
   menuItems: BottomBarMenuItem[];
 }
 
-/**
- * GameBottomBar is the fixed action toolbar at the bottom of the
- * GamePage. Three regions:
- *
- *    [💬]            [◀  N / M  ▶]                       [⋯]
- *
- *   left  : chat trigger (always)
- *   centre: replay navigation (only when there are moves to step through)
- *   right : kebab menu — the catch-all for "everything else" — propose
- *           draw, resign, start the game, leave, rules. The menu items
- *           are passed in so each game state can dictate what shows up
- *           without the bar having to know about game logic.
- *
- * Pinned to the bottom of the viewport via `fixed`, with the iOS safe-
- * area inset baked into the bottom padding so the home-indicator strip
- * doesn't crowd the controls.
- */
+// iOS safe-area inset is baked into the bottom padding so the home-indicator
+// strip doesn't crowd the controls.
 export function GameBottomBar({
   totalMoves,
   step,
@@ -68,7 +36,7 @@ export function GameBottomBar({
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Close on Escape / outside click. Mirrors the GameMenu pattern.
+  // Close on Escape / outside click.
   useEffect(() => {
     if (!menuOpen) return;
     const onKey = (e: KeyboardEvent) => {
@@ -90,7 +58,6 @@ export function GameBottomBar({
 
   return (
     <nav className="fixed inset-x-0 bottom-0 z-30 flex items-center justify-between gap-2 border-t border-zinc-800 bg-zinc-950/95 px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] backdrop-blur">
-      {/* Left: chat */}
       <button
         type="button"
         onClick={onOpenChat}
@@ -100,9 +67,7 @@ export function GameBottomBar({
         💬
       </button>
 
-      {/* Centre: replay nav. Hidden when there are no moves yet; the
-         spacer keeps the kebab anchored to the right via
-         justify-between. */}
+      {/* Spacer keeps the kebab right-anchored when replay nav is hidden. */}
       {hasReplay ? (
         <ReplayNav
           totalMoves={totalMoves}
@@ -116,7 +81,6 @@ export function GameBottomBar({
         <div />
       )}
 
-      {/* Right: kebab */}
       <div ref={menuRef} className="relative">
         <button
           type="button"

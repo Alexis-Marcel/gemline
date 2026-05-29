@@ -1,17 +1,13 @@
 package game
 
-// DetectCaptures returns every capture triggered by `by` placing a stone at
-// `from`. A capture is the pattern [by][victim][victim][by] on one of the
-// four axes, with both victim cells sharing the same non-by color.
-//
-// The just-placed stone must be one of the two flankers — only patterns that
-// `from` directly closes are considered. As a corollary, "suicide" placements
-// (filling the middle of an opponent sandwich) do not capture the placer:
-// the algorithm scans for `by` flankers, not `by` victims.
+// DetectCaptures returns every capture from `by` placing a stone at `from`.
+// A capture is the pattern [by][victim][victim][by] along an axis, both victims
+// the same non-by color. `from` must be one of the flankers, so suicide moves
+// (filling the middle of an opponent sandwich) never self-capture.
 func DetectCaptures(b *Board, from Position, by Color) []Capture {
 	var out []Capture
 	for _, d := range directions {
-		// `from` can play either role of the [by][_][_][by] flankers.
+		// `from` can play either flanker role.
 		if c, ok := tryCapture(b, from, d, by); ok {
 			out = append(out, c)
 		}
@@ -41,8 +37,6 @@ func tryCapture(b *Board, p1, d Position, by Color) (Capture, bool) {
 	return Capture{Capturer: by, Victim: v, Pair: [2]Position{p2, p3}}, true
 }
 
-// HasRun reports whether any maximal run of `color` is at least `minLen`
-// cells long.
 func HasRun(b *Board, color Color, minLen int) bool {
 	found := false
 	forEachMaximalRun(b, color, func(length int) bool {
@@ -55,10 +49,8 @@ func HasRun(b *Board, color Color, minLen int) bool {
 	return found
 }
 
-// CountMaximalRuns returns the number of maximal runs of `color` whose length
-// is exactly `length`. A maximal run is a straight unbroken segment of
-// `color` that cannot be extended on either end (the cell before is off-board
-// or holds a different color, same for the cell after).
+// CountMaximalRuns counts maximal runs of `color` of exactly `length`. A
+// maximal run is a straight segment that can't be extended at either end.
 func CountMaximalRuns(b *Board, color Color, length int) int {
 	n := 0
 	forEachMaximalRun(b, color, func(l int) bool {
@@ -70,8 +62,8 @@ func CountMaximalRuns(b *Board, color Color, length int) int {
 	return n
 }
 
-// forEachMaximalRun walks every maximal run of `color` exactly once and
-// invokes `fn` with its length. Returning false from `fn` stops iteration.
+// forEachMaximalRun visits every maximal run of `color` once, passing its
+// length to fn; returning false from fn stops iteration.
 func forEachMaximalRun(b *Board, color Color, fn func(length int) bool) {
 	r := b.Side - 1
 	for q := -r; q <= r; q++ {

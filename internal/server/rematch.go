@@ -1,9 +1,6 @@
 package server
 
-// Rematch flow — the chess.com-style "propose, accept, spawn the
-// follow-up game" state machine. Pulled out of store.go for the same
-// reason as draw.go: it's a self-contained domain concept with its own
-// types (RematchSeat) and helpers (neededRematchSeats, etc.).
+// Rematch flow: propose / accept, then spawn the follow-up game.
 
 import (
 	"context"
@@ -49,20 +46,11 @@ func rematchOfferComplete(rec *GameRecord) bool {
 	return true
 }
 
-// OfferRematch records that the seat behind `token` accepts a rematch on a
-// finished game. If no offer is active yet, this call creates one (with bot
-// seats pre-accepted) and marks the caller as the first acceptor. Subsequent
-// calls add their seat to the acceptance set. When every needed human seat
-// has accepted, the new game is created via Rematch and rec.RematchGameID
-// gets set — clients see that on the next state event and navigate over.
-//
-// When the accept call triggers creation, the returned []RematchSeat
-// carries fresh tokens for every authed human pre-seated in the new game.
-// The caller publishes them via the lobby so each player picks up their
-// rematch credentials without an explicit re-join. Nil on every other
-// path (first/intermediate acceptance, race-loss, already-created offer).
-//
-// Idempotent: a player who has already accepted gets a no-op success.
+// OfferRematch records the token's seat accepting a rematch, creating the offer
+// (bots pre-accepted) on the first call. When every human seat has accepted it
+// creates the new game and sets rec.RematchGameID. On that final call it returns
+// fresh seat tokens for the pre-seated authed humans (nil otherwise) for the
+// caller to push via the lobby. Idempotent for a seat that already accepted.
 func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRecord, []RematchSeat, error) {
 	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
@@ -89,27 +77,20 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 	}
 	rec.RematchOffer.AcceptedSeats[seat.Index] = true
 	complete := rematchOfferComplete(rec)
-	// Snapshot the offer for persistence while we still hold the lock.
-	// Multi-pod safety: without this write the second player's
-	// acceptance on a different pod would land on a cache-miss reload
-	// of the game and create a fresh offer with only their seat.
+	// Persist the offer (under the lock): without it, a second acceptor on
+	// another pod would reload a fresh offer with only their seat.
 	offerBlob, _ := json.Marshal(rec.RematchOffer)
 	rec.Unlock()
 
 	if err := s.repo.SaveRematchOffer(ctx, gameID, offerBlob); err != nil {
-		// Best-effort: log via the listener path is overkill, and the
-		// caller will get a fresh state via WS anyway. Surface up so
-		// the HTTP response is consistent.
 		return rec, nil, err
 	}
 
 	if !complete {
 		return rec, nil, nil
 	}
-	// Unanimous acceptance — create the rematch game. Rematch() does its own
-	// locking + race handling against parallel callers, so we drop rec.Lock
-	// before calling. On success the link is committed both in the repo and on
-	// rec.RematchGameID. Clear the now-moot offer state in memory + DB.
+	// Unanimous — create the rematch game. Rematch() does its own locking and
+	// race handling, so call it without rec.Lock, then clear the moot offer.
 	_, authedSeats, err := s.Rematch(ctx, gameID)
 	if err != nil {
 		return rec, nil, err
@@ -121,10 +102,8 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 	return rec, authedSeats, nil
 }
 
-// DeclineRematch clears any pending rematch offer on a finished game. Either
-// the proposer (withdrawing) or any invited acceptor (refusing) may call it —
-// we don't distinguish them, the outcome is the same: the offer disappears
-// and everyone returns to the "propose rematch" state.
+// DeclineRematch clears a pending offer on a finished game — withdraw or refuse,
+// same outcome.
 func (s *Store) DeclineRematch(ctx context.Context, gameID, token string) (*GameRecord, error) {
 	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
@@ -146,17 +125,13 @@ func (s *Store) DeclineRematch(ctx context.Context, gameID, token string) (*Game
 	}
 	rec.RematchOffer = nil
 	rec.Unlock()
-	// Clear in DB so other pods don't resurrect the offer on their
-	// next reload.
+	// Clear in DB so other pods don't resurrect the offer on reload.
 	_ = s.repo.SaveRematchOffer(ctx, gameID, nil)
 	return rec, nil
 }
 
-// RematchSeat carries the per-seat credentials issued to an authenticated
-// human pre-seated in a freshly-created rematch game. The server pushes
-// these via lobby `rematch_ready` events so each pre-seated user gets a
-// usable token without an extra join call; the plaintext Token never
-
+// RematchSeat carries the fresh credentials for an authed human pre-seated in a
+// new rematch game, pushed via lobby `rematch_ready` events.
 type RematchSeat struct {
 	SeatIndex int
 	UserID    string
@@ -164,21 +139,11 @@ type RematchSeat struct {
 	Token     string
 }
 
-// Rematch creates a fresh game with the same player count, config and
-// visibility as `originalID`, pre-seats the bots + authenticated humans
-// who were in the original, and links the two via rematch_game_id. The
-// operation is idempotent: a second caller after the link is set is sent
-// to the same rematch game. The original game must be finished.
-//
-// The returned RematchSeat slice carries per-user tokens for any
-// authenticated humans we pre-seated; the caller is responsible for
-// pushing them via the lobby so the clients can pick up the new game
-// without re-joining. On a race-loss, the slice is empty — the pod that
-// won has already published its own tokens.
-//
-// Anonymous players are deliberately not pre-seated: we have no way to
-// deliver them a fresh token, so they re-join the rematch through the
-// normal POST /api/games/{id}/join path (auto-join handles it client-side).
+// Rematch creates a fresh game mirroring originalID (player count, config,
+// visibility), pre-seats the original's bots + authed humans, and links the two
+// via rematch_game_id. Idempotent: a later caller is sent to the same game.
+// Returns fresh tokens for pre-seated authed humans (empty on a race-loss).
+// Anonymous players aren't pre-seated — they re-join via the normal join path.
 func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []RematchSeat, error) {
 	orig, ok, err := s.Get(ctx, originalID)
 	if err != nil {
@@ -217,19 +182,10 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []
 	origSeats := append([]Seat(nil), orig.Seats...)
 	orig.Unlock()
 
-	// Build the new game using the same shape as Create. We don't call Create
-	// directly because we want to atomically write the rematch_game_id link on
-	// the original game alongside the new game's row. Carry the original
-	// game's clock settings through ConfigFor so a rematch inherits the prior
-	// time control (rules are at the rematch's player count, clock is the
-	// same as last time).
-	//
-	// Mirror the original seating: bots come back at the same seats (we own
-	// their tokens, no delivery needed), authed humans come back with fresh
-	// tokens that get pushed via the lobby, and anon humans are left empty
-	// (no way to hand them a token). If every seat ends up occupied, the
-	// game starts in `playing` straight away — no SearchingForOpponent flash
-	// on the public 1v1 rematch path.
+	// Build the new game inline (not via Create) so we can write the
+	// rematch_game_id link atomically. Mirror the original seating: bots and
+	// authed humans return (authed humans get fresh tokens pushed via the
+	// lobby), anon humans are left empty. All-occupied starts in `playing`.
 	colors := make([]game.Color, numPlayers)
 	seats := make([]Seat, numPlayers)
 	var authedSeats []RematchSeat
@@ -332,9 +288,3 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []
 	}
 	return rec, authedSeats, nil
 }
-
-// getOrNotFound is a small convenience wrapper over Get that folds the
-// "not found" boolean into ErrGameNotFound. Every mutation handler in
-// this file used to inline the same three-line dance; this returns
-// a single value pair that's hard to misuse — you can't forget the
-// not-found check.

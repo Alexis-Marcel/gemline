@@ -12,27 +12,12 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWT-based user auth is layered on top of (and orthogonal to) the per-seat
-// token. The seat token authorizes "this client controls seat X in game Y"
-// and travels in the X-Player-Token header. A Supabase JWT authorizes "this
-// client is user U" and travels in Authorization: Bearer <jwt>.
-//
-// Both can be present simultaneously: an authenticated user playing a seat
-// they claimed will send both headers on every move.
-//
-// Verification uses Supabase's JWT Signing Keys (asymmetric ES256/RS256).
-// The keyfunc library fetches the JWKS from
-// <SUPABASE_URL>/auth/v1/.well-known/jwks.json, caches it, and refreshes
-// on key rotation in the background.
+// Two orthogonal tokens: a per-seat token in X-Player-Token authorizes
+// "controls seat X in game Y"; a Supabase JWT in Authorization: Bearer
+// authorizes "is user U". Both can travel on the same request.
 
 type userCtxKey struct{}
 
-// AuthUser is what the JWT middleware attaches to the request context for
-// authenticated requests. It holds what the JWT claims expose about the
-// caller: the Supabase user UUID, the email, and the display name they
-// chose at signup (lifted from user_metadata.display_name). The display
-// name is the first-visit fallback for displayNameFor — once the user
-// has a row in our `profiles` table that takes precedence.
 type AuthUser struct {
 	ID          string
 	Email       string
@@ -44,11 +29,6 @@ func userFromContext(ctx context.Context) (*AuthUser, bool) {
 	return v, ok
 }
 
-// supabaseClaims models the subset of the Supabase JWT we care about.
-// UserMetadata mirrors the `user_metadata` object Supabase serialises
-// from the auth.users row; we only read `display_name` from it (set
-// at signup via auth.signUp({ options: { data: { display_name } } }))
-// but keep the field shape open so future fields are easy to lift.
 type supabaseClaims struct {
 	Email        string                 `json:"email,omitempty"`
 	Role         string                 `json:"role,omitempty"`
@@ -56,10 +36,6 @@ type supabaseClaims struct {
 	jwt.RegisteredClaims
 }
 
-// displayNameFromMetadata extracts a non-empty trimmed `display_name`
-// from Supabase's user_metadata map. Returns "" when missing, non-
-// string, or whitespace-only — callers fall through to their own
-// fallback chain.
 func displayNameFromMetadata(md map[string]interface{}) string {
 	if md == nil {
 		return ""
@@ -75,9 +51,6 @@ func displayNameFromMetadata(md map[string]interface{}) string {
 	return strings.TrimSpace(str)
 }
 
-// jwksKeyfunc returns a Keyfunc that validates tokens against the JWKS
-// published by Supabase. Pass the project URL (e.g. https://<id>.supabase.co);
-// the JWKS path is appended automatically.
 func jwksKeyfunc(supabaseURL string) (jwt.Keyfunc, error) {
 	jwksURL := strings.TrimRight(supabaseURL, "/") + "/auth/v1/.well-known/jwks.json"
 	kf, err := keyfunc.NewDefault([]string{jwksURL})
@@ -87,9 +60,6 @@ func jwksKeyfunc(supabaseURL string) (jwt.Keyfunc, error) {
 	return kf.Keyfunc, nil
 }
 
-// parseSupabaseJWT verifies the token using `verifier` and returns the
-// claims. Anonymous (unauthenticated) callers should not invoke this —
-// they simply skip the auth step.
 func parseSupabaseJWT(token string, verifier jwt.Keyfunc) (*supabaseClaims, error) {
 	if verifier == nil {
 		return nil, errors.New("JWT verifier not configured")
@@ -108,19 +78,16 @@ func parseSupabaseJWT(token string, verifier jwt.Keyfunc) (*supabaseClaims, erro
 	return claims, nil
 }
 
-// jwtMiddleware decodes the Authorization bearer (if any) and stores the
-// resulting AuthUser in the request context. It NEVER rejects the request
-// on missing/invalid JWT — endpoints that require auth check the context
-// themselves via requireUser. This way public endpoints (game CRUD,
-// anonymous join) keep working without a token.
+// jwtMiddleware attaches an AuthUser when a valid bearer is present but never
+// rejects: bad/missing tokens fall through as anonymous so public endpoints
+// keep working. Endpoints that need a user call requireUser.
 func jwtMiddleware(verifier jwt.Keyfunc, log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := authorizationBearer(r)
 		if token == "" || verifier == nil {
-			// Hermetic-test back door: when auth is disabled (no SUPABASE_URL),
-			// honour an X-Test-User-ID header so server tests can exercise
-			// auth-requiring endpoints without standing up a real IdP. In
-			// production the verifier is non-nil so this code never runs.
+			// Test back door: with auth disabled, honour X-Test-User-ID so
+			// server tests can hit auth-requiring endpoints. verifier is
+			// non-nil in production, so this never runs there.
 			if verifier == nil {
 				if id := r.Header.Get("X-Test-User-ID"); id != "" {
 					ctx := context.WithValue(r.Context(), userCtxKey{}, &AuthUser{
@@ -136,11 +103,6 @@ func jwtMiddleware(verifier jwt.Keyfunc, log *slog.Logger, next http.Handler) ht
 		}
 		claims, err := parseSupabaseJWT(token, verifier)
 		if err != nil {
-			// Bad/expired token: behave as if anonymous rather than 401-ing
-			// every public endpoint. Endpoints that need a user surface their
-			// own 401 via requireUser. Log at Debug so it's silent in
-			// normal operation but visible when a user reports "I'm signed
-			// in but I keep getting 401s" — usually a refresh-token issue.
 			if log != nil {
 				log.Debug("jwt rejected", "err", err, "path", r.URL.Path)
 			}
@@ -156,7 +118,6 @@ func jwtMiddleware(verifier jwt.Keyfunc, log *slog.Logger, next http.Handler) ht
 	})
 }
 
-// requireUser returns the authenticated user or writes a 401 and returns nil.
 func requireUser(w http.ResponseWriter, r *http.Request) *AuthUser {
 	u, ok := userFromContext(r.Context())
 	if !ok {
@@ -166,12 +127,8 @@ func requireUser(w http.ResponseWriter, r *http.Request) *AuthUser {
 	return u
 }
 
-// authorizationBearer extracts a JWT from the Authorization header.
-// Falls back to ?access_token= for the WebSocket upgrade case, where
-// browsers can't set custom headers on the upgrade request — the lobby
-// WS in particular requires auth and has no other way to surface the
-// caller's identity. Seat-level tokens travel in X-Player-Token; do
-// not look there.
+// authorizationBearer reads the JWT from Authorization, falling back to
+// ?access_token= for WebSocket upgrades (browsers can't set headers there).
 func authorizationBearer(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(h, "Bearer ") {
@@ -180,8 +137,8 @@ func authorizationBearer(r *http.Request) string {
 	return r.URL.Query().Get("access_token")
 }
 
-// playerToken extracts a seat-level token. Falls back to a query param for
-// the WebSocket upgrade case where setting headers is awkward.
+// playerToken reads the seat token from X-Player-Token, falling back to
+// ?token= for WebSocket upgrades.
 func playerToken(r *http.Request) string {
 	if t := r.Header.Get("X-Player-Token"); t != "" {
 		return t

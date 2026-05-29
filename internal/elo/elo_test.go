@@ -15,8 +15,7 @@ func TestExpected_HigherIsMoreThanHalf(t *testing.T) {
 }
 
 func TestUpdate_EqualRatingsWin(t *testing.T) {
-	// Two players at 1500, the winner gains exactly +K/2 = +16 and the loser
-	// drops by the same amount.
+	// At equal ratings the winner gains exactly K/2 = 16, the loser drops 16.
 	winner := Update(1500, 1500, Win)
 	loser := Update(1500, 1500, Loss)
 	if winner != 1516 || loser != 1484 {
@@ -31,9 +30,8 @@ func TestUpdate_EqualRatingsDraw(t *testing.T) {
 }
 
 func TestUpdate_UpsetGainsMore(t *testing.T) {
-	// An 1100-rated player beating a 1700-rated player should gain a *lot*
-	// of points — the expected score for the underdog is very low so the
-	// (1 - expected) term dominates.
+	// An underdog (low expected score) gains a lot from beating a favourite,
+	// but never more than K.
 	gain := Update(1100, 1700, Win) - 1100
 	if gain <= K/2 {
 		t.Fatalf("upset win should gain more than K/2=%d points, got +%d", K/2, gain)
@@ -44,8 +42,7 @@ func TestUpdate_UpsetGainsMore(t *testing.T) {
 }
 
 func TestUpdate_FavoriteLossIsExpensive(t *testing.T) {
-	// Symmetrically, the favourite who loses to an underdog drops by the
-	// same amount the underdog gained.
+	// The favourite's loss must equal the underdog's gain (zero-sum).
 	winnerGain := Update(1100, 1700, Win) - 1100
 	loserLoss := 1700 - Update(1700, 1100, Loss)
 	if winnerGain != loserLoss {
@@ -54,17 +51,16 @@ func TestUpdate_FavoriteLossIsExpensive(t *testing.T) {
 }
 
 func TestUpdateMulti_ZeroSum(t *testing.T) {
-	// Whatever the winner gains, the table loses exactly the same — no
-	// inflation, no deflation of the Elo pool from a single multi game.
+	// The winner's gain must exactly equal the table's total loss.
 	cases := []struct {
-		winner   int
-		opps     []int
+		winner int
+		opps   []int
 	}{
-		{1500, []int{1500, 1500, 1500}},        // even table
-		{1800, []int{1200, 1400, 1600}},        // strong winner
-		{1100, []int{1700, 1700, 1700}},        // huge upset
-		{1500, []int{1500, 1500}},              // 3-player game
-		{1400, []int{1300, 1500, 1700, 1200}},  // 5 players
+		{1500, []int{1500, 1500, 1500}},       // even table
+		{1800, []int{1200, 1400, 1600}},       // strong winner
+		{1100, []int{1700, 1700, 1700}},       // huge upset
+		{1500, []int{1500, 1500}},             // 3-player game
+		{1400, []int{1300, 1500, 1700, 1200}}, // 5 players
 	}
 	for _, c := range cases {
 		oppIDs := make([]string, len(c.opps))
@@ -90,7 +86,6 @@ func TestUpdateMulti_ZeroSum(t *testing.T) {
 }
 
 func TestUpdateMulti_WinnerGainsAgainstStrongerField(t *testing.T) {
-	// 1100 winner vs three 1700s: winner gains more than against equals.
 	results := UpdateMulti("w", 1100, []string{"a", "b", "c"}, []int{1700, 1700, 1700})
 	winnerGain := results[0].NewRating - 1100
 	if winnerGain <= K/2 {
@@ -99,8 +94,7 @@ func TestUpdateMulti_WinnerGainsAgainstStrongerField(t *testing.T) {
 }
 
 func TestUpdate_ZeroSum(t *testing.T) {
-	// For arbitrary inputs, the swap of points between players must net to
-	// zero (a defining property of Elo).
+	// Points swapped between two players must net to zero.
 	cases := []struct{ a, b int }{
 		{1200, 1200},
 		{1400, 1300},

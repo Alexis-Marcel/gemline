@@ -20,11 +20,19 @@ Each player has a colored stock of 50 gems. On your turn you place one gem on an
 
 ## Status
 
-The full vertical slice works end-to-end: a React frontend in `web/` lets two browsers join the same game and play in real time, the Go backend persists every move to Postgres so games survive a restart, signed-in users get profiles + history + stats, and the engine itself is covered by tests (99.3% on `internal/game`).
+The full vertical slice works end-to-end: a React frontend in `web/` lets browsers join the same game and play in real time, the Go backend persists every move to Postgres so games survive a restart, signed-in users get profiles + history + Elo, and the engine itself is covered by tests (99.3% on `internal/game`). The backend is horizontally scalable — multiple replicas share live events through a Postgres `LISTEN/NOTIFY` backplane.
 
-**Works:** game creation, token-gated joining (anonymous *or* authenticated), turn enforcement, captures, alignments, win detection, WebSocket broadcast with auto-reconnect, persistence to Postgres with full state replay on load, Supabase email/password auth, per-user history and aggregate stats.
+**Works:**
 
-**Not yet:** AI opponents, rate limiting, multi-instance deployment (the WebSocket hub is per-process — a second backend instance wouldn't share broadcasts without pub/sub).
+- **Play** — game creation, token-gated joining (anonymous *or* authenticated), turn enforcement, captures, alignments, win detection for 2–6 players.
+- **Real time** — WebSocket broadcast with auto-reconnect and event catch-up (`/events?since=`), live presence badges, per-player clocks, resign and draw offers.
+- **Matchmaking** — async queue for 1v1 and 3–6-player games with live count + ETA, Elo rating, and a global leaderboard.
+- **Social** — cross-page game invitations (with toast + notification chime), unanimous rematch, in-game chat.
+- **Bots** — heuristic AI opponents (`internal/ai`) that can fill seats in private games.
+- **Accounts** — Supabase email/password auth, public profiles, per-user history and aggregate stats.
+- **Persistence & scale** — every move stored in Postgres with full state replay on load; multi-replica backend via the Postgres backplane (cross-pod event fan-out + cache invalidation).
+
+**Not yet:** rate limiting.
 
 ## Getting started
 
@@ -53,21 +61,25 @@ cd web && npm install && npm run dev
 
 The frontend serves on `:5173` and proxies `/api` and `/ws` to the backend on `:8080`. Visit `http://localhost:5173` to play.
 
-Both `DATABASE_URL` and the auth variables are optional — if unset, games stay in memory and `/api/auth/*` returns 401, but anonymous play still works. The backend reads its environment from a `.env` (and optional `.env.local` override) at the repo root in addition to the shell, so you can `cp .env.example .env` once and forget about it. For an offline-friendly dev loop without Supabase, `docker compose up -d` brings up a local Postgres on `localhost:5432` with credentials `gemline / gemline`.
+Both `DATABASE_URL` and the auth variables are optional — if unset, games stay in memory and `/api/auth/*` returns 401, but anonymous play still works. A third optional variable, `ALLOWED_ORIGINS` (comma-separated), locks down CORS and the WebSocket origin check; leave it empty in dev (permissive `*`), set it to your frontend origin(s) in production. The backend reads its environment from a `.env` (and optional `.env.local` override) at the repo root in addition to the shell, so you can `cp .env.example .env` once and forget about it. For an offline-friendly dev loop without Supabase, `docker compose up -d` brings up a local Postgres on `localhost:5432` with credentials `gemline / gemline`.
 
 ### Quick smoke test against the API
 
 ```sh
-GAME=$(curl -s -X POST localhost:8080/api/games \
-  -H 'Content-Type: application/json' -d '{"players":2}' | jq -r .id)
+# Create a private 2-player game. The creator is auto-seated and gets a
+# seat token back, so the response is a {game, seat, token} envelope.
+CREATE=$(curl -s -X POST localhost:8080/api/games \
+  -H 'Content-Type: application/json' -d '{"players":2,"name":"Alice"}')
+GAME=$(echo "$CREATE" | jq -r .game.id)
+TOK_A=$(echo "$CREATE" | jq -r .token)
 
-TOK_A=$(curl -s -X POST localhost:8080/api/games/$GAME/join \
-  -H 'Content-Type: application/json' -d '{"name":"Alice"}' | jq -r .token)
+# Bob claims the remaining seat — the game flips to "playing".
 TOK_B=$(curl -s -X POST localhost:8080/api/games/$GAME/join \
   -H 'Content-Type: application/json' -d '{"name":"Bob"}' | jq -r .token)
 
+# Alice plays the center intersection. The seat token goes in X-Player-Token.
 curl -s -X POST localhost:8080/api/games/$GAME/moves \
-  -H "Authorization: Bearer $TOK_A" \
+  -H "X-Player-Token: $TOK_A" \
   -H 'Content-Type: application/json' -d '{"q":0,"r":0}'
 ```
 
@@ -78,18 +90,57 @@ Two parallel auth tokens travel on requests:
 - **`Authorization: Bearer <JWT>`** — Supabase-issued user JWT. Identifies *who* the client is. Optional on game endpoints (anonymous play is allowed) and required on `/api/auth/*`, `/api/profile`, `/api/users/me/*`.
 - **`X-Player-Token: <seat-token>`** — per-seat secret returned once by `/join`. Identifies *which seat* in *which game* the client controls. Required on `/api/games/{id}/moves`.
 
-| Method | Path                                | Auth                 | Purpose                                 |
-| ------ | ----------------------------------- | -------------------- | --------------------------------------- |
-| POST   | `/api/games`                        | optional JWT         | Create a game                           |
-| POST   | `/api/games/{id}/join`              | optional JWT         | Claim a seat (linked to user if signed in) |
-| POST   | `/api/games/{id}/moves`             | seat token + JWT     | Play a stone                            |
-| GET    | `/api/games/{id}`                   |                      | Snapshot of the game state              |
-| GET    | `/ws/games/{id}`                    |                      | Live event stream                       |
-| GET    | `/api/auth/me`                      | JWT required         | Authenticated user's profile            |
-| PUT    | `/api/profile`                      | JWT required         | Update display name                     |
-| GET    | `/api/users/me/games`               | JWT required         | Caller's game history                   |
-| GET    | `/api/users/me/stats`               | JWT required         | Caller's aggregate stats                |
-| GET    | `/healthz`, `/readyz`               |                      | Health checks                           |
+**Games & seats**
+
+| Method | Path                                         | Auth          | Purpose                                       |
+| ------ | -------------------------------------------- | ------------- | --------------------------------------------- |
+| POST   | `/api/games`                                 | optional JWT  | Create a private game (auto-joins the caller) |
+| GET    | `/api/games/{id}`                            |               | Snapshot of the game state                    |
+| POST   | `/api/games/{id}/join`                       | optional JWT  | Claim a seat (linked to user if signed in)    |
+| POST   | `/api/games/{id}/leave`                      | seat token    | Vacate a seat in a waiting game               |
+| POST   | `/api/games/{id}/start`                      | seat token    | Start a private game (fills empties with bots)|
+| POST   | `/api/games/{id}/moves`                      | seat token    | Play a stone                                  |
+| POST   | `/api/games/{id}/resign`                     | seat token    | Resign                                        |
+| POST   | `/api/games/{id}/draw/{offer,accept,decline}`| seat token    | Draw offer lifecycle                          |
+| POST   | `/api/games/{id}/rematch/{offer,decline}`    | seat token    | Unanimous rematch lifecycle                   |
+| POST   | `/api/games/{id}/seats/{idx}/bot`            |               | Add a bot to a seat (private waiting game)    |
+| DELETE | `/api/games/{id}/seats/{idx}/bot`            |               | Remove a bot from a seat                      |
+| POST   | `/api/games/{id}/seats/{idx}/invite`         | optional JWT  | Reserve a seat for a named user               |
+| DELETE | `/api/games/{id}/seats/{idx}/invite`         |               | Cancel a pending seat invitation              |
+| POST   | `/api/games/{id}/seats/{idx}/invite/decline` | JWT required  | Invitee declines an invitation                |
+
+**Real-time & history**
+
+| Method | Path                          | Auth | Purpose                                            |
+| ------ | ----------------------------- | ---- | -------------------------------------------------- |
+| GET    | `/ws/games/{id}`              |      | Live game event stream                             |
+| GET    | `/ws/lobby`                   | JWT  | Per-user lobby stream (invites, match found, rematch) |
+| GET    | `/api/games/{id}/events?since=`|     | Event catch-up after reconnect                     |
+| GET    | `/api/games/{id}/replay`      |      | Ordered move log for replay                        |
+| GET    | `/api/games/{id}/ratings`     |      | Elo snapshot for the game                          |
+| GET    | `/api/games/{id}/messages`    |      | Chat history                                       |
+| POST   | `/api/games/{id}/messages`    | seat token | Post a chat message                          |
+
+**Matchmaking**
+
+| Method | Path                        | Auth         | Purpose                                  |
+| ------ | --------------------------- | ------------ | ---------------------------------------- |
+| POST   | `/api/matchmake/enqueue`    | JWT required | Join the matchmaking queue (1v1 or 3–6)  |
+| DELETE | `/api/matchmake/enqueue`    | JWT required | Leave the queue                          |
+
+**Users, profiles & ops**
+
+| Method | Path                    | Auth         | Purpose                          |
+| ------ | ----------------------- | ------------ | -------------------------------- |
+| GET    | `/api/auth/me`          | JWT required | Authenticated user's profile     |
+| PUT    | `/api/profile`          | JWT required | Update display name              |
+| GET    | `/api/users/me/games`   | JWT required | Caller's game history            |
+| GET    | `/api/users/me/stats`   | JWT required | Caller's aggregate stats         |
+| GET    | `/api/users/search?q=`  | JWT required | Search profiles (for invites)    |
+| GET    | `/api/users/{userId}`   |              | Public profile                   |
+| GET    | `/api/leaderboard`      |              | Global Elo leaderboard           |
+| GET    | `/healthz`, `/readyz`   |              | Health / readiness checks        |
+| GET    | `/metrics`              |              | Prometheus metrics               |
 
 A game starts in `waiting` and transitions to `playing` once every seat is claimed. The WebSocket emits one `state` event on connect, then a `move` event after every placement. The server pings every 25s; the client reconnects with exponential backoff and ±30% jitter.
 
@@ -106,17 +157,23 @@ The `cells` field of the game DTO is a flat array of length `(2·side − 1)² =
 ```
 cmd/server/             backend entrypoint
 internal/game/          pure engine — no I/O, no concurrency
-internal/server/        HTTP + WebSocket layer, in-memory cache, Postgres repo, JWT middleware
-internal/db/            connection helper + embedded goose migrations
+internal/server/        HTTP + WebSocket layer, in-memory cache, Postgres repo,
+                        matchmaking, chat, clocks, presence, bots, JWT middleware
+internal/ai/            heuristic bot move selection
+internal/elo/           Elo rating math
+internal/backplane/     Postgres LISTEN/NOTIFY pub/sub for cross-pod fan-out
+internal/db/            connection pool + embedded goose migrations
 web/                    Vite + React + Tailwind frontend
-  src/api/              wire types, REST client, WebSocket singleton, Supabase client
+  src/api/              wire types, REST client, WebSocket singletons, Supabase client
   src/auth/             AuthProvider + useAuth hook
-  src/components/       Board, Scoreboard, UserNav
-  src/pages/            HomePage, GamePage, LoginPage/SignupPage, ProfilePage
+  src/notifications/    cross-page invitation toasts
+  src/components/       Board, Scoreboard, chat, clocks, rematch, replay, …
+  src/pages/            Home, Game, Login, Profile, PublicProfile, Leaderboard, Matchmaking
 docker-compose.yml      offline-friendly Postgres for local dev
+deploy/                 Terraform + Ansible + ArgoCD + k8s — see DEPLOY.md
 ```
 
-Persistence is event-sourced: the database stores `games`, `seats`, and `moves`. On load, a game's state is rebuilt by replaying its moves through `ApplyMove`, so captures and win states are reproduced by the same rule engine used at play time. There is no separate snapshot; the move log is the source of truth.
+Persistence is event-sourced: a game's state is rebuilt by replaying its `moves` through `ApplyMove`, so captures and win states are reproduced by the same rule engine used at play time. The move log is the source of truth — there is no separate state snapshot. The schema (in `internal/db/migrations/`, applied automatically via goose on startup) also holds `seats`, `profiles`, `ratings` + `rating_history`, `messages` (chat), `matchmake_queue`, and `game_events` (the sequenced WebSocket event log used for reconnect catch-up).
 
 ## Tests
 

@@ -20,26 +20,11 @@ interface UseRematchFlowOpts {
 }
 
 /**
- * useRematchFlow owns the chess.com-style rematch state machine on the
- * client:
- *
- *  - handleOfferRematch posts the propose/accept call (the server
- *    disambiguates). When this caller's accept completes the unanimous
- *    set, the response carries rematchGameId and we navigate immediately.
- *  - handleDeclineRematch withdraws or refuses an offer; the wire shape
- *    is the same for both — the server doesn't care who's clearing.
- *  - handleGoToRematch is the "Aller à la revanche" affordance for
- *    players who weren't the last to accept (they learn about the new
- *    game through the state event broadcast, not their HTTP response).
- *  - The internal effect handles the *other* accepters who learn about
- *    the new game via WS: when game.rematchGameId flips from empty to
- *    set, navigate them over. A ref tracks the previous value so a
- *    fresh page load on a finished game that already has a rematch
- *    doesn't kidnap the viewer — only a genuine transition triggers.
- *
- * `rematching` is true while any of the propose/accept/decline calls is
- * in flight; RematchControls uses it to disable both buttons during the
- * roundtrip.
+ * Rematch state machine. handleOfferRematch posts propose/accept (server
+ * disambiguates); the caller that completes the set gets rematchGameId back
+ * and navigates immediately. The other accepters learn of the new game via
+ * the WS state event and navigate through handleGoToRematch or the effect
+ * below. `rematching` gates the buttons during the roundtrip.
  */
 export function useRematchFlow({ gameId, game, creds, onGame, onError }: UseRematchFlowOpts) {
   const navigate = useNavigate();
@@ -75,9 +60,7 @@ export function useRematchFlow({ gameId, game, creds, onGame, onError }: UseRema
     }
   }, [creds, gameId, onError, onGame]);
 
-  // Pull the optional rematchGameId out of `game` into a local before
-  // the useCallback so the compiler sees a primitive dep (a string |
-  // undefined). The original `game?.rematchGameId` dep tripped the
+  // Pull out a primitive dep — `game?.rematchGameId` directly tripped the
   // React Compiler memoization check.
   const rematchGameId = game?.rematchGameId;
   const handleGoToRematch = useCallback(() => {
@@ -85,11 +68,9 @@ export function useRematchFlow({ gameId, game, creds, onGame, onError }: UseRema
     navigate(`/game/${rematchGameId}`);
   }, [rematchGameId, navigate]);
 
-  // Auto-redirect on the empty → set transition. The two refs together
-  // model "what value did we last observe?", so the *first* render
-  // (where curr is whatever the server already had) is a baseline rather
-  // than a transition — otherwise loading a finished game whose rematch
-  // existed pre-mount would auto-kidnap the viewer.
+  // Auto-redirect on the empty → set transition. The first observation is
+  // a baseline (not a transition) so loading a finished game whose rematch
+  // already existed doesn't auto-kidnap the viewer.
   const lastRematchIdRef = useRef<string | undefined>(undefined);
   const sawRematchRef = useRef(false);
   useEffect(() => {

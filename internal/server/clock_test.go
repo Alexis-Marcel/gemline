@@ -11,8 +11,8 @@ import (
 	"github.com/alexis/gemline/internal/game"
 )
 
-// withTestStore returns a Store wired to a noop repo, with a fast clock
-// callback that captures forfeit notifications without touching the hub.
+// withTestStore returns a Store whose state listener captures the forfeit
+// notification (via wg + the gameID pointer) without touching the hub.
 func withTestStore(t *testing.T) (*Store, *sync.WaitGroup, *string) {
 	t.Helper()
 	store := NewStore(nil)
@@ -27,7 +27,7 @@ func withTestStore(t *testing.T) (*Store, *sync.WaitGroup, *string) {
 }
 
 func TestClock_ForfeitsActivePlayerWhenTimeExpires(t *testing.T) {
-	_ = slog.New(slog.NewTextHandler(io.Discard, nil)) // silence loggers if any
+	_ = slog.New(slog.NewTextHandler(io.Discard, nil))
 	store, wg, notified := withTestStore(t)
 	defer store.Close()
 
@@ -36,7 +36,7 @@ func TestClock_ForfeitsActivePlayerWhenTimeExpires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Override the clock to make the test fast.
+	// Tiny clock so the timer fires in ~80ms.
 	rec.State.Config.InitialTimeMs = 80
 	for i := range rec.State.Players {
 		rec.State.Players[i].TimeRemainingMs = 80
@@ -49,7 +49,6 @@ func TestClock_ForfeitsActivePlayerWhenTimeExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Don't play any move. Wait for the timer to fire (~80ms).
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()

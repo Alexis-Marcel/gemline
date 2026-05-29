@@ -1,14 +1,7 @@
-// Package ai exposes a lightweight bot for computer-controlled players.
-// The engine runs a depth-2 minimax search (with α-β pruning) over the
-// available moves and falls back on a heuristic position scorer at the
-// leaves. The goal is "playable solo practice that won't fall over on
-// obvious one-move-ahead tactics" — not optimal play.
-//
-// Two-ply search means the bot considers: "I play M; opponent plays the
-// best response N; what does the board look like for me?" That's enough
-// to dodge the most embarrassing class of tactical blunder (taking a
-// piece that hands the opponent an immediate win, walking into a fork,
-// etc.) without paying for deeper search.
+// Package ai is a lightweight bot for computer players: a depth-2 α-β minimax
+// over candidate moves with a heuristic leaf scorer. Two plies (my move +
+// opponent's best reply) is enough to dodge obvious one-move tactical blunders
+// without paying for deeper search. The goal is playable practice, not optimal play.
 package ai
 
 import (
@@ -17,9 +10,8 @@ import (
 	"github.com/alexis/gemline/internal/game"
 )
 
-// Engine is the public entry point. Holding state (just a PRNG) keeps the
-// move selection deterministic for tests by injecting a seeded source, while
-// production callers get fresh randomness per construction.
+// Engine is the public entry point. Its seeded PRNG makes move selection
+// deterministic for tests.
 type Engine struct {
 	rng *rand.Rand
 }
@@ -29,35 +21,22 @@ func NewEngine(seed int64) *Engine {
 }
 
 const (
-	// searchDepth = number of plies the bot looks ahead. 1 = only the bot's
-	// own move (the old behaviour). 2 = bot's move + opponent's best reply.
-	// Higher = stronger but slower; 2 is the sweet spot at the heuristic's
-	// current strength.
-	searchDepth = 2
+	searchDepth = 2 // plies looked ahead: bot's move + opponent's best reply
 
 	minScore = -1 << 30
 	winScore = 1_000_000
 
-	// At the root we trim to the top-N by shallowScore so the search is
-	// bounded, but N is intentionally generous. Earlier we tried 18 and
-	// silently discarded tactically critical defensive moves whose
-	// shallowScore is low (blocking the empty end of an opponent's 5-run
-	// doesn't shift CountMaximalRuns, so the static eval undervalues it).
-	// 60 is enough to catch those plus a healthy margin of "junk" moves
-	// that turn out to score well under minimax.
-	//
-	// Opponent's responses (depth 1) still get a smaller cap — the bot
-	// only looks at the K most-plausible replies. Together the two caps
-	// keep depth-2 search well under 100 ms on a mid-game position.
+	// Root candidate cap. Kept generous because shallowScore undervalues
+	// defensive moves (blocking a 5-run's open end doesn't shift
+	// CountMaximalRuns), so a small cap silently dropped critical blocks.
+	// The two caps together keep depth-2 search well under 100 ms mid-game.
 	topCandidatesAtDepth0 = 60
 	topCandidatesAtDepth1 = 20
 )
 
-// BestMove returns the move the engine prefers for `color`, or (zero, false)
-// if there is no legal play (full board, game over, or color isn't on the
-// turn). Callers should verify that `state.CurrentPlayer().Color == color`
-// before invoking — the engine doesn't enforce turn order itself, it just
-// picks the strongest candidate from `color`'s perspective.
+// BestMove returns the engine's preferred move for `color`, or (zero, false)
+// if there is no legal play. It does not enforce turn order; callers should
+// verify state.CurrentPlayer().Color == color.
 func (e *Engine) BestMove(state *game.GameState, color game.Color) (game.Position, bool) {
 	if state.IsOver() {
 		return game.Position{}, false
@@ -77,9 +56,7 @@ func (e *Engine) BestMove(state *game.GameState, color game.Color) (game.Positio
 		if _, err := child.ApplyMove(game.Move{Player: color, Pos: c.pos}, child.TurnStartedAt); err != nil {
 			continue
 		}
-		// Standard negamax: recurse from opponent's perspective then
-		// negate. The child's score is what the opponent thinks of the
-		// position, so -child's-score is what we think of it.
+		// Negamax: negate the opponent's view of the child to get ours.
 		score := -negamax(child, opponentOf(child, color), searchDepth-1, -beta, -alpha)
 		if score > bestScore {
 			bestScore = score
@@ -90,8 +67,8 @@ func (e *Engine) BestMove(state *game.GameState, color game.Color) (game.Positio
 		if score > alpha {
 			alpha = score
 		}
-		// No β cutoff at the root — we want the full set of equally-best
-		// moves so the random tiebreak has a non-trivial pool to pick from.
+		// No β cutoff at the root: keep all equally-best moves so the random
+		// tiebreak has a pool to pick from.
 	}
 	if len(best) == 0 {
 		return game.Position{}, false
@@ -99,9 +76,7 @@ func (e *Engine) BestMove(state *game.GameState, color game.Color) (game.Positio
 	return best[e.rng.Intn(len(best))], true
 }
 
-// negamax returns the position's score from `mover`'s perspective with α-β
-// pruning. Standard recursive form: a child's score (from opponent's POV)
-// is negated to become this side's evaluation of the same node.
+// negamax scores the position from `mover`'s perspective with α-β pruning.
 func negamax(state *game.GameState, mover game.Color, depth, alpha, beta int) int {
 	if state.IsOver() {
 		return terminalScore(state, mover)
@@ -135,9 +110,8 @@ func negamax(state *game.GameState, mover game.Color, depth, alpha, beta int) in
 	return best
 }
 
-// terminalScore is the eval at a game-over leaf. A win for the rooting
-// player is hugely positive; a loss is hugely negative; a draw or multi-
-// player no-winner finish is neutral.
+// terminalScore evaluates a game-over leaf: win positive, loss negative,
+// draw/no-winner neutral.
 func terminalScore(state *game.GameState, perspectiveColor game.Color) int {
 	switch state.Winner {
 	case perspectiveColor:
@@ -149,9 +123,8 @@ func terminalScore(state *game.GameState, perspectiveColor game.Color) int {
 	}
 }
 
-// scorePosition is the static evaluation function: how good is the current
-// board for `perspectiveColor`? Combines (own offensive lines + captures)
-// against (opponent's lines), and a small center pull as a tiebreaker.
+// scorePosition statically evaluates the board for `perspectiveColor`,
+// weighing own offensive lines and captures against opponents'.
 func scorePosition(state *game.GameState, perspectiveColor game.Color) int {
 	cfg := state.Config
 	mineA5 := game.CountMaximalRuns(state.Board, perspectiveColor, 5)
@@ -181,9 +154,8 @@ func scorePosition(state *game.GameState, perspectiveColor game.Color) int {
 		}
 	}
 
-	// Threshold-aware: lines closer to the winning count weigh more, so the
-	// bot prioritises completing its near-victory chains over scattering
-	// new short runs.
+	// Longer lines weigh more so the bot completes near-victory chains rather
+	// than scattering new short runs.
 	offense := mineA5*200 + mineA4*60 + mineA3*15 + myCaptures*40
 	if cfg.CapturePairsWin > 0 {
 		offense += myCaptures * (50 * myCaptures / max(cfg.CapturePairsWin, 1))
@@ -193,12 +165,9 @@ func scorePosition(state *game.GameState, perspectiveColor game.Color) int {
 	return offense - defense
 }
 
-// rankedCandidates returns the top-K empty cells for `mover`, ranked by a
-// quick 1-ply static evaluation. This serves two purposes:
-//   - Move ordering: the most-promising branches are explored first so
-//     alpha-beta prunes more aggressively.
-//   - Truncation: we cap at `k` to bound the branching factor — full
-//     enumeration on an 11-side hex is too many candidates for depth-2.
+// rankedCandidates returns the top-k empty cells for `mover` by shallowScore.
+// Ranking improves α-β pruning; the cap bounds the branching factor (full
+// enumeration on a side-11 hex is too wide for depth-2).
 func rankedCandidates(state *game.GameState, mover game.Color, k int) []candidate {
 	r := state.Board.Side - 1
 	scored := make([]candidate, 0, 64)
@@ -211,7 +180,6 @@ func rankedCandidates(state *game.GameState, mover game.Color, k int) []candidat
 			scored = append(scored, candidate{pos: p, score: shallowScore(state, p, mover)})
 		}
 	}
-	// Partial sort by score desc, stable enough for tiebreaking.
 	sortDescending(scored)
 	if len(scored) > k {
 		scored = scored[:k]
@@ -224,9 +192,8 @@ type candidate struct {
 	score int
 }
 
-// shallowScore is the cheap 1-ply evaluator used purely to rank candidates
-// for the search frontier. It mirrors the old `evaluate` heuristic so the
-// pre-search ordering already favours captures, blocks, and extensions.
+// shallowScore is the cheap 1-ply evaluator used to rank candidates,
+// favouring captures, blocks, and extensions.
 func shallowScore(state *game.GameState, p game.Position, color game.Color) int {
 	sim := state.Board.Clone()
 	sim.Set(p, color)
@@ -256,19 +223,15 @@ func shallowScore(state *game.GameState, p game.Position, color game.Color) int 
 	oppA4After := game.CountMaximalRuns(sim, oppColor, 4)
 	defense := (oppA5Before-oppA5After)*240 + (oppA4Before-oppA4After)*60
 
-	// Extension-block bonus. CountMaximalRuns doesn't shift when we plug
-	// the tail of an opponent's run (their existing length stays the
-	// same; only their *potential* extension shrinks). The shallow
-	// heuristic missed this entirely, which made tactical blocking moves
-	// undervalued. Detect them directly: for each axis, count consecutive
-	// opp stones immediately adjacent to p — that's the run we'd be
-	// capping if we played here.
+	// Extension-block bonus. CountMaximalRuns doesn't change when we plug the
+	// tail of an opponent run (its length is unchanged, only its potential
+	// extension shrinks), so blocking moves were undervalued. Detect them
+	// directly: count opp stones adjacent to p along each axis.
 	for _, d := range game.Directions {
 		opp := consecutiveSameColor(state.Board, p, d, oppColor) +
 			consecutiveSameColor(state.Board, p, game.Position{Q: -d.Q, R: -d.R}, oppColor)
 		if opp >= 3 {
-			// Weight rises sharply at length 4–5 where the threat is
-			// genuine (one more opp stone = a 5/6-run).
+			// Weight rises sharply at 4–5, where one more stone is a 5/6-run.
 			defense += opp * opp * 8
 		}
 	}
@@ -282,10 +245,8 @@ func shallowScore(state *game.GameState, p game.Position, color game.Color) int 
 	return defense + offense + captureScore + center
 }
 
-// consecutiveSameColor walks from `from` along `step` (exclusive of `from`)
-// and returns the run length of cells matching `color`. Used by the
-// extension-block heuristic to measure how big an opponent run we'd be
-// capping by playing at `from`.
+// consecutiveSameColor returns the run length of `color` walking from `from`
+// along `step`, excluding `from` itself.
 func consecutiveSameColor(b *game.Board, from, step game.Position, color game.Color) int {
 	n := 0
 	c := game.Position{Q: from.Q + step.Q, R: from.R + step.R}
@@ -296,10 +257,7 @@ func consecutiveSameColor(b *game.Board, from, step game.Position, color game.Co
 	return n
 }
 
-// opponentOf returns the colour of whoever plays after `color`. In 2-player
-// games this is the only other seat; in 3+ player games it's the next seat
-// in rotation — the bot still treats anyone-not-me as a threat in
-// scorePosition.
+// opponentOf returns the color of the next seat in rotation after `color`.
 func opponentOf(state *game.GameState, color game.Color) game.Color {
 	for i, p := range state.Players {
 		if p.Color == color {
@@ -347,10 +305,8 @@ func max(a, b int) int {
 	return b
 }
 
-// sortDescending sorts scored candidates by score, highest first. We hand-
-// roll a simple insertion-sort because slices are typically tiny after the
-// initial gather (under 200 elements) and stable insertion gives us a
-// deterministic order for equal scores.
+// sortDescending sorts candidates by score, highest first. Hand-rolled
+// insertion sort: slices are tiny and it gives a deterministic order for ties.
 func sortDescending(s []candidate) {
 	for i := 1; i < len(s); i++ {
 		c := s[i]

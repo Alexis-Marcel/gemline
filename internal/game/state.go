@@ -3,29 +3,22 @@ package game
 import "time"
 
 // Config holds the win thresholds, board side, and time control for a game.
+// A 6-alignment is always an instant win, regardless of config.
 type Config struct {
-	BoardSide       int // intersections per side of the hexagonal board
+	BoardSide       int
 	CapturePairsWin int // captured pairs required to win
 	Align4ToWin     int // distinct maximal 4-alignments required
 	Align5ToWin     int // distinct maximal 5-alignments required
-	// A 6-alignment is always an instant win, regardless of config.
 
-	// InitialTimeMs is the chess-clock budget per player at the start of the
-	// game. Zero disables time control entirely (clocks aren't tracked).
-	InitialTimeMs int64
-	// IncrementMs is the Fischer-style bonus added to a player's clock after
-	// every move they make. Zero = no increment.
-	IncrementMs int64
+	InitialTimeMs int64 // per-player chess-clock budget; 0 disables time control
+	IncrementMs   int64 // Fischer bonus added after each move; 0 = none
 }
 
 const DefaultInitialTimeMs int64 = 10 * 60 * 1000 // 10 minutes
 
-// DefaultConfig returns thresholds for `numPlayers` (2..6), straight from the
-// printed rulebook (page with the "Nombre de joueurs" table). A 6-alignment
-// is always an instant win; the other columns are the count of *distinct*
-// maximal runs the player must hold simultaneously. CapturePairsWin is the
-// number of captured *pairs* — the rulebook lists gems (gobbled 2-by-2), so
-// the value here is half the gem count.
+// DefaultConfig returns the rulebook thresholds for `numPlayers` (2..6).
+// CapturePairsWin is in pairs; the rulebook lists gems (captured 2-by-2), so
+// it is half the gem count shown in the inline comments.
 func DefaultConfig(numPlayers int) Config {
 	cfg := Config{
 		BoardSide:     DefaultBoardSide,
@@ -59,12 +52,9 @@ func DefaultConfig(numPlayers int) Config {
 	return cfg
 }
 
-// ConfigFor returns the rulebook thresholds for `numPlayers`, but preserves
-// the time-control fields from `base`. Used when a game's actual player count
-// is known later than its creation (e.g. private game created with 6 slots,
-// but only 3 sit down before the host clicks Start). The clock budget that
-// was chosen at create-time is independent of how many players ultimately
-// sit, so we carry it through.
+// ConfigFor returns the rulebook thresholds for `numPlayers` while preserving
+// the time-control fields from `base`. Used when the actual player count is
+// known after creation; the create-time clock budget is carried through.
 func ConfigFor(numPlayers int, base Config) Config {
 	out := DefaultConfig(numPlayers)
 	out.InitialTimeMs = base.InitialTimeMs
@@ -75,8 +65,8 @@ func ConfigFor(numPlayers int, base Config) Config {
 	return out
 }
 
-// GameState is an in-progress (or finished) game. It is not safe for
-// concurrent use — callers must serialize access externally.
+// GameState is an in-progress or finished game. Not safe for concurrent use;
+// callers must serialize access externally.
 type GameState struct {
 	Config        Config
 	Board         *Board
@@ -101,15 +91,13 @@ func NewGame(playerColors []Color, cfg Config) *GameState {
 		Config:        cfg,
 		Board:         NewBoard(cfg.BoardSide),
 		Players:       players,
-		TurnStartedAt: time.Time{}, // zero value; set on first move via clock-disabled fallback
+		TurnStartedAt: time.Time{},
 	}
 }
 
-// Clone returns a deep copy of the game state suitable for speculative
-// simulation (e.g. the AI's minimax search). Players are slice-copied so
-// per-player counters drift independently. History is deliberately omitted
-// — callers that simulate forward don't need the trail behind the current
-// position, and skipping it keeps clones cheap.
+// Clone returns a deep copy for speculative simulation (e.g. AI minimax).
+// History is deliberately omitted: forward simulation doesn't need it, and
+// skipping it keeps clones cheap.
 func (g *GameState) Clone() *GameState {
 	players := make([]Player, len(g.Players))
 	copy(players, g.Players)
@@ -124,9 +112,8 @@ func (g *GameState) Clone() *GameState {
 	}
 }
 
-// StartClock initialises the turn-start timestamp. Call once after NewGame
-// to begin counting time against the first player. If time control is
-// disabled (Config.InitialTimeMs == 0), this is a no-op.
+// StartClock begins counting time against the first player. Call once after
+// NewGame. No-op when time control is disabled.
 func (g *GameState) StartClock(now time.Time) {
 	if g.Config.InitialTimeMs > 0 {
 		g.TurnStartedAt = now
@@ -135,18 +122,14 @@ func (g *GameState) StartClock(now time.Time) {
 
 func (g *GameState) CurrentPlayer() *Player { return &g.Players[g.Turn] }
 
-// IsOver reports whether the game is finished. A finished game either has
-// a Winner (most cases) or a non-zero WinKind without a winner (multi-player
-// timeout — see Forfeit).
+// IsOver reports whether the game is finished. A finished game has a Winner, or
+// a non-zero WinKind without a winner (multi-player timeout — see Forfeit).
 func (g *GameState) IsOver() bool { return g.Winner != Empty || g.WinKind != WinNone }
 
-// ClockEnabled reports whether time control is active for this game.
 func (g *GameState) ClockEnabled() bool { return g.Config.InitialTimeMs > 0 }
 
-// RemainingForActive returns the active player's clock value if the game
-// were to be checked right now, accounting for the elapsed time since
-// TurnStartedAt. When clocks are disabled it returns the player's stored
-// TimeRemainingMs unchanged.
+// RemainingForActive returns the active player's clock at `now`, deducting time
+// elapsed since TurnStartedAt. Returns the stored value when clocks are disabled.
 func (g *GameState) RemainingForActive(now time.Time) int64 {
 	if !g.ClockEnabled() || g.IsOver() {
 		return g.CurrentPlayer().TimeRemainingMs
@@ -162,18 +145,15 @@ func (g *GameState) RemainingForActive(now time.Time) int64 {
 	return r
 }
 
-// CountAlignments returns the number of maximal runs of `color` of length
-// exactly `length`. Convenience wrapper for callers that don't want to
-// import the rules helpers directly (e.g. JSON DTOs).
+// CountAlignments is a wrapper over CountMaximalRuns for callers (e.g. JSON
+// DTOs) that don't import the rules helpers directly.
 func (g *GameState) CountAlignments(color Color, length int) int {
 	return CountMaximalRuns(g.Board, color, length)
 }
 
-// ApplyMove places a stone, resolves captures, updates win state, and
-// advances the chess clock. `now` is the move's timestamp; the active
-// player's elapsed time (now − TurnStartedAt) is deducted from their clock
-// before the move is applied. If they have already used up their time the
-// move fails with ErrFlagged.
+// ApplyMove places a stone, resolves captures, updates win state, and advances
+// the chess clock. The active player's elapsed time (now − TurnStartedAt) is
+// deducted before the move; an exhausted clock fails with ErrFlagged.
 func (g *GameState) ApplyMove(m Move, now time.Time) (MoveResult, error) {
 	var res MoveResult
 	if g.IsOver() {
@@ -232,10 +212,9 @@ func (g *GameState) ApplyMove(m Move, now time.Time) (MoveResult, error) {
 	return res, nil
 }
 
-// Forfeit ends the game by declaring `loser` out of time. With exactly two
-// players, the surviving player is recorded as the winner; with more, the
-// game ends with no winner (Winner == Empty) but WinKind == WinTimeout.
-// No-op if the game is already over.
+// Forfeit ends the game by declaring `loser` out of time. With two players the
+// survivor wins; with more, the game ends with no winner but WinKind ==
+// WinTimeout. No-op if already over.
 func (g *GameState) Forfeit(loser Color) {
 	if g.IsOver() {
 		return
@@ -249,9 +228,8 @@ func (g *GameState) Forfeit(loser Color) {
 			}
 		}
 	}
-	// 3+ players: end the game without a winner.
 	g.Winner = Empty
-	// Mark the loser's clock at zero for clarity in the wire state.
+	// Zero the loser's clock for clarity in the wire state.
 	for i := range g.Players {
 		if g.Players[i].Color == loser {
 			g.Players[i].TimeRemainingMs = 0
@@ -260,9 +238,8 @@ func (g *GameState) Forfeit(loser Color) {
 }
 
 // Resign ends the game by declaring `loser` voluntarily resigned. With two
-// players the survivor wins; with more, the game ends with no winner. The
-// resign is distinct from a timeout (Forfeit) because the win-kind affects
-// post-game stats and what we render to the player.
+// players the survivor wins; with more, no winner. Distinct from Forfeit
+// because the win-kind affects post-game stats and rendering.
 func (g *GameState) Resign(loser Color) {
 	if g.IsOver() {
 		return
@@ -279,10 +256,8 @@ func (g *GameState) Resign(loser Color) {
 	g.Winner = Empty
 }
 
-// AgreeDraw ends a 2-player game in a draw. Callers must enforce that the
-// game has exactly two players — the engine deliberately doesn't pick a
-// "winner of the draw" for multi-player, since drawn games in 3+ player mode
-// aren't part of the published rules.
+// AgreeDraw ends a 2-player game in a draw. Callers must enforce the 2-player
+// constraint: 3+ player draws aren't part of the published rules.
 func (g *GameState) AgreeDraw() {
 	if g.IsOver() {
 		return
@@ -291,9 +266,8 @@ func (g *GameState) AgreeDraw() {
 	g.Winner = Empty
 }
 
-// checkWin returns the kind of win achieved by `p`, or WinNone. Alignment
-// wins are checked before capture wins so that a 6-alignment takes
-// precedence over any concurrent capture threshold.
+// checkWin returns the win kind achieved by `p`, or WinNone. Alignment wins are
+// checked before captures so a 6-alignment takes precedence.
 func (g *GameState) checkWin(p *Player) WinKind {
 	if HasRun(g.Board, p.Color, 6) {
 		return WinAlignment6

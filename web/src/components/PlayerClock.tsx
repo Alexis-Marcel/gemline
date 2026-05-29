@@ -1,36 +1,23 @@
 import { useEffect, useState } from "react";
 
 interface PlayerClockProps {
-  /** Server-reported time remaining in ms (frozen at the last snapshot). */
+  // Server-reported time remaining in ms (frozen at the last snapshot).
   remainingMs: number;
-  /** ISO timestamp when the active player's turn began, or undefined if not their turn / no clock. */
+  // ISO turn-start timestamp, or undefined if not their turn / no clock.
   turnStartedAt: string | undefined;
-  /** Whether this player's clock should be ticking now. */
   isActive: boolean;
-  /** Whether the game is finished (clock should freeze). */
   frozen: boolean;
 }
 
-/**
- * PlayerClock renders an mm:ss countdown. When `isActive` is true and the
- * game is not frozen, it subtracts elapsed wall-clock time since
- * `turnStartedAt` and re-renders every 250ms so the display stays smooth.
- * Server snapshots (received via WebSocket) re-anchor the countdown.
- */
 export function PlayerClock({
   remainingMs,
   turnStartedAt,
   isActive,
   frozen,
 }: PlayerClockProps) {
-  // displayMs is the *rendered* countdown — initialised from the
-  // server snapshot, recomputed by the interval tick below using
-  // Date.now() so the wall-clock reference stays out of render
-  // (React Compiler flags Date.now() during render as impure).
   const [displayMs, setDisplayMs] = useState(remainingMs);
-  // Re-seed when the server pushes a fresh snapshot (a new turn starts
-  // or remainingMs changes). React's "derived state from props"
-  // pattern: compare to the previous value and reset during render.
+  // Re-seed display from a fresh server snapshot via the derived-state pattern
+  // (compare to previous and reset during render).
   const [prevRemainingMs, setPrevRemainingMs] = useState(remainingMs);
   const [prevTurnStartedAt, setPrevTurnStartedAt] = useState(turnStartedAt);
   if (
@@ -46,9 +33,7 @@ export function PlayerClock({
     if (!isActive || frozen || !turnStartedAt) return;
     const turnStart = new Date(turnStartedAt).getTime();
     const tick = () => {
-      // Date.now() lives inside the interval callback, not render —
-      // the lint rule that flags impure calls during render is
-      // satisfied, and the user-visible countdown stays smooth.
+      // Date.now() must stay out of render (flagged as impure); keep it here.
       const elapsed = Date.now() - turnStart;
       setDisplayMs(Math.max(0, remainingMs - elapsed));
     };

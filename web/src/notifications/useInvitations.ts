@@ -4,11 +4,7 @@ import {
   type InvitationsContextValue,
 } from "./InvitationsContext";
 
-/**
- * useInvitations reads the lobby-invite stack from <InvitationsProvider>.
- * Throws when called outside the provider so consumer mistakes surface
- * loudly rather than as a silent empty list.
- */
+// Throws outside <InvitationsProvider> so misuse is loud, not a silent empty list.
 export function useInvitations(): InvitationsContextValue {
   const ctx = useContext(InvitationsContext);
   if (!ctx) {

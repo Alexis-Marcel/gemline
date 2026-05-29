@@ -11,24 +11,11 @@ interface MatchmakingPageProps {
 }
 
 /**
- * MatchmakingPage owns the matchmake queue lifecycle for one search session.
- *
- * Lifecycle:
- *   - mount             → matchmake.start(players)
- *   - "matched" event   → save creds + navigate(/game/:id)
- *   - "Annuler" click   → matchmake.cancel() + navigate(/)
- *   - unmount           → the hook fires DELETE /api/matchmake/enqueue
- *
- * Anonymous visitors are bounced to /login since the matchmaking endpoints
- * are auth-gated server-side. The login page's ?next= brings them back.
- *
- * Centralising the queue UI on its own route gives us:
- *   - one owner of useMatchmake, no cross-page races on the userSocket
- *     subscription;
- *   - a clean full-screen UX (no leftover scoreboard / chat / board while
- *     searching);
- *   - a stable URL that survives refresh (the queue row server-side will
- *     reissue match_found once the socket reconnects).
+ * MatchmakingPage owns the matchmake queue lifecycle for one search session:
+ * start on mount, navigate on "matched", cancel on unmount. A dedicated route
+ * keeps a single useMatchmake owner (no cross-page userSocket races) and a
+ * stable URL that survives refresh (server reissues match_found on reconnect).
+ * Anonymous visitors are bounced to /login (matchmaking is auth-gated).
  */
 export function MatchmakingPage({ mode }: MatchmakingPageProps) {
   const navigate = useNavigate();
@@ -36,7 +23,7 @@ export function MatchmakingPage({ mode }: MatchmakingPageProps) {
   const matchmake = useMatchmake();
   const players = mode === "1v1" ? 2 : MULTIPLAYER_MAX_SEATS;
 
-  // Bounce anon users to login; bring them back here after sign-in.
+  // Bounce anon users to login; ?next brings them back after sign-in.
   useEffect(() => {
     if (authLoading) return;
     if (!user) {
@@ -45,17 +32,14 @@ export function MatchmakingPage({ mode }: MatchmakingPageProps) {
     }
   }, [authLoading, user, mode, navigate]);
 
-  // Enter the queue on mount. matchmake.start is stable (useCallback) so
-  // this only fires once per page mount.
+  // Enter the queue on mount.
   useEffect(() => {
     if (authLoading || !user) return;
     void matchmake.start(players);
-    // We intentionally omit matchmake.start from deps — it's a stable
-    // reference and we only want this on mount.
+    // matchmake.start is a stable ref; omit it so this only fires on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading, user, players]);
 
-  // React to terminal states: navigate on match, surface errors on failure.
   useEffect(() => {
     if (matchmake.state.status === "matched") {
       const { match } = matchmake.state;

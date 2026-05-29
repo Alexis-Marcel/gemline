@@ -6,24 +6,13 @@ import { Button } from "./Button";
 interface SeatInviteModalProps {
   gameId: string;
   seatIndex: number;
-  /** Called with the updated game after a successful invite, so the
-   *  parent can replace its local state without waiting for the WS
-   *  state event. */
+  // Updates parent local state immediately, without waiting for the WS event.
   onInvited: (game: Game) => void;
   onClose: () => void;
 }
 
 const SEARCH_DEBOUNCE_MS = 200;
 
-/**
- * SeatInviteModal lets the host pick a player to reserve a specific
- * seat for. Identical to the legacy InviteFriendModal in its search
- * UX, but the action is "tie this player to that seat in the
- * current game" rather than "create a new game with them invited" —
- * the host stays in the game they were just in and the seat
- * surfaces the invitee with an "en attente" badge until they show
- * up via the URL.
- */
 export function SeatInviteModal({
   gameId,
   seatIndex,
@@ -44,12 +33,8 @@ export function SeatInviteModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Debounce the search query: only fire the API call after the user
-  // stops typing for SEARCH_DEBOUNCE_MS. The setSearching(true) inside
-  // the effect body would normally trip the lint rule for synchronous
-  // setState in an effect; the early-out for an empty query reads as
-  // derived state instead — we compare to the previous trimmed value
-  // during render and reset results / searching in a single batch.
+  // Empty-query reset via the derived-state pattern (instead of effect-body
+  // setState, which the React Compiler lint rule flags).
   const trimmedQ = q.trim();
   const [prevTrimmed, setPrevTrimmed] = useState(trimmedQ);
   if (prevTrimmed !== trimmedQ) {
@@ -63,10 +48,8 @@ export function SeatInviteModal({
   useEffect(() => {
     if (trimmedQ === "") return;
     const handle = window.setTimeout(() => {
-      // setSearching here is inside the timeout (async) — not an
-      // effect-body setState — so React Compiler is happy. We flip
-      // it on at the *start* of the debounced search instead of in
-      // the effect body for the same reason.
+      // setSearching lives in the timeout (not the effect body) to satisfy
+      // the React Compiler lint rule.
       setSearching(true);
       api
         .searchUsers(trimmedQ)

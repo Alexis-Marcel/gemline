@@ -7,9 +7,8 @@ import (
 	"github.com/alexis/gemline/internal/game"
 )
 
-// TestBestMove_TakesObviousWin: when the bot has a 5-stone line and a free
-// cell that completes a 6-alignment, it must take it. Pure depth-1 sanity
-// check — minimax should never regress on a single-move win.
+// TestBestMove_TakesObviousWin: with a 5-line and a cell that completes a
+// 6-alignment, the bot must take it.
 func TestBestMove_TakesObviousWin(t *testing.T) {
 	cfg := game.DefaultConfig(2)
 	gs := game.NewGame([]game.Color{game.C1, game.C2}, cfg)
@@ -28,26 +27,20 @@ func TestBestMove_TakesObviousWin(t *testing.T) {
 	}
 }
 
-// TestBestMove_AvoidsImmediateLoss: I have a 4-stone run. Extending it
-// gives me a 5-run (offensively tempting). But the opponent has a 5-run
-// with one open extension still on the board — if I don't block, they
-// win next turn. A 1-ply bot weights the +5-run offense over the empty
-// defensive value (CountMaximalRuns doesn't drop when I block a tail);
-// the 2-ply bot sees the opponent's reply and chooses to block.
-//
-// We pre-fill one of the opponent's 5-run extensions with a C1 stone so
-// only ONE blocking cell exists: this turns the "all moves lose anyway"
-// non-test into a real choice between block-and-survive vs play-elsewhere-
-// and-lose.
+// TestBestMove_AvoidsImmediateLoss: a 1-ply bot prefers extending its own
+// 4-run over blocking the opponent's 5-run (CountMaximalRuns doesn't drop when
+// blocking a tail); the 2-ply bot sees the opponent's winning reply and blocks.
+// One 5-run extension is pre-blocked so exactly one defensive cell remains,
+// making it a real block-or-lose choice.
 func TestBestMove_AvoidsImmediateLoss(t *testing.T) {
 	cfg := game.DefaultConfig(2)
 	gs := game.NewGame([]game.Color{game.C1, game.C2}, cfg)
-	// C2's 5-run, with (-1,0) already blocked by C1 — only (5,0) extends.
+	// C2's 5-run with (-1,0) pre-blocked by C1, so only (5,0) extends.
 	gs.Board.Set(game.Position{Q: -1, R: 0}, game.C1)
 	for q := 0; q <= 4; q++ {
 		gs.Board.Set(game.Position{Q: q, R: 0}, game.C2)
 	}
-	// C1's own 4-run elsewhere, well away from C2's threat.
+	// C1's own 4-run, away from C2's threat.
 	for q := 0; q <= 3; q++ {
 		gs.Board.Set(game.Position{Q: q, R: 4}, game.C1)
 	}
@@ -62,9 +55,8 @@ func TestBestMove_AvoidsImmediateLoss(t *testing.T) {
 	}
 }
 
-// TestBestMove_StableUnderRandomTiebreak: two engines with the same seed
-// against the same state must yield the same move. Guards against
-// accidental sources of non-determinism (map ranging, etc.).
+// TestBestMove_StableUnderRandomTiebreak: same seed and state must yield the
+// same move. Guards against non-determinism (e.g. map ranging).
 func TestBestMove_StableUnderRandomTiebreak(t *testing.T) {
 	cfg := game.DefaultConfig(2)
 	gs := game.NewGame([]game.Color{game.C1, game.C2}, cfg)
@@ -80,14 +72,12 @@ func TestBestMove_StableUnderRandomTiebreak(t *testing.T) {
 	}
 }
 
-// TestBestMove_PerformanceBudget: a depth-2 search on a mid-game position
-// must come in well under a second. We're not benching for speed, just
-// guarding against an accidental quadratic explosion if someone widens
-// topCandidatesAtDepth* without thinking.
+// TestBestMove_PerformanceBudget guards against a quadratic blow-up if someone
+// widens topCandidatesAtDepth* — not a speed benchmark.
 func TestBestMove_PerformanceBudget(t *testing.T) {
 	cfg := game.DefaultConfig(2)
 	gs := game.NewGame([]game.Color{game.C1, game.C2}, cfg)
-	// Sprinkle ~20 stones across the board to make the search non-trivial.
+	// ~20 stones to make the search non-trivial.
 	for q := -2; q <= 2; q++ {
 		gs.Board.Set(game.Position{Q: q, R: 0}, game.C1)
 		gs.Board.Set(game.Position{Q: q, R: 1}, game.C2)
@@ -101,10 +91,7 @@ func TestBestMove_PerformanceBudget(t *testing.T) {
 	if !ok {
 		t.Fatal("BestMove returned !ok")
 	}
-	// 3-second ceiling rather than 500 ms: the test runs under -race in
-	// CI, which slows the search by ~5×. Production (no race detector)
-	// comes in well under 500 ms; the ceiling is meant to catch a
-	// quadratic blow-up, not measure micro-perf.
+	// 3s ceiling (not 500ms) because -race in CI slows the search ~5×.
 	if d := time.Since(start); d > 3*time.Second {
 		t.Fatalf("BestMove took %v, expected <3s under -race", d)
 	}

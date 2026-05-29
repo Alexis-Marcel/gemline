@@ -3,29 +3,16 @@ import { Button } from "./Button";
 
 interface RematchControlsProps {
   game: Game;
-  /** Seat index of the local user in this finished game, or null if the
-   *  viewer was just a spectator (no creds). Drives whether action
-   *  buttons render and which state the offer is in for *this* viewer. */
+  // Seat index of the local user, or null for spectators (no seat to act from).
   mySeatIndex: number | null;
-  /** True while any rematch action (offer/accept/decline) is in flight. */
   busy: boolean;
   onOffer: () => void;
   onDecline: () => void;
   onGoToRematch: () => void;
 }
 
-/**
- * RematchControls renders the chess.com-style rematch state machine:
- *
- *   1. Rematch game already created  →  "Aller à la revanche"
- *   2. No offer yet                   →  "Proposer une revanche"
- *   3. I've accepted, waiting on N    →  "En attente : X, Y" + "Annuler"
- *   4. Someone proposes, I haven't    →  "X propose une revanche" + Accepter/Refuser
- *
- * Spectators (mySeatIndex === null) get the navigation button in case (1)
- * and a read-only status line in (3)/(4); they never see the action buttons
- * since they have no seat to act from.
- */
+// Rematch state machine: (1) jump to created game, (2) propose, (3) accepted
+// and waiting, (4) someone proposed. Spectators only see read-only states.
 export function RematchControls({
   game,
   mySeatIndex,
@@ -34,7 +21,7 @@ export function RematchControls({
   onDecline,
   onGoToRematch,
 }: RematchControlsProps) {
-  // (1) The rematch game exists — anyone can jump to it.
+  // (1) rematch game exists — anyone can jump to it.
   if (game.rematchGameId) {
     return (
       <Button variant="secondary" onClick={onGoToRematch} className="w-full">
@@ -46,11 +33,9 @@ export function RematchControls({
   const offer = game.rematchOffer;
   const isSpectator = mySeatIndex === null;
 
-  // (2) No offer pending — propose one.
+  // (2) no offer pending — propose one.
   if (!offer) {
     if (isSpectator) {
-      // Nothing useful to show: no link, no offer. Render nothing rather
-      // than a disabled button — the parent can decide what fills the space.
       return null;
     }
     return (
@@ -73,7 +58,7 @@ export function RematchControls({
       .filter((n): n is string => !!n)
       .join(", ");
 
-  // (3) I have already accepted — waiting for the remaining seats.
+  // (3) already accepted — waiting for the remaining seats.
   if (iAccepted) {
     const pendingNames = namesOf(offer.pendingSeats);
     return (
@@ -98,7 +83,7 @@ export function RematchControls({
     );
   }
 
-  // (4) Someone else proposed, I haven't responded yet.
+  // (4) someone else proposed, not yet responded.
   const proposerNames = namesOf(offer.acceptedSeats);
   return (
     <div className="space-y-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">

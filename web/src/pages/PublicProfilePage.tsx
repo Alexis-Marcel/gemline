@@ -3,20 +3,15 @@ import { Link, useParams } from "react-router-dom";
 import { ApiError, api } from "../api/client";
 import type { PublicProfile } from "../api/types";
 
-/**
- * PublicProfilePage renders /profile/:userId — anyone's profile as
- * a read-only card. No edit form, no email, no history table for
- * privacy reasons: ratings + aggregate counts only. The current user
- * (looking at their own profile via this route) gets the same shape,
- * which is consistent with how the leaderboard already exposes them.
- */
+// Read-only profile card: ratings + aggregate counts only, no email or
+// history (privacy, same scope as the leaderboard).
 export function PublicProfilePage() {
   const { userId = "" } = useParams();
   const [profile, setProfile] = useState<PublicProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  // Derived-state reset on userId change — the loading spinner shows
-  // on the same render the URL param changes, not the one after.
+  // Derived-state reset so the spinner shows on the same render the
+  // userId param changes, not the one after.
   const [prevUserId, setPrevUserId] = useState(userId);
   if (prevUserId !== userId) {
     setPrevUserId(userId);

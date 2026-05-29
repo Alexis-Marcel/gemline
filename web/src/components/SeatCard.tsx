@@ -14,10 +14,7 @@ interface SeatCardProps {
   myUserId: string | null;
   ratings: GameRatings | null;
   online: boolean | undefined;
-  /** Visual style — `scoreboard` is the vertical desktop-rail card
-   *  (taller, full stats grid), `strip` is the compact horizontal
-   *  mobile card (shorter, inline stats, fixed min-width for the
-   *  scroll container). */
+  // `scoreboard` = vertical desktop card; `strip` = compact horizontal mobile card.
   variant: SeatCardVariant;
   onAddBot?: (seatIndex: number) => void;
   onRemoveBot?: (seatIndex: number) => void;
@@ -29,14 +26,6 @@ interface SeatCardProps {
 
 const DISCONNECT_GRACE_MS = 60_000;
 
-/**
- * SeatCard renders one player's tile. Used by both Scoreboard (vertical
- * desktop rail) and PlayerStrip (horizontal mobile strip) — the two
- * containers used to inline ~150 lines of the same per-seat logic each.
- * The shape, badges, action buttons, presence countdown and rating chip
- * all live here; the variant prop tweaks padding, min-width and how the
- * stats row lays out.
- */
 export function SeatCard({
   game,
   player,
@@ -61,8 +50,7 @@ export function SeatCard({
   const isYou = mySeatIndex === seat.index;
   const showOffline =
     seat.occupied && game.status === "playing" && online === false;
-  // Invited-but-not-joined: server persists a userId + name on the seat
-  // but Occupied stays false, IsBot stays false.
+  // Invited-but-not-joined: server keeps userId + name but Occupied/IsBot stay false.
   const isInvited =
     !seat.occupied && !seat.isBot && !!seat.userId && seat.name !== "";
   const isMyInvite = isInvited && !!myUserId && seat.userId === myUserId;
@@ -74,13 +62,9 @@ export function SeatCard({
   const stripVariant = variant === "strip";
   const dotSize = stripVariant ? "h-3 w-3" : "h-5 w-5";
   const cardCls = stripVariant
-    ? // Strip: fixed min-width so the horizontal scroll has stable
-      // snap points, tight padding, no responsive backdrop.
+    ? // Fixed min-width gives the horizontal scroll stable snap points.
       "min-w-[10rem] flex-shrink-0 snap-start rounded-lg border p-2 text-xs transition-colors lg:min-w-[12rem]"
-    : // Scoreboard: tighter padding on phones (where it's currently
-      // unused after BoardFirst, but the same card is still used by
-      // Scoreboard which DesktopGameRail renders).
-      "rounded-lg border bg-zinc-950/80 p-2 backdrop-blur transition-colors lg:bg-transparent lg:p-3 lg:backdrop-blur-none";
+    : "rounded-lg border bg-zinc-950/80 p-2 backdrop-blur transition-colors lg:bg-transparent lg:p-3 lg:backdrop-blur-none";
   const borderCls = isTurn
     ? "border-amber-400/60 bg-amber-400/5 shadow-[inset_3px_0_0_0_rgba(251,191,36,0.9)]"
     : seat.occupied
@@ -144,7 +128,6 @@ export function SeatCard({
         )}
       </div>
 
-      {/* Status badge row */}
       <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] uppercase tracking-wider">
         {isTurn && (
           <span className="font-semibold text-amber-400">à jouer</span>
@@ -165,10 +148,6 @@ export function SeatCard({
         {showOffline && <DisconnectBadge />}
       </div>
 
-      {/* Stats row — present once playing/finished and the seat is
-         actually occupied. The two variants format it differently:
-         strip uses a single inline line, scoreboard a two-column
-         labelled grid on desktop with a compact mobile fallback. */}
       {!waiting && seat.occupied && (
         <StatsRow
           player={player}
@@ -177,7 +156,6 @@ export function SeatCard({
         />
       )}
 
-      {/* Lobby-only inline actions per seat. */}
       {waiting && seat.occupied && seat.isBot && onRemoveBot && (
         <ActionRow>
           <ActionButton
@@ -242,8 +220,6 @@ function StatsRow({
   capturePairsWin: number;
   variant: SeatCardVariant;
 }) {
-  // Strip + mobile scoreboard share the single-line format; only
-  // desktop scoreboard switches to the labelled grid.
   const inline = (
     <div
       className={

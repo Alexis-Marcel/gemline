@@ -23,7 +23,7 @@ func openTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
-	// Truncate everything between tests so they remain order-independent.
+	// Truncate between tests so they stay order-independent.
 	if _, err := pool.Exec("TRUNCATE moves, seats, games CASCADE"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
@@ -36,8 +36,8 @@ func TestPostgresRepo_CreateJoinPlay_RoundTrip(t *testing.T) {
 	repo := NewPostgresRepo(pool)
 	ctx := context.Background()
 
-	// Two separate stores: the first plays a game; the second loads it
-	// fresh from the DB — simulating a server restart with a warm DB.
+	// Two stores: the first plays, the second loads fresh from the DB —
+	// simulating a server restart with a warm DB.
 	first := NewStore(repo)
 	rec, err := first.Create(ctx, 2, VisibilityPrivate)
 	if err != nil {
@@ -58,7 +58,6 @@ func TestPostgresRepo_CreateJoinPlay_RoundTrip(t *testing.T) {
 		t.Fatalf("PlayMove Alice: %v", err)
 	}
 
-	// Fresh store, same repo → loads everything from Postgres.
 	second := NewStore(repo)
 	loaded, ok, err := second.Get(ctx, gameID)
 	if err != nil {
@@ -85,14 +84,11 @@ func TestPostgresRepo_CreateJoinPlay_RoundTrip(t *testing.T) {
 		t.Errorf("seat 0 after reload = %+v", loaded.Seats[0])
 	}
 
-	// Alice's token must still authenticate her on the reloaded store.
+	// Alice's token must still authenticate after reload; it's Bob's turn now,
+	// so the move is rejected with ErrWrongTurn (proving the token hashed back).
 	if _, _, err := second.PlayMove(ctx, gameID, tokA, 1, 0); err == nil {
-		// Alice playing right after reload should be Bob's turn → wrong turn error expected
 		t.Fatal("expected ErrWrongTurn since it's Bob's turn after the first move replayed")
 	}
-	// Bob's token still works too — verify via SeatByToken indirection by
-	// looking up via PlayMove. We don't have Bob's token (joined but not
-	// captured); good enough that Alice's token still hashes correctly.
 }
 
 func TestPostgresRepo_CaptureSurvivesReload(t *testing.T) {
@@ -110,7 +106,7 @@ func TestPostgresRepo_CaptureSurvivesReload(t *testing.T) {
 	_, tokA, _ := first.Join(ctx, gameID, "Alice", "", -1)
 	_, tokB, _ := first.Join(ctx, gameID, "Bob", "", -1)
 
-	// Build a horizontal capture: Alice ends with (1,0) capturing (-1,0) and (0,0).
+	// Horizontal capture: Alice's (1,0) sandwiches Bob's (-1,0) and (0,0).
 	plays := []struct {
 		token string
 		q, r  int
@@ -130,7 +126,7 @@ func TestPostgresRepo_CaptureSurvivesReload(t *testing.T) {
 		t.Fatalf("pre-reload: Alice captured pairs = %d, want 1", got)
 	}
 
-	// Reload from DB; ApplyMove replay must reproduce the capture.
+	// The ApplyMove replay on reload must reproduce the capture.
 	second := NewStore(repo)
 	loaded, _, err := second.Get(ctx, gameID)
 	if err != nil {
@@ -147,16 +143,10 @@ func TestPostgresRepo_CaptureSurvivesReload(t *testing.T) {
 	}
 }
 
-// TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation simulates the
-// multi-pod scenario that broke production: pod A receives the
-// proposer's "Propose rematch" click, mutates the in-memory record,
-// publishes a state event. Pod B's listener invalidates its (empty
-// or populated) cache and the next request from the acceptor lands
-// there. Pod B reads the game fresh from Postgres — and the offer
-// must come with it. Otherwise pod B would create a brand-new offer
-// with only the acceptor in AcceptedSeats and the original proposer
-// would see "the other player is now proposing a rematch" instead of
-// completing the existing one.
+// TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation guards a multi-pod
+// regression: pod A records the proposer's offer in memory, pod B invalidates
+// its cache and reloads from Postgres. The offer must be persisted so pod B
+// completes it rather than opening a fresh one with only the acceptor.
 func TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation(t *testing.T) {
 	pool := openTestDB(t)
 	repo := NewPostgresRepo(pool)
@@ -182,22 +172,16 @@ func TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation(t *testing.T) {
 		t.Fatalf("Resign: %v", err)
 	}
 
-	// Alice (on pod A) proposes.
 	if _, _, err := podA.OfferRematch(ctx, gameID, aliceTok); err != nil {
 		t.Fatalf("Alice's OfferRematch on pod A: %v", err)
 	}
 
-	// A *separate* Store represents pod B's process. It shares the DB
-	// but has its own in-memory cache. This is the post-NOTIFY world
-	// for pod B — the cache invalidation would have it freshly fetch
-	// the game on the next access.
+	// A separate Store = pod B's process: same DB, its own cache, post-NOTIFY.
 	podB := NewStore(repo)
 	if _, _, err := podB.OfferRematch(ctx, gameID, bobTok); err != nil {
 		t.Fatalf("Bob's OfferRematch on pod B: %v", err)
 	}
 
-	// On pod B, the game record should now carry the rematch link —
-	// Bob's acceptance completed the offer that Alice opened on pod A.
 	got, ok, err := podB.Get(ctx, gameID)
 	if err != nil || !ok {
 		t.Fatalf("reload: ok=%v err=%v", ok, err)
@@ -214,22 +198,10 @@ func TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation(t *testing.T) {
 	}
 }
 
-// TestPostgresRepo_DrawOffer_SurvivesCacheInvalidation is the draw-offer
-// twin of the rematch test above. Same multi-pod failure mode that
-// produced the user-reported "Accepter trop vite → 409" symptom:
-//
-//   1. Pod A receives the offerer's POST /draw/offer and writes
-//      rec.DrawOfferBy in memory.
-//   2. Pod A NOTIFY's the state event; pod B's listener invalidates
-//      its cached copy of the game.
-//   3. The opponent's POST /draw/accept hits the load balancer and
-//      lands on pod B.
-//   4. Pod B reloads the game from Postgres — and the offer must come
-//      with it. If draw_offer_by weren't persisted (the pre-fix world),
-//      pod B would see DrawOfferBy=-1, return ErrDrawNotOffered and the
-//      HTTP layer would 409. The user's "wait a bit and retry" workaround
-//      worked only because retries occasionally landed on the originating
-//      pod A which still held the in-memory offer.
+// TestPostgresRepo_DrawOffer_SurvivesCacheInvalidation is the draw-offer twin
+// of the rematch test: the offer must persist so an accept landing on a
+// different pod doesn't 409 with ErrDrawNotOffered (the "Accepter trop vite"
+// bug). The pre-fix workaround only worked when a retry hit the origin pod.
 func TestPostgresRepo_DrawOffer_SurvivesCacheInvalidation(t *testing.T) {
 	pool := openTestDB(t)
 	repo := NewPostgresRepo(pool)
@@ -251,13 +223,11 @@ func TestPostgresRepo_DrawOffer_SurvivesCacheInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Alice (on pod A) proposes a draw.
 	if _, err := podA.OfferDraw(ctx, gameID, aliceTok); err != nil {
 		t.Fatalf("Alice's OfferDraw on pod A: %v", err)
 	}
 
-	// Pod B reloads through the repo — pre-fix, draw_offer_by came back
-	// as -1 and Bob's accept would 409 with ErrDrawNotOffered.
+	// Pod B reloads through the repo; pre-fix, draw_offer_by came back as -1.
 	podB := NewStore(repo)
 	if _, err := podB.AcceptDraw(ctx, gameID, bobTok); err != nil {
 		t.Fatalf("Bob's AcceptDraw on pod B (multi-pod regression): %v", err)

@@ -6,20 +6,13 @@ metadata:
   labels:
     app: gemline-server
 spec:
-  # Horizontally scalable: the in-process WebSocket hub fans events out
-  # to local subscribers; cross-pod propagation goes through the
-  # Postgres backplane (LISTEN/NOTIFY 'gemline_events'). The in-memory
-  # GameRecord cache is invalidated cross-pod via the same channel, so
-  # a write on one pod is visible to a read on another within ~10 ms.
-  # The matchmaking queue table (matchmake_queue) and SKIP LOCKED let
-  # every pod run its own matcher independently.
+  # Horizontally scalable: cross-pod event propagation and cache
+  # invalidation go through the Postgres backplane (LISTEN/NOTIFY), and
+  # matchmaking uses SKIP LOCKED so each pod matches independently.
   replicas: 2
   strategy:
-    # Bring the new pod up first, drain the old one through Traefik's
-    # endpoint health-check, then terminate. With replicas=2 this never
-    # drops below 2 healthy pods during a roll, so HTTP requests don't
-    # see a gap and WS clients on the terminating pod reconnect to the
-    # surviving one (their lastSeq + /events?since=N catches them up).
+    # maxUnavailable: 0 keeps >=2 healthy pods during a roll so HTTP sees
+    # no gap and WS clients reconnect to the surviving pod.
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
@@ -32,15 +25,9 @@ spec:
       labels:
         app: gemline-server
     spec:
-      # 30 s gives in-flight HTTP requests a chance to finish before we
-      # SIGKILL the container. The Go server's signal handler already
-      # does a 10 s graceful Shutdown; the extra headroom is for the
-      # kubelet/CNI to converge after the preStop sleep.
+      # Headroom over the Go server's 10s graceful Shutdown plus the preStop sleep.
       terminationGracePeriodSeconds: 30
-      # topologySpreadConstraints keeps the two replicas on different
-      # nodes when possible, so losing a node doesn't take the whole
-      # API down. ScheduleAnyway means a rollout that briefly spreads
-      # 2/0 (e.g. during a node drain) still proceeds.
+      # Spread replicas across nodes; ScheduleAnyway so a node drain doesn't block the roll.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -80,12 +67,9 @@ spec:
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
-          # preStop sleeps so Traefik's endpoint controller has time to
-          # observe the SIGTERM-driven readiness change and pull this
-          # pod out of the LB pool before the Go process actually stops
-          # accepting connections. Without the sleep, in-flight HTTP
-          # requests and WS upgrades that hit Traefik milliseconds
-          # before the rotation can race and connect to a dying pod.
+          # preStop sleep lets Traefik's endpoint controller pull this pod
+          # from the pool before the process stops accepting connections,
+          # avoiding requests racing onto a dying pod.
           lifecycle:
             preStop:
               exec:

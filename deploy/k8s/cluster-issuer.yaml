@@ -1,7 +1,5 @@
-# cert-manager ClusterIssuer for Let's Encrypt production. Applied
-# automatically by ArgoCD via the gemline kustomization. The email
-# below is the contact LE pings before a cert expires — not a secret,
-# safe to commit.
+# cert-manager ClusterIssuer for Let's Encrypt production. The email is
+# the LE expiry-notice contact — not a secret.
 
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer

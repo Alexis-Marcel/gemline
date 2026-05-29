@@ -52,7 +52,7 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
       const body = (await res.json()) as { error?: string };
       if (body.error) message = body.error;
     } catch {
-      /* not JSON */
+      // not JSON
     }
     throw new ApiError(res.status, message);
   }
@@ -61,10 +61,8 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
-  // createGame creates a private game and auto-joins the caller. Public
-  // games are spawned implicitly by matchmake() — this endpoint is now
-  // private-only on the server. `name` is required for anonymous callers;
-  // authenticated users may leave it undefined (server uses profile name).
+  // Private-only (public games spawn via matchmake). `name` required for
+  // anonymous callers; authed users may omit it (server uses profile name).
   createGame(players: number, name?: string) {
     const body: Record<string, unknown> = { players, visibility: "private" };
     if (name) body.name = name;
@@ -81,10 +79,8 @@ export const api = {
     });
   },
 
-  // enqueueMatchmake puts the caller in the matchmaking queue and
-  // returns immediately (HTTP 202). The actual match comes through
-  // the lobby WebSocket as a "match_found" event. Idempotent —
-  // calling it again while still queued just refreshes the position.
+  // Returns immediately; the match arrives later as a lobby WS
+  // "match_found" event. Idempotent while queued.
   enqueueMatchmake(players: number) {
     return request<{ queued: boolean; players: number; mode: string }>(
       "/api/matchmake/enqueue",
@@ -95,15 +91,12 @@ export const api = {
     );
   },
 
-  // cancelMatchmake removes the caller's ticket. Always 204 — safe to
-  // call when not queued (the lobby WS close handler also invokes it
-  // as a safety net so a closed tab clears the row).
+  // Idempotent — safe to call when not queued.
   cancelMatchmake() {
     return request<void>("/api/matchmake/enqueue", { method: "DELETE" });
   },
 
-  // leaveSeat frees the caller's seat in a still-waiting game (cancel
-  // matchmaking, or back out of a private invite before play starts).
+  // Frees the caller's seat in a still-waiting game.
   leaveSeat(id: string, playerToken: string) {
     return request<Game>(`/api/games/${id}/leave`, {
       method: "POST",
@@ -117,19 +110,15 @@ export const api = {
     });
   },
 
-  // removeBot vacates a bot-occupied seat in a private waiting game.
-  // Server-side guards: status=waiting + visibility=private + seat must
-  // actually be a bot. Same auth model as addBot — no token required.
+  // No token required (same auth model as addBot).
   removeBot(id: string, seatIndex: number) {
     return request<Game>(`/api/games/${id}/seats/${seatIndex}/bot`, {
       method: "DELETE",
     });
   },
 
-  // inviteSeat reserves an empty seat for a named user. The seat
-  // shows their name with an "en attente" affordance until they
-  // navigate to the game URL and join. Server-side guards:
-  // private + waiting + seat empty.
+  // Reserves an empty seat for a named user (shown "en attente" until
+  // they join).
   inviteSeat(id: string, seatIndex: number, userId: string, displayName: string) {
     return request<Game>(`/api/games/${id}/seats/${seatIndex}/invite`, {
       method: "POST",
@@ -137,32 +126,24 @@ export const api = {
     });
   },
 
-  // cancelSeatInvite clears a pending invitation on a seat. The
-  // seat returns to the empty state. Server-side: must actually be
-  // an invited seat (not a human, not a bot, not empty).
+  // Clears a pending invitation; the seat returns to empty.
   cancelSeatInvite(id: string, seatIndex: number) {
     return request<Game>(`/api/games/${id}/seats/${seatIndex}/invite`, {
       method: "DELETE",
     });
   },
 
-  // declineSeatInvite is the invitee-side refusal. Auth via JWT (the
-  // invitee doesn't hold a seat token yet); the server checks that the
-  // caller is the invited userID. To *accept* an invitation, the
-  // invitee calls joinGame — pickSeatForUser routes them to the
-  // reserved seat automatically.
+  // Invitee-side refusal (auth via JWT — no seat token yet). To accept,
+  // the invitee calls joinGame, which routes them to the reserved seat.
   declineSeatInvite(id: string, seatIndex: number) {
     return request<Game>(`/api/games/${id}/seats/${seatIndex}/invite/decline`, {
       method: "POST",
     });
   },
 
-  // offerRematch is the propose-or-accept call. The first caller
-  // creates the offer; each subsequent caller adds their seat to the
-  // acceptance set. When every needed human seat has accepted, the new
-  // game is created and the returned DTO carries rematchGameId — the
-  // frontend uses that as the redirect signal. Idempotent: re-clicking
-  // by an already-accepted player is a no-op success.
+  // Propose-or-accept (server disambiguates). When every human seat has
+  // accepted, the returned DTO carries rematchGameId — the redirect
+  // signal. Idempotent: re-clicking by an accepted player is a no-op.
   offerRematch(id: string, playerToken: string) {
     return request<Game>(`/api/games/${id}/rematch/offer`, {
       method: "POST",
@@ -170,9 +151,7 @@ export const api = {
     });
   },
 
-  // declineRematch clears any pending rematch offer — either the
-  // proposer cancels or another player refuses, the outcome is the
-  // same: offer disappears.
+  // Clears any pending rematch offer (cancel or refuse — same outcome).
   declineRematch(id: string, playerToken: string) {
     return request<Game>(`/api/games/${id}/rematch/decline`, {
       method: "POST",
@@ -212,15 +191,13 @@ export const api = {
     return request<Game>(`/api/games/${id}`);
   },
 
-  // getGameRatings drives the in-game Elo line and the end-of-game
-  // modal's delta section. Returns rated:false for any game that
-  // isn't matchmaking-eligible (private, or any seat is a bot/anon).
+  // Returns rated:false for any game that isn't matchmaking-eligible
+  // (private, or any seat is a bot/anon).
   getGameRatings(id: string) {
     return request<GameRatings>(`/api/games/${id}/ratings`, { skipAuth: true });
   },
 
-  // joinGame: pass `name` only for anonymous users — authenticated users
-  // let the server fill it from their profile display name.
+  // Pass `name` only for anonymous users; authed users get it from profile.
   joinGame(id: string, name?: string, seat?: number) {
     const body: Record<string, unknown> = {};
     if (name) body.name = name;
@@ -282,17 +259,14 @@ export const api = {
     );
   },
 
-  // getPublicProfile fetches the read-only profile of any user.
-  // 404 surfaces as ApiError so the page can render a "user not
-  // found" state cleanly.
+  // 404 surfaces as ApiError so the page can render a "not found" state.
   getPublicProfile(userId: string) {
     return request<PublicProfile>(`/api/users/${encodeURIComponent(userId)}`, {
       skipAuth: true,
     });
   },
 
-  // searchUsers backs the "Inviter un ami" modal. Auth-gated
-  // server-side — the modal only renders for signed-in users anyway.
+  // Backs the "Inviter un ami" modal. Auth-gated server-side.
   searchUsers(query: string, limit = 20) {
     const url = `/api/users/search?q=${encodeURIComponent(query)}&limit=${limit}`;
     return request<ProfileSearchEntry[]>(url);

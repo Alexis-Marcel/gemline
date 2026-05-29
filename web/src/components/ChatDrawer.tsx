@@ -8,19 +8,9 @@ interface ChatDrawerProps {
   playerToken: string | null;
 }
 
-/**
- * ChatDrawer is the mobile-only chat overlay triggered from the chat
- * icon in the floating action stack. Renders a bottom sheet covering
- * ~80 dvh of the viewport, with a backdrop that dismisses on tap.
- *
- * Always mounted so the slide-up / slide-down transitions have something
- * to animate; visibility is controlled by `open`. Pointer-events-none
- * keeps the backdrop from intercepting taps while hidden.
- */
+// Mobile chat bottom sheet. Always mounted so the slide transition can
+// animate; pointer-events-none keeps the hidden backdrop from eating taps.
 export function ChatDrawer({ open, onClose, gameId, playerToken }: ChatDrawerProps) {
-  // Escape key closes the drawer — convenience for users with a keyboard
-  // attached (tablets, foldables) and makes the dismiss path symmetric
-  // with the GameEndModal / SeatInviteModal patterns elsewhere.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -45,8 +35,6 @@ export function ChatDrawer({ open, onClose, gameId, playerToken }: ChatDrawerPro
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
-          {/* Small drag-handle affordance — purely decorative for now,
-             but signals "this is a sheet you can dismiss". */}
           <div className="absolute inset-x-0 top-1.5 flex justify-center" aria-hidden>
             <div className="h-1 w-10 rounded-full bg-zinc-700" />
           </div>

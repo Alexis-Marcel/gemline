@@ -24,9 +24,8 @@ type RatedListener = (ratings: GameRatings) => void;
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 15_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
-// Grace period before tearing down a socket whose last subscriber unmounted.
-// React StrictMode mounts effects twice in dev; this delay lets the re-mount
-// re-attach without churning the connection.
+// Grace before tearing down a socket whose last subscriber unmounted, so a
+// StrictMode double-mount re-attaches without churning the connection.
 const CLEANUP_GRACE_MS = 250;
 
 class GameSocket {
@@ -39,25 +38,16 @@ class GameSocket {
   private ratedListeners = new Set<RatedListener>();
   private reconnectTimer: number | null = null;
   private closed = false;
-  /** Locally-tracked presence map (seatIndex → online). Lets new subscribers
-   *  catch up with the latest known state without waiting for a fresh event. */
+  /** Lets new subscribers catch up to the latest presence without waiting
+   *  for a fresh event. */
   private presence = new Map<number, boolean>();
-  /** Token sent on every connect for the hello handshake. Set via setHelloToken. */
   private helloToken: string | null = null;
-  /**
-   * Highest per-game event seq this socket has applied. null before the first
-   * event ever arrives. On reconnect, the client sends GET /events?since=lastSeq
-   * to pull every event that happened while it was offline; live WS events
-   * with seq <= lastSeq are skipped to avoid double-application after the
-   * catch-up has already covered them.
-   */
+  /** Highest applied per-game event seq. On reconnect we fetch
+   *  /events?since=lastSeq; live events with seq <= lastSeq are skipped to
+   *  avoid double-application. */
   private lastSeq: number | null = null;
-  /**
-   * Serializes message processing. Each incoming WS frame is appended to this
-   * chain; any catch-up fetch awaits inside the chain so a burst of live
-   * messages arriving during the fetch wait their turn instead of racing
-   * past it.
-   */
+  /** Serializes message processing so a catch-up fetch triggered by one
+   *  event is awaited before the next event in a burst is applied. */
   private processChain: Promise<void> = Promise.resolve();
   private state: ConnState = {
     status: "connecting",
@@ -70,8 +60,7 @@ class GameSocket {
     this.connect();
   }
 
-  /** Configure the seat token to send on `hello` after each (re)connect.
-   *  Pass null to revert to spectator mode. */
+  /** Seat token to send on `hello` after each (re)connect; null = spectator. */
   setHelloToken(token: string | null): void {
     this.helloToken = token;
     if (token && this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -97,7 +86,7 @@ class GameSocket {
 
   subscribePresence(fn: PresenceListener): () => void {
     this.presenceListeners.add(fn);
-    // Replay the last-known presence so new subscribers don't start blank.
+    // Replay last-known presence so new subscribers don't start blank.
     for (const [seat, online] of this.presence) fn(seat, online);
     return () => this.presenceListeners.delete(fn);
   }
@@ -151,11 +140,9 @@ class GameSocket {
     this.ws = ws;
 
     ws.onopen = () => {
-      // The server sends a fresh state snapshot on connect, so we don't need
-      // to manually resync — just reset the attempt counter.
+      // Server sends a fresh state snapshot on connect; just reset attempts.
       this.setState({ status: "open", attempt: 0 });
-      // Authenticate this connection's seat (if we have a token). Tells the
-      // server we're back so the disconnect-grace timer is cancelled.
+      // Re-auth the seat so the server cancels its disconnect-grace timer.
       this.sendHello();
     };
 
@@ -166,11 +153,6 @@ class GameSocket {
       } catch {
         return;
       }
-      // Append to the processing chain so a catch-up fetch triggered by
-      // one event is awaited before the next event from the burst is
-      // applied. The chain is created fresh each WebSocket lifecycle
-      // and survives reconnects (its tail is just an already-settled
-      // Promise once everything is processed).
       this.processChain = this.processChain.then(() => this.processEvent(ev));
     };
 
@@ -185,11 +167,8 @@ class GameSocket {
     };
   }
 
-  /**
-   * Dispatch an event to its specific listener set. The "what does each
-   * event type do to local state" decisions live here, isolated from
-   * sequencing / catch-up bookkeeping in processEvent.
-   */
+  /** Dispatch an event to its listener set, isolated from the
+   *  sequencing/catch-up bookkeeping in processEvent. */
   private applyEvent(ev: WsEvent): void {
     if (ev.type === "state") {
       this.setState({ game: ev.payload });
@@ -207,18 +186,11 @@ class GameSocket {
     }
   }
 
-  /**
-   * Process one event with seq tracking + catch-up. Three branches:
-   *   1. Event already covered by an earlier catch-up (seq <= lastSeq):
-   *      skip. The HTTP catch-up applied the same row already.
-   *   2. Gap detected (seq > lastSeq + 1): fetch the missing events
-   *      from /events?since=lastSeq, apply each in order, then check if
-   *      the current event is still pending or has been absorbed.
-   *   3. No gap, or no prior lastSeq (first connect): apply directly.
-   *
-   * lastSeq advances after each successful apply so subsequent dedup +
-   * gap detection have an up-to-date floor.
-   */
+  /** Process one event with seq tracking + catch-up:
+   *   1. seq <= lastSeq: already applied, skip.
+   *   2. gap (seq > lastSeq + 1): fetch missing events, then re-check.
+   *   3. no gap (or first connect): apply directly.
+   *  lastSeq advances after each apply to keep dedup/gap detection current. */
   private async processEvent(ev: WsEvent): Promise<void> {
     if (this.closed) return;
     const seq = ev.seq;
@@ -231,7 +203,7 @@ class GameSocket {
       await this.fetchCatchup();
       if (this.closed) return;
       if (this.lastSeq !== null && seq <= this.lastSeq) {
-        // The catch-up included this seq's row; nothing new to do here.
+        // Catch-up already covered this seq.
         return;
       }
     }
@@ -242,14 +214,9 @@ class GameSocket {
     }
   }
 
-  /**
-   * Fetch every event newer than lastSeq from the HTTP catch-up endpoint
-   * and apply them in order. Tolerant of failures: a network blip or 5xx
-   * just leaves lastSeq where it was, and the next live event will
-   * trigger another attempt. The catch-up endpoint caps results at 1000
-   * rows per call; if a client was offline long enough to overflow that,
-   * a second fetch on the next live event picks up where this one left off.
-   */
+  /** Fetch and apply every event newer than lastSeq. Failure-tolerant:
+   *  a blip leaves lastSeq untouched and the next live event retries. The
+   *  endpoint caps at 1000 rows; an overflow is picked up by the next fetch. */
   private async fetchCatchup(): Promise<void> {
     if (this.lastSeq === null) return;
     const since = this.lastSeq;
@@ -287,9 +254,8 @@ class GameSocket {
   }
 }
 
-// Module-level singletons keyed by game id. Multiple React subtrees that need
-// the same game share one connection, and a quick unmount/remount (StrictMode)
-// doesn't tear down and rebuild the socket.
+// Per-game-id singletons so multiple subtrees share one connection and a
+// StrictMode unmount/remount doesn't rebuild the socket.
 const sockets = new Map<string, GameSocket>();
 const cleanupTimers = new Map<string, number>();
 
@@ -326,10 +292,8 @@ export function acquireSocket(gameId: string, listener: Listener): () => void {
   };
 }
 
-// getSocket returns the shared GameSocket for `gameId`, creating it if
-// missing. Caller is responsible for arranging at least one subscription so
-// the connection is properly refcounted; otherwise the cleanup grace will
-// tear it down on the next tick.
+// Returns the shared socket, creating it if missing. Caller must arrange at
+// least one subscription or the cleanup grace tears it down on the next tick.
 export function getSocket(gameId: string): GameSocket {
   const pending = cleanupTimers.get(gameId);
   if (pending !== undefined) {
@@ -344,8 +308,7 @@ export function getSocket(gameId: string): GameSocket {
   return socket;
 }
 
-// acquireMoveStream subscribes to per-move events on the shared socket.
-// Useful when callers need the captures list, not just the resulting state.
+// Per-move events on the shared socket, for callers needing the captures list.
 export function acquireMoveStream(gameId: string, listener: MoveListener): () => void {
   const pending = cleanupTimers.get(gameId);
   if (pending !== undefined) {
@@ -375,11 +338,8 @@ export function acquireMoveStream(gameId: string, listener: MoveListener): () =>
   };
 }
 
-// acquireRatedStream subscribes to "rated" events — fired once per
-// game when the server has applied the Elo update post game-end. The
-// end-of-game modal uses this to swap from "calcul du rating…" to the
-// final deltas without polling. Same shared-socket + refcount semantics
-// as the other acquire* helpers.
+// "rated" events — fired once per game after the server applies the Elo
+// update; lets the end-of-game modal swap to final deltas without polling.
 export function acquireRatedStream(gameId: string, listener: RatedListener): () => void {
   const pending = cleanupTimers.get(gameId);
   if (pending !== undefined) {
@@ -409,8 +369,7 @@ export function acquireRatedStream(gameId: string, listener: RatedListener): () 
   };
 }
 
-// acquirePresenceStream subscribes to per-seat presence events on the shared
-// socket. Returns the unsubscribe.
+// Per-seat presence events on the shared socket.
 export function acquirePresenceStream(gameId: string, listener: PresenceListener): () => void {
   const pending = cleanupTimers.get(gameId);
   if (pending !== undefined) {
@@ -440,9 +399,7 @@ export function acquirePresenceStream(gameId: string, listener: PresenceListener
   };
 }
 
-// acquireChatStream subscribes to chat events on the shared socket for
-// `gameId`. The lifecycle counts toward the socket's refcount: as long as a
-// chat listener is alive, the socket stays open. Returns the unsubscribe.
+// Chat events on the shared socket; counts toward the socket's refcount.
 export function acquireChatStream(gameId: string, listener: ChatListener): () => void {
   const pending = cleanupTimers.get(gameId);
   if (pending !== undefined) {

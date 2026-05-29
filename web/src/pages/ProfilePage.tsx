@@ -17,9 +17,8 @@ export function ProfilePage() {
   const [error, setError] = useState<string | null>(null);
   const [loadingData, setLoadingData] = useState(true);
 
-  // Mark "fetching" as derived state on auth changes instead of
-  // setting it in the effect body — the loading flag becomes visible
-  // on the same render that observes the auth change.
+  // Derived-state reset so the loading flag shows on the same render that
+  // observes the auth change, not the one after.
   const currUserId = user?.id ?? null;
   const [prevUserId, setPrevUserId] = useState(currUserId);
   const [prevLoading, setPrevLoading] = useState(loading);

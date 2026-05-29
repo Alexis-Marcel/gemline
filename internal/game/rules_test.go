@@ -11,18 +11,16 @@ func setStones(b *Board, stones map[Position]Color) {
 	}
 }
 
-// pos is a tiny constructor that keeps test setups readable: pos(q, r).
 func pos(q, r int) Position { return Position{Q: q, R: r} }
 
 // ---- Board geometry ----
 
 func TestBoard_HexBounds(t *testing.T) {
 	b := NewBoard(11)
-	// Center is in.
 	if !b.In(pos(0, 0)) {
 		t.Fatal("center should be in")
 	}
-	// Six corner intersections of the hex of side 11 are at distance 10.
+	// The six corners of a side-11 hex sit at distance 10 from center.
 	corners := []Position{
 		pos(10, 0), pos(-10, 0),
 		pos(0, 10), pos(0, -10),
@@ -33,10 +31,9 @@ func TestBoard_HexBounds(t *testing.T) {
 			t.Fatalf("corner %v should be in", c)
 		}
 	}
-	// Just outside any corner is out.
 	outs := []Position{
 		pos(11, 0), pos(0, 11), pos(11, -10), pos(-11, 10),
-		pos(6, 6), // q+r = 12, exceeds 10
+		pos(6, 6), // q+r = 12 > 10
 	}
 	for _, o := range outs {
 		if b.In(o) {
@@ -47,12 +44,10 @@ func TestBoard_HexBounds(t *testing.T) {
 
 func TestBoard_OffBoardSentinel(t *testing.T) {
 	b := NewBoard(11)
-	// A storage slot outside the hex should read as OffBoard.
-	// (6, 6) has q+r = 12 > 10, so it's off-board but inside the (2N-1)² array.
+	// (6,6) has q+r = 12 > 10: off-board but inside the (2N-1)² array.
 	if b.Cells[b.idx(pos(6, 6))] != OffBoard {
 		t.Fatalf("off-board slot should be OffBoard, got %v", b.Cells[b.idx(pos(6, 6))])
 	}
-	// A valid empty cell should read as Empty.
 	if b.At(pos(0, 0)) != Empty {
 		t.Fatalf("center should be Empty, got %v", b.At(pos(0, 0)))
 	}
@@ -139,10 +134,8 @@ func TestCapture_NoCaptureOnTriplet(t *testing.T) {
 
 func TestCapture_MultipleAxes(t *testing.T) {
 	b := NewBoard(11)
-	// At placement (1, 0) we trigger captures on two axes simultaneously.
-	// East-West (right flanker): (-2,0)=C1, (-1,0)=C2, (0,0)=C2, (1,0)=placed
-	// NE-SW (left flanker via direction (1,-1)):
-	//   (1, 0)=placed, (2,-1)=C3, (3,-2)=C3, (4,-3)=C1
+	// Placing C1 at (1,0) closes two sandwiches at once: E-W (right flanker)
+	// and NE-SW via direction (1,-1) (left flanker).
 	setStones(b, map[Position]Color{
 		pos(-2, 0): C1, pos(-1, 0): C2, pos(0, 0): C2,
 		pos(2, -1): C3, pos(3, -2): C3, pos(4, -3): C1,
@@ -154,12 +147,11 @@ func TestCapture_MultipleAxes(t *testing.T) {
 }
 
 func TestCapture_NoSelfCaptureOnSuicide(t *testing.T) {
-	// Placing C1 between two C2 flankers ([C2][C1][C1][C2]) must NOT trigger
-	// a capture of the placer.
+	// Placing C1 into [C2][C1][_][C2] must not self-capture the placer.
 	b := NewBoard(11)
 	setStones(b, map[Position]Color{
 		pos(-2, 0): C2,
-		pos(-1, 0): C1, // pre-existing C1 between the C2 flankers
+		pos(-1, 0): C1,
 		pos(1, 0):  C2,
 	})
 	b.Set(pos(0, 0), C1)
@@ -364,10 +356,10 @@ func TestWin_Capture(t *testing.T) {
 
 func TestColor_String(t *testing.T) {
 	cases := map[Color]string{
-		OffBoard: " ",
-		Empty:    ".",
-		C1:       "1",
-		C6:       "6",
+		OffBoard:  " ",
+		Empty:     ".",
+		C1:        "1",
+		C6:        "6",
 		Color(42): "?",
 	}
 	for c, want := range cases {
@@ -447,11 +439,8 @@ func TestApplyMove_RejectsWhenNoGemsLeft(t *testing.T) {
 // ---- Capture chaining on the same axis ----
 
 func TestCapture_TwoCapturesOnSameAxis(t *testing.T) {
-	// Setup on row r=0:
-	//   q = -3 -2 -1  0   1   2  3
-	//       C1 C2 C2 (J) C2  C2 C1
-	// Placing C1 at q=0 is the right flanker of the left sandwich and the
-	// left flanker of the right sandwich → both captures fire on axis (1,0).
+	// Row r=0: [C1 C2 C2 _ C2 C2 C1] at q=-3..3. Placing C1 at q=0 flanks
+	// both sandwiches, so both captures fire on axis (1,0).
 	b := NewBoard(11)
 	setStones(b, map[Position]Color{
 		pos(-3, 0): C1,
@@ -476,19 +465,17 @@ func TestClock_TickAccrualAndIncrement(t *testing.T) {
 	t0 := time.Unix(1000, 0)
 	g.StartClock(t0)
 
-	// C1 thinks for 2s, then plays.
+	// C1 thinks for 2s then plays.
 	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)}, t0.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	// C1 spent 2s (-2000) + got 500 increment = -1500 from 10000 -> 8500.
+	// 10000 - 2000 spent + 500 increment = 8500.
 	if got := g.Players[0].TimeRemainingMs; got != 8500 {
 		t.Errorf("C1 time after move: got %d, want 8500", got)
 	}
-	// C2's clock hasn't ticked yet.
 	if got := g.Players[1].TimeRemainingMs; got != 10_000 {
 		t.Errorf("C2 time should be untouched: got %d", got)
 	}
-	// TurnStartedAt advanced to the move's `now`.
 	if !g.TurnStartedAt.Equal(t0.Add(2 * time.Second)) {
 		t.Errorf("TurnStartedAt didn't advance: got %v", g.TurnStartedAt)
 	}
@@ -508,9 +495,8 @@ func TestClock_FlaggedOnExpiredMove(t *testing.T) {
 }
 
 func TestClock_DisabledWhenInitialZero(t *testing.T) {
-	// Default tests pass time.Time{} and never call StartClock — clocks
-	// should not interfere.
-	g := NewGame([]Color{C1, C2}, Config{BoardSide: 11}) // zero clock config
+	// No StartClock call and zero clock config — clocks must not interfere.
+	g := NewGame([]Color{C1, C2}, Config{BoardSide: 11})
 	t0 := time.Unix(1000, 0)
 	if _, err := g.ApplyMove(Move{Player: C1, Pos: pos(0, 0)}, t0); err != nil {
 		t.Fatal(err)
@@ -538,7 +524,7 @@ func TestForfeit_NoOpOnFinishedGame(t *testing.T) {
 	g := NewGame([]Color{C1, C2}, DefaultConfig(2))
 	g.Winner = C1
 	g.WinKind = WinAlignment6
-	g.Forfeit(C1) // should not overwrite the existing decision
+	g.Forfeit(C1)
 	if g.Winner != C1 || g.WinKind != WinAlignment6 {
 		t.Fatalf("Forfeit overwrote a finished game: winner=%v kind=%v", g.Winner, g.WinKind)
 	}
@@ -546,17 +532,16 @@ func TestForfeit_NoOpOnFinishedGame(t *testing.T) {
 
 // ---- Interaction of capture and alignments ----
 
-// TestCaptureBreaksOpponentAlignment verifies that the (computed-on-demand)
-// alignment counts reflect the board after captures: a victim stone that was
-// part of a 4-run on a crossing axis no longer is once it is captured.
+// TestCaptureBreaksOpponentAlignment verifies on-demand alignment counts
+// reflect post-capture board: a captured victim no longer counts toward a
+// 4-run on a crossing axis.
 func TestCaptureBreaksOpponentAlignment(t *testing.T) {
 	g := NewGame([]Color{C1, C2}, Config{BoardSide: 11})
-	// East-West capture setup along r=0: [C1][C2][C2][placed C1].
+	// E-W capture setup along r=0: [C1][C2][C2][placed C1].
 	g.Board.Set(pos(-2, 0), C1)
 	g.Board.Set(pos(-1, 0), C2)
 	g.Board.Set(pos(0, 0), C2)
-	// C2 also has a vertical 4-run (axis (0,1)) passing through (-1, 0):
-	//   (-1,-2) (-1,-1) (-1,0) (-1,1)
+	// C2 also has a vertical 4-run on axis (0,1) through (-1,0).
 	g.Board.Set(pos(-1, -2), C2)
 	g.Board.Set(pos(-1, -1), C2)
 	g.Board.Set(pos(-1, 1), C2)

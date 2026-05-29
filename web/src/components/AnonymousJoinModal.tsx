@@ -7,15 +7,9 @@ interface AnonymousJoinModalProps {
   onSubmit: (name: string) => void | Promise<void>;
 }
 
-/**
- * AnonymousJoinModal is the one-time "what's your name?" prompt for
- * anonymous visitors landing on a waiting game. Authenticated users
- * auto-join silently with their profile name, so this is only ever
- * seen by guests. Required because the server has no other way to
- * identify an anon seat. The form is blocking (no backdrop close,
- * no X) — the alternative is "click around an empty game you can't
- * interact with", which is worse.
- */
+// Guests only: the server has no other way to identify an anon seat.
+// Blocking by design (no backdrop close / X) since there's nothing to do
+// in the game until a name is provided.
 export function AnonymousJoinModal({
   seatsFree,
   initialName,

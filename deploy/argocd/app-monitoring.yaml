@@ -1,9 +1,5 @@
-# kube-prometheus-stack installs Prometheus + Grafana + Alertmanager +
-# kube-state-metrics + node-exporter and the operator CRDs that the
-# gemline ServiceMonitor (deploy/k8s/servicemonitor.yaml) depends on.
-# Apply this Application BEFORE syncing the gemline app on a fresh
-# cluster so the ServiceMonitor CRD exists when ArgoCD tries to apply
-# the gemline ServiceMonitor.
+# kube-prometheus-stack. Sync this before app-gemline so the ServiceMonitor
+# CRD exists when the gemline ServiceMonitor is applied.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -17,19 +13,14 @@ spec:
   source:
     repoURL: https://prometheus-community.github.io/helm-charts
     chart: kube-prometheus-stack
-    # Bump as needed — chart changelog is at
-    # https://github.com/prometheus-community/helm-charts/releases
     targetRevision: 75.6.0
     helm:
       releaseName: kube-prometheus-stack
       values: |
         prometheus:
           prometheusSpec:
-            # Default Helm values restrict discovery to objects carrying
-            # the chart's release label. Flipping these off lets
-            # Prometheus pick up ServiceMonitors / PodMonitors / Rules
-            # from any namespace without forcing app teams to label
-            # their resources with the operator's release name.
+            # Discover ServiceMonitors/PodMonitors/Rules in any namespace,
+            # not just those carrying the chart's release label.
             serviceMonitorSelectorNilUsesHelmValues: false
             podMonitorSelectorNilUsesHelmValues: false
             ruleSelectorNilUsesHelmValues: false
@@ -42,9 +33,7 @@ spec:
                 memory: 512Mi
               limits:
                 memory: 2Gi
-            # Enable persistence so a Prometheus restart doesn't wipe
-            # the last 15 days of metrics. 10Gi is plenty for a 2-pod
-            # app on k3s — bump if you add more scrape targets.
+            # Persist so a restart doesn't wipe the retained metrics.
             storageSpec:
               volumeClaimTemplate:
                 spec:
@@ -53,11 +42,7 @@ spec:
                     requests:
                       storage: 10Gi
         grafana:
-          # admin user/password pulled from Infisical via ESO. See
-          # deploy/k8s/external-secrets/external-secret-grafana-admin.yaml
-          # which creates the Secret `grafana-admin` with keys
-          # `admin-user` + `admin-password`. The chart reads it via
-          # admin.existingSecret + keys below.
+          # admin creds come from the grafana-admin Secret (ESO/Infisical).
           admin:
             existingSecret: grafana-admin
             userKey: admin-user
@@ -66,8 +51,6 @@ spec:
           persistence:
             enabled: true
             size: 2Gi
-          # Pre-wire the in-cluster Prometheus as the default datasource
-          # so dashboards work out of the box.
           sidecar:
             dashboards:
               enabled: true
@@ -91,17 +74,12 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      # ServerSideApply: the chart's large CRDs exceed the 256KB
+      # client-side-apply annotation limit.
       - ServerSideApply=true
-      # kube-prometheus-stack ships large CRDs whose
-      # last-applied-configuration annotation can exceed the 256KB
-      # client-side-apply limit. ServerSideApply above handles it; this
-      # forces ArgoCD to take ownership of fields previously managed by
-      # a prior install (e.g. when bumping chart versions).
       - ApplyOutOfSyncOnly=true
     retry:
-      # CRDs from the chart can take a few seconds to register before
-      # the operator-managed CRs (Prometheus, Alertmanager…) apply
-      # cleanly. Retry with backoff instead of failing the first sync.
+      # CRDs take a few seconds to register before their CRs apply cleanly.
       limit: 5
       backoff:
         duration: 10s

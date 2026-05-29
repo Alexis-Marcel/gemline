@@ -1,18 +1,7 @@
 ---
-# Playbook principal — orchestre les rôles dans l'ordre.
-#
-# Lancer depuis deploy/ansible/ :
-#   ansible-playbook playbook.yaml
-#
-# Pour ne lancer qu'un rôle :
-#   ansible-playbook playbook.yaml --tags networking
-#
-# Pour dry-run (vérifier ce qui CHANGERAIT sans rien appliquer) :
-#   ansible-playbook playbook.yaml --check
-
 - name: Bootstrap network on all k3s nodes
-  hosts: k3s_cluster   # cible le groupe défini dans inventory.yaml
-  gather_facts: false  # on n'a pas besoin des facts (CPU, RAM, etc.) — gain de temps
+  hosts: k3s_cluster
+  gather_facts: false
   roles:
     - role: networking
       tags: [networking]
@@ -20,10 +9,8 @@
 - name: Install k3s server on control plane
   hosts: control_plane
   gather_facts: false
-  # serial: 1 ensures the first CP completes its --cluster-init before
-  # additional CPs attempt --server. Without this, in HA mode (cp_count
-  # >= 3), the join attempts on cp2/cp3 race the bootstrap on cp1 and
-  # the install script fails to reach the API.
+  # serial: 1 lets the first CP finish --cluster-init before cp2/cp3 run
+  # --server; otherwise the HA joins race the etcd bootstrap and fail.
   serial: 1
   roles:
     - role: k3s_server
@@ -36,10 +23,8 @@
     - role: k3s_agent
       tags: [k3s, k3s_agent]
 
-# Add-ons (cert-manager, ArgoCD, ArgoCD apps) live IN the cluster as
-# K8s objects, not on a specific node. Applying them from every CP is
-# redundant and racey. We restrict to the first CP — any CP would do
-# but pinning to one keeps the logs single-threaded and idempotent.
+# Add-ons are cluster-scoped K8s objects; pin to the first CP so they're
+# applied once instead of racing from every CP.
 - name: Install cluster add-ons (run once, from first CP)
   hosts: control_plane[0]
   gather_facts: false

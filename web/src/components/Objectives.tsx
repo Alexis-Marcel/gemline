@@ -1,11 +1,6 @@
 import type { Thresholds } from "../api/types";
 
-/**
- * Objectives summarises the win conditions for the running game. We
- * intentionally display only what the rulebook promises; the live count of
- * alignments for each player is hidden — counting your own and your
- * opponents' lines is part of the game.
- */
+// Live alignment counts are deliberately hidden: counting lines is part of the game.
 export function Objectives({ thresholds }: { thresholds: Thresholds }) {
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3">

@@ -6,19 +6,16 @@ import (
 	"time"
 )
 
-// DisconnectGracePeriod is how long a seat may stay disconnected before its
-// player forfeits the game. Independent from the chess clock — typically
-// much shorter so a game doesn't stall.
+// DisconnectGracePeriod is how long a seat may stay disconnected before it
+// forfeits — independent of (and usually shorter than) the chess clock.
 const DisconnectGracePeriod = 60 * time.Second
 
-// presenceKey identifies a (game, seat) pair for the timer registry.
 type presenceKey struct {
 	gameID    string
 	seatIndex int
 }
 
-// presenceManager owns per-seat disconnect-grace timers. At most one timer
-// per (game, seat) at a time.
+// presenceManager owns at most one disconnect-grace timer per (game, seat).
 type presenceManager struct {
 	mu      sync.Mutex
 	cancels map[presenceKey]context.CancelFunc
@@ -28,10 +25,8 @@ func newPresenceManager() *presenceManager {
 	return &presenceManager{cancels: make(map[presenceKey]context.CancelFunc)}
 }
 
-// Schedule starts a disconnect-grace timer for the seat. If a timer already
-// existed for the same key, it is cancelled first. The cancel-and-install is
-// atomic under pm.mu so two concurrent Schedules for the same key cannot
-// orphan one of their cancel funcs and leak a goroutine.
+// Schedule starts (or replaces) the grace timer for a seat. Cancel-and-install
+// is atomic under pm.mu so concurrent Schedules can't leak a goroutine.
 func (pm *presenceManager) Schedule(gameID string, seatIndex int, grace time.Duration, onTimeout func()) {
 	key := presenceKey{gameID, seatIndex}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -52,15 +47,14 @@ func (pm *presenceManager) Schedule(gameID string, seatIndex int, grace time.Dur
 	}()
 }
 
-// Cancel stops any pending timer for (gameID, seatIndex). No-op if none.
 func (pm *presenceManager) Cancel(gameID string, seatIndex int) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.cancelLocked(presenceKey{gameID, seatIndex})
 }
 
-// CancelGame stops every pending timer for `gameID`. Used when the game
-// ends (any reason) so we don't fire a stale forfeit.
+// CancelGame stops every timer for gameID, so a finished game can't fire a
+// stale forfeit.
 func (pm *presenceManager) CancelGame(gameID string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -71,7 +65,6 @@ func (pm *presenceManager) CancelGame(gameID string) {
 	}
 }
 
-// CancelAll stops every pending timer; called on server shutdown.
 func (pm *presenceManager) CancelAll() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()

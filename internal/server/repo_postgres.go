@@ -11,8 +11,7 @@ import (
 	"github.com/alexis/gemline/internal/game"
 )
 
-// PostgresRepo persists games to a Postgres database. Schema is in
-// internal/db/migrations.
+// PostgresRepo persists games to Postgres; schema in internal/db/migrations.
 type PostgresRepo struct {
 	pool *sql.DB
 }
@@ -83,7 +82,7 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 		return nil, fmt.Errorf("select game: %w", err)
 	}
 
-	// Seats — needed to know the player roster before we can construct GameState.
+	// Seats first: the roster is needed to construct GameState.
 	seatRows, err := r.pool.QueryContext(ctx, `
 		SELECT seat_index, color, name, token_hash, user_id, occupied, is_bot
 		FROM seats WHERE game_id = $1 ORDER BY seat_index
@@ -133,21 +132,11 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 	}
 	state := game.NewGame(colors, cfg)
 
-	// Replay moves through ApplyMove so captures, wins, AND chess-clock
-	// deductions are reproduced from the same rule engine that produced
-	// them at play time. played_at is passed as the move's "now" so each
-	// player's TimeRemainingMs converges to the same value it had live.
-	//
-	// We deliberately do NOT pre-seed state.Winner from the DB here:
-	// ApplyMove rejects further moves once IsOver() is true, so for any
-	// finished game the very first replay call would return ErrGameOver
-	// and LoadGame would fail. The persisted Winner/WinKind are
-	// re-applied after the loop, which:
-	//   - handles move-driven endings (alignment, capture) naturally
-	//     since the engine sets Winner during the last move's apply;
-	//   - handles externally-driven endings (resign, timeout, draw)
-	//     by overlaying the DB's recorded outcome on top of the
-	//     replayed board state.
+	// Replay through ApplyMove so captures, wins, and clock deductions are
+	// reproduced by the same engine; played_at is the move's "now" so each
+	// TimeRemainingMs converges to its live value. Winner is NOT pre-seeded:
+	// ApplyMove rejects moves once IsOver(), so a finished game would fail to
+	// replay. The persisted outcome is overlaid after the loop instead.
 	moveRows, err := r.pool.QueryContext(ctx, `
 		SELECT color, q, r, played_at FROM moves WHERE game_id = $1 ORDER BY ordinal
 	`, id)
@@ -156,10 +145,6 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 	}
 	defer moveRows.Close()
 
-	// Walk the move log to rebuild the in-memory state. We start the clock
-	// from a reference that won't accidentally drain time for a game whose
-	// players haven't been around: use the first move's played_at if any,
-	// otherwise leave TurnStartedAt zero until the live code path sets it.
 	var lastPlayed time.Time
 	for moveRows.Next() {
 		var (
@@ -171,7 +156,7 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 			return nil, fmt.Errorf("scan move: %w", err)
 		}
 		if state.TurnStartedAt.IsZero() {
-			state.TurnStartedAt = playedAt // first move's start = its own timestamp
+			state.TurnStartedAt = playedAt
 		}
 		if _, err := state.ApplyMove(game.Move{
 			Player: game.Color(colorInt),
@@ -185,24 +170,19 @@ func (r *PostgresRepo) LoadGame(ctx context.Context, id string) (*GameRecord, er
 		return nil, err
 	}
 
-	// On reload, if the game is in progress with no moves yet, restart the
-	// clock from "now" rather than created_at — otherwise a long-idle game
-	// would flag the active player immediately on load.
+	// In-progress game with no moves yet: restart the clock from now, else a
+	// long-idle game would flag the active player immediately on load.
 	if status == StatusPlaying && lastPlayed.IsZero() && state.ClockEnabled() {
 		state.TurnStartedAt = time.Now()
 	}
 
-	// Trust the DB for the outcome: replay handles move-driven wins,
-	// but resign / timeout / draw leave the board state empty of an
-	// engine-set Winner and need this overlay. Idempotent for
-	// move-driven endings — the engine has already set the same
-	// values during the last ApplyMove.
+	// Overlay the DB outcome: replay covers move-driven wins, but resign /
+	// timeout / draw need this. Idempotent for move-driven endings.
 	state.Winner = game.Color(winnerColor)
 	state.WinKind = game.WinKind(winKind)
 
-	// Deserialise rematch_offer if the row has one. Errors are non-fatal:
-	// the offer is recoverable (the proposer can just re-click) but a
-	// corrupt blob shouldn't block loading the game itself.
+	// Decode rematch_offer if present. A corrupt blob is non-fatal: the offer
+	// is recoverable (re-click), and shouldn't block loading the game.
 	var offer *RematchOffer
 	if len(rematchOffer) > 0 {
 		var parsed RematchOffer
@@ -283,8 +263,8 @@ func (r *PostgresRepo) AppendMove(ctx context.Context, gameID string, ordinal in
 	return tx.Commit()
 }
 
-// nilIfEmpty returns nil for an empty byte slice so it is stored as SQL NULL
-// rather than as a zero-length bytea (which would compare differently).
+// nilIfEmpty maps an empty slice to nil so it stores as SQL NULL, not a
+// zero-length bytea (which compares differently).
 func nilIfEmpty(b []byte) []byte {
 	if len(b) == 0 {
 		return nil
@@ -319,10 +299,8 @@ func (r *PostgresRepo) UpsertProfile(ctx context.Context, userID, displayName st
 	return err
 }
 
-// EnsureProfile is the create-only sibling of UpsertProfile: it never
-// overwrites an existing display_name. Useful at rating-apply time and
-// in /api/auth/me, where we want every authenticated player to have a
-// profile row without stomping on a name they may have set themselves.
+// EnsureProfile is the create-only sibling of UpsertProfile: ON CONFLICT DO
+// NOTHING, so it never overwrites a chosen display_name.
 func (r *PostgresRepo) EnsureProfile(ctx context.Context, userID, fallbackName string) error {
 	_, err := r.pool.ExecContext(ctx, `
 		INSERT INTO profiles (user_id, display_name) VALUES ($1, $2)
@@ -332,11 +310,8 @@ func (r *PostgresRepo) EnsureProfile(ctx context.Context, userID, fallbackName s
 }
 
 func (r *PostgresRepo) GamesForUser(ctx context.Context, userID string, limit int) ([]UserGame, error) {
-	// Only finished games surface in the history view. Waiting/playing
-	// games are either still in progress (the user has them open in
-	// another tab) or abandoned — neither belongs on a "ce que tu as
-	// joué" list. Stale waiting games are reaped separately by the
-	// stale-game cleaner (see Store.StartStaleGameCleaner).
+	// History shows finished games only; in-progress or abandoned ones don't
+	// belong on a "what you played" list.
 	rows, err := r.pool.QueryContext(ctx, `
 		SELECT g.id, g.status, s.seat_index, s.color, g.winner_color,
 		       (SELECT COUNT(*) FROM moves m WHERE m.game_id = g.id),
@@ -355,11 +330,11 @@ func (r *PostgresRepo) GamesForUser(ctx context.Context, userID string, limit in
 	out := make([]UserGame, 0)
 	for rows.Next() {
 		var (
-			ug         UserGame
-			color      int
-			winner     int
-			createdAt  time.Time
-			updatedAt  time.Time
+			ug        UserGame
+			color     int
+			winner    int
+			createdAt time.Time
+			updatedAt time.Time
 		)
 		if err := rows.Scan(&ug.GameID, &ug.Status, &ug.SeatIndex, &color, &winner, &ug.MoveCount, &createdAt, &updatedAt); err != nil {
 			return nil, err
@@ -375,9 +350,8 @@ func (r *PostgresRepo) GamesForUser(ctx context.Context, userID string, limit in
 }
 
 func (r *PostgresRepo) StatsForUser(ctx context.Context, userID string) (UserStats, error) {
-	// Per-mode ratings are pulled via correlated subqueries with the
-	// elo.DefaultRating fallback baked in. Keeping it in a single query
-	// avoids a round-trip per mode at the cost of slightly busier SQL.
+	// Per-mode ratings via correlated subqueries with the default baked in, to
+	// keep this a single round-trip.
 	row := r.pool.QueryRowContext(ctx, `
 		SELECT
 		  COUNT(*) AS total,
@@ -411,8 +385,7 @@ func (r *PostgresRepo) AppendMessage(ctx context.Context, m *Message) error {
 }
 
 func (r *PostgresRepo) MessagesForGame(ctx context.Context, gameID string, limit int) ([]Message, error) {
-	// Fetch the most-recent `limit` rows then reverse so the response is in
-	// chronological order (oldest first) — the natural order for rendering.
+	// Fetch the most-recent limit rows, then reverse to chronological order.
 	rows, err := r.pool.QueryContext(ctx, `
 		SELECT id, seat_index, author_color, author_name, body, sent_at
 		FROM messages WHERE game_id = $1
@@ -426,9 +399,9 @@ func (r *PostgresRepo) MessagesForGame(ctx context.Context, gameID string, limit
 	out := make([]Message, 0)
 	for rows.Next() {
 		var (
-			m        Message
-			color    int
-			sentAt   time.Time
+			m      Message
+			color  int
+			sentAt time.Time
 		)
 		if err := rows.Scan(&m.ID, &m.SeatIndex, &color, &m.AuthorName, &m.Body, &sentAt); err != nil {
 			return nil, err
@@ -441,7 +414,6 @@ func (r *PostgresRepo) MessagesForGame(ctx context.Context, gameID string, limit
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Reverse in-place: oldest first.
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}
@@ -449,9 +421,8 @@ func (r *PostgresRepo) MessagesForGame(ctx context.Context, gameID string, limit
 }
 
 func (r *PostgresRepo) LobbyGames(ctx context.Context, limit int) ([]LobbyEntry, error) {
-	// Public + still-waiting games, with a single denormalised seat-occupancy
-	// count so the lobby UI can show "1/2" without us shipping the full seat
-	// list. The supporting partial index is games_public_waiting_idx.
+	// Public waiting games with denormalised seat counts so the lobby shows
+	// "1/2" without shipping the seat list. Index: games_public_waiting_idx.
 	rows, err := r.pool.QueryContext(ctx, `
 		SELECT g.id,
 		       (SELECT COUNT(*) FROM seats s WHERE s.game_id = g.id) AS players,
@@ -479,9 +450,8 @@ func (r *PostgresRepo) LobbyGames(ctx context.Context, limit int) ([]LobbyEntry,
 }
 
 func (r *PostgresRepo) SetRematchLink(ctx context.Context, originalID, newID string) (string, error) {
-	// COALESCE preserves an already-set link, so the second writer in a race
-	// is a no-op and we always observe the winning ID with a single RETURNING
-	// — no extra SELECT, no row-level lock dance.
+	// COALESCE preserves an already-set link, so the racing second writer is a
+	// no-op and RETURNING hands back the winning ID without an extra SELECT.
 	row := r.pool.QueryRowContext(ctx, `
 		UPDATE games
 		SET rematch_game_id = COALESCE(rematch_game_id, $1)
@@ -496,8 +466,7 @@ func (r *PostgresRepo) SetRematchLink(ctx context.Context, originalID, newID str
 		return "", err
 	}
 	if !got.Valid || got.String == "" {
-		// Shouldn't happen — COALESCE($1, …) makes the result non-null on
-		// any successful UPDATE — but tolerate it rather than crashing.
+		// COALESCE should make this non-null on any successful UPDATE; tolerate.
 		return newID, nil
 	}
 	return got.String, nil
@@ -544,8 +513,8 @@ func (r *PostgresRepo) ApplyRatedGame(ctx context.Context, gameID, mode string, 
 	defer tx.Rollback()
 
 	// Single-writer guard: only the goroutine that flips rated_at NULL→NOW
-	// actually applies the rating math. A subsequent caller sees no row
-	// returned and bails out without double-crediting Elo.
+	// applies the math; a later caller gets no row and bails without
+	// double-crediting Elo.
 	var marked sql.NullString
 	if err := tx.QueryRowContext(ctx, `
 		UPDATE games SET rated_at = NOW()
@@ -559,8 +528,6 @@ func (r *PostgresRepo) ApplyRatedGame(ctx context.Context, gameID, mode string, 
 	}
 
 	for _, u := range updates {
-		// New columns are computed in the UPDATE so missing rows (first
-		// rated game ever) start from the defaults seeded by INSERT.
 		var win, loss, draw int
 		switch u.Result {
 		case 'W':
@@ -584,11 +551,8 @@ func (r *PostgresRepo) ApplyRatedGame(ctx context.Context, gameID, mode string, 
 		if err != nil {
 			return false, fmt.Errorf("upsert rating %s/%s: %w", u.UserID, mode, err)
 		}
-		// Persist the delta in rating_history so the end-of-game UI
-		// can show "+12 / -8" without doing arithmetic on whatever
-		// the user's *current* rating happens to be later.
-		// PK (game_id, user_id) protects against double inserts; this
-		// commits with the ratings UPDATE so they're never out of sync.
+		// Record the delta in rating_history (PK game_id,user_id blocks double
+		// inserts) in the same tx as the ratings update so they can't desync.
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO rating_history (game_id, user_id, old_rating, new_rating, delta, result)
 			VALUES ($1, $2, $3, $4, $5, $6)
@@ -602,21 +566,10 @@ func (r *PostgresRepo) ApplyRatedGame(ctx context.Context, gameID, mode string, 
 	return true, nil
 }
 
-// RatingsForGame builds the per-seat rating snapshot for one game. It
-// queries seats + games + ratings + rating_history in one round each
-// rather than one per user, because the game ID alone is sufficient
-// for every lookup. Returns Rated=false (with empty Seats) for games
-// that aren't matchmaking-eligible.
-//
-// Decision tree:
-//   - game.visibility != public OR any seat is_bot OR any seat user_id NULL
-//     → Rated=false, no seats body (UI hides the Elo section)
-//   - rated_at IS NULL → Rated=true, Applied=false, Seats with
-//     CurrentRating only
-//   - rated_at IS NOT NULL → Rated=true, Applied=true, Seats with
-//     CurrentRating + the historical Old/New/Delta/Result fields
+// RatingsForGame builds the per-seat rating snapshot keyed by game ID.
+// Rated=false (empty Seats) for ineligible games (non-public, or any bot/anon
+// seat); Applied is true once rated_at is set, which adds the history fields.
 func (r *PostgresRepo) RatingsForGame(ctx context.Context, gameID string) (GameRatings, error) {
-	// Step 1: game metadata + ratedness gate
 	var (
 		visibility string
 		ratedAt    sql.NullTime
@@ -638,7 +591,6 @@ func (r *PostgresRepo) RatingsForGame(ctx context.Context, gameID string) (GameR
 		mode = RatingMode1v1
 	}
 
-	// Step 2: are all seats rateable (no bot, no anon)?
 	if visibility != string(VisibilityPublic) {
 		return GameRatings{Mode: mode, Rated: false, Applied: false, Seats: []SeatRating{}}, nil
 	}
@@ -654,8 +606,7 @@ func (r *PostgresRepo) RatingsForGame(ctx context.Context, gameID string) (GameR
 		return GameRatings{Mode: mode, Rated: false, Applied: false, Seats: []SeatRating{}}, nil
 	}
 
-	// Step 3: pull seats + current ratings + history (LEFT JOIN — rows
-	// are absent for in-progress games)
+	// LEFT JOIN history — rows are absent for in-progress games.
 	rows, err := r.pool.QueryContext(ctx, `
 		SELECT s.seat_index, s.user_id,
 		       COALESCE(r.rating, 1200),
@@ -675,13 +626,13 @@ func (r *PostgresRepo) RatingsForGame(ctx context.Context, gameID string) (GameR
 	out := GameRatings{Mode: mode, Rated: true, Applied: applied, Seats: []SeatRating{}}
 	for rows.Next() {
 		var (
-			seatIdx      int
-			userID       sql.NullString
-			currentRtg   int
-			oldRtg       sql.NullInt32
-			newRtg       sql.NullInt32
-			delta        sql.NullInt32
-			result       sql.NullString
+			seatIdx    int
+			userID     sql.NullString
+			currentRtg int
+			oldRtg     sql.NullInt32
+			newRtg     sql.NullInt32
+			delta      sql.NullInt32
+			result     sql.NullString
 		)
 		if err := rows.Scan(&seatIdx, &userID, &currentRtg, &oldRtg, &newRtg, &delta, &result); err != nil {
 			return GameRatings{}, fmt.Errorf("ratings-for-game scan: %w", err)
@@ -703,9 +654,7 @@ func (r *PostgresRepo) RatingsForGame(ctx context.Context, gameID string) (GameR
 }
 
 func (r *PostgresRepo) Leaderboard(ctx context.Context, mode string, limit int) ([]LeaderboardEntry, error) {
-	// Inner join on profiles — anonymous-only users with no display name
-	// shouldn't appear on a public board. Filtered by mode so a strong 1v1
-	// player doesn't end up high on the multi board (and vice versa).
+	// INNER JOIN profiles drops users with no display name; filtered by mode.
 	rows, err := r.pool.QueryContext(ctx, `
 		SELECT r.user_id, p.display_name, r.rating, r.games, r.wins, r.losses, r.draws
 		FROM ratings r
@@ -755,15 +704,10 @@ func (r *PostgresRepo) FinalizeStart(ctx context.Context, gameID string, status 
 	return tx.Commit()
 }
 
-// PublicProfile aggregates the publicly-visible bits for a user. All
-// numbers are derived from the canonical tables (profiles, ratings,
-// games + seats) — no separate stats table. Counts are scoped to
-// finished games so a half-played private room doesn't pump the
-// numbers. Default rating (1200) is applied via COALESCE when a user
-// has no rated row for a given mode yet.
+// PublicProfile aggregates a user's public stats from the canonical tables.
+// Counts are scoped to finished games so a half-played room doesn't pad them.
 func (r *PostgresRepo) PublicProfile(ctx context.Context, userID string) (PublicProfileSummary, error) {
-	// First check the profile row exists; without one the user is
-	// effectively a ghost (no display name to render).
+	// No profile row means no display name to render — treat as not found.
 	row := r.pool.QueryRowContext(ctx, `SELECT display_name FROM profiles WHERE user_id = $1`, userID)
 	var displayName string
 	if err := row.Scan(&displayName); err != nil {
@@ -773,9 +717,7 @@ func (r *PostgresRepo) PublicProfile(ctx context.Context, userID string) (Public
 		return PublicProfileSummary{}, fmt.Errorf("profile lookup: %w", err)
 	}
 
-	// Aggregate counts in one round-trip. The win/lost/draw filters
-	// mirror the existing StatsForUser query — we keep them in sync
-	// by hand for now.
+	// Win/lost/draw filters mirror StatsForUser; kept in sync by hand.
 	statsRow := r.pool.QueryRowContext(ctx, `
 		SELECT
 		  COUNT(*) FILTER (WHERE g.status = 'finished' AND g.winner_color = s.color) AS won,
@@ -796,14 +738,9 @@ func (r *PostgresRepo) PublicProfile(ctx context.Context, userID string) (Public
 	return out, nil
 }
 
-// SearchProfiles returns up to `limit` profile rows whose display
-// name starts with `prefix` (case-insensitive). The join on ratings
-// brings the 1v1 elo along so the picker shows "Alice (1450)" rather
-// than a bare name — helps disambiguate two Alices.
-//
-// Empty prefix returns nothing on purpose: callers shouldn't be able
-// to scrape the whole user table by sending q=. limit is clamped at
-// 50 for the same reason.
+// SearchProfiles returns profiles whose display_name starts with prefix
+// (case-insensitive), with 1v1 Elo joined in. Empty prefix returns nothing and
+// limit is clamped, so the endpoint can't scrape the whole table.
 func (r *PostgresRepo) SearchProfiles(ctx context.Context, prefix string, limit int) ([]ProfileSearchEntry, error) {
 	if prefix == "" {
 		return []ProfileSearchEntry{}, nil
@@ -835,13 +772,9 @@ func (r *PostgresRepo) SearchProfiles(ctx context.Context, prefix string, limit 
 	return out, rows.Err()
 }
 
-// DeleteStaleWaitingGames removes games stuck in 'waiting' for longer
-// than olderThan. Uses updated_at as the freshness signal — joining /
-// adding bots / removing bots all bump updated_at, so an active host
-// who's still adjusting their lobby today won't be reaped by a 7d
-// threshold even if they created the game last week. ON DELETE
-// CASCADE handles seats + game_events + rating_history (the latter
-// shouldn't exist for waiting games anyway, but cheap insurance).
+// DeleteStaleWaitingGames removes waiting games idle longer than olderThan.
+// Freshness is updated_at, not created_at, so a host still adjusting their
+// lobby today isn't reaped even if the game was created last week.
 func (r *PostgresRepo) DeleteStaleWaitingGames(ctx context.Context, olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-olderThan)
 	res, err := r.pool.ExecContext(ctx, `
@@ -870,15 +803,10 @@ func deriveOutcome(status Status, mine, winner game.Color) string {
 	return "lost"
 }
 
-// AppendEvent inserts one row into game_events with a monotonically
-// increasing per-game seq. The CTE bumps games.event_seq and feeds the
-// new value to the INSERT in one statement — the row-level lock on
-// games.id serializes concurrent writers without explicit locking.
-//
-// If gameID does not exist, the UPDATE matches zero rows, the CTE
-// returns empty, and the INSERT does nothing — we surface this as
-// ErrGameNotFound so callers can distinguish it from a transient DB
-// error.
+// AppendEvent inserts a game_events row with a monotonic per-game seq. The CTE
+// bumps games.event_seq and feeds it to the INSERT in one statement; the
+// row-level lock on games.id serializes concurrent writers. A missing gameID
+// matches zero rows and surfaces as ErrGameNotFound.
 func (r *PostgresRepo) AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage) (int, error) {
 	row := r.pool.QueryRowContext(ctx, `
 		WITH s AS (
@@ -971,20 +899,13 @@ func (r *PostgresRepo) CancelMatchmake(ctx context.Context, userID string) error
 	return err
 }
 
-// matchmakeBatchSize caps how many rows one tick locks at once. Big
-// enough to give the pairing logic something to work with, small enough
-// that the row-level locks don't sit on the table for noticeable time.
+// matchmakeBatchSize caps rows locked per tick: enough to pair against, few
+// enough that the row locks don't sit on the table noticeably.
 const matchmakeBatchSize = 100
 
-// SaveRematchOffer persists (or clears) the rematch_offer JSONB column
-// for a finished game. The column is opaque to the DB; the encoding
-// schema lives next to the in-memory RematchOffer struct in store.go.
-//
-// Pass nil to clear (NULL is "no offer pending"); pass an encoded body
-// otherwise. The write is unconditional — callers compute the new
-// value in memory under the rec lock before persisting, so a missed
-// row (game deleted) is a real surprise we want to surface rather
-// than silently swallow.
+// SaveRematchOffer writes (encoded body) or clears (nil) the rematch_offer
+// JSONB. A zero-row update surfaces as ErrGameNotFound rather than silently
+// swallowing a deleted game.
 func (r *PostgresRepo) SaveRematchOffer(ctx context.Context, gameID string, offer []byte) error {
 	var blob interface{}
 	if offer != nil {
@@ -1002,11 +923,9 @@ func (r *PostgresRepo) SaveRematchOffer(ctx context.Context, gameID string, offe
 	return nil
 }
 
-// SaveDrawOffer persists the seat index currently offering a draw on a
-// playing 2-player game (or -1 to clear). Same multi-pod rationale as
-// SaveRematchOffer: without this write the opponent's accept call
-// landing on a non-originating pod would see the cache reload from a
-// DB row that doesn't know about the offer.
+// SaveDrawOffer writes the offering seat index (or -1 to clear). Without it, an
+// opponent's accept on a non-originating pod would reload a DB row unaware of
+// the offer.
 func (r *PostgresRepo) SaveDrawOffer(ctx context.Context, gameID string, offerBy int) error {
 	res, err := r.pool.ExecContext(ctx, `
 		UPDATE games SET draw_offer_by = $2 WHERE id = $1
@@ -1020,9 +939,8 @@ func (r *PostgresRepo) SaveDrawOffer(ctx context.Context, gameID string, offerBy
 	return nil
 }
 
-// MatchmakeQueueSnapshot returns the current queue rows without locking
-// or mutating them. Used by the matcher after each tick to publish
-// queue_update events so waiting users see a live count + ETA.
+// MatchmakeQueueSnapshot returns the queue rows without locking, for the
+// matcher's post-tick queue_update events.
 func (r *PostgresRepo) MatchmakeQueueSnapshot(ctx context.Context, players int, mode string) ([]QueuedUser, error) {
 	rows, err := r.pool.QueryContext(ctx, `
 		SELECT q.user_id, q.rating, q.enqueued_at, COALESCE(p.display_name, '')
@@ -1058,15 +976,9 @@ func (r *PostgresRepo) MatchmakeTick(
 	}
 	defer tx.Rollback()
 
-	// FOR UPDATE SKIP LOCKED is the load-bearing piece here. Multiple
-	// pods can tick concurrently and each will grab disjoint rows —
-	// the ones another pod is already processing get skipped on this
-	// pass and picked up next tick by whoever wins the race.
-	//
-	// We left-join profiles so the display name lands with the row
-	// (single round-trip, no per-user lookup later). Users without a
-	// profile row get an empty string; the caller falls back to a
-	// sensible default.
+	// FOR UPDATE SKIP LOCKED lets pods tick concurrently on disjoint rows:
+	// rows another pod is processing are skipped this pass and picked up next.
+	// LEFT JOIN profiles brings the display name in the same round-trip.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT q.user_id, q.rating, q.enqueued_at, COALESCE(p.display_name, '')
 		FROM matchmake_queue q
@@ -1093,11 +1005,8 @@ func (r *PostgresRepo) MatchmakeTick(
 		return nil, err
 	}
 
-	// pairFn decides whether a group can be formed: 1v1 needs ≥2 with
-	// rating proximity, multi needs ≥3 plus an age threshold. We DON'T
-	// pre-filter on len < players here — that used to short-circuit
-	// before pairFn was consulted, which broke partial multi rooms
-	// (a 3-user queue for players=6 never made it to pairMulti).
+	// Don't pre-filter on len < players: that used to short-circuit before
+	// pairFn ran, breaking partial multi rooms (3 queued for players=6).
 	groups := pairFn(queued)
 	if len(groups) == 0 {
 		return nil, tx.Commit()
@@ -1105,10 +1014,8 @@ func (r *PostgresRepo) MatchmakeTick(
 
 	var seats []MatchedSeat
 	for _, g := range groups {
-		// pairFn decides the room size: 1v1 always returns groups of 2;
-		// multi can return groups of 3..players depending on quorum and
-		// wait time. Reject only an under-quorum group (defensive — pairFn
-		// should never emit one, but we'd rather drop than crash).
+		// Defensive: drop a malformed group rather than crash (pairFn shouldn't
+		// emit one).
 		if len(g) < 2 || len(g) > players {
 			continue
 		}
@@ -1145,15 +1052,10 @@ func (r *PostgresRepo) MatchmakeTick(
 			userIDs = append(userIDs, u.UserID)
 		}
 
-		// Drop the matched users' queue rows so the next tick won't
-		// see them. The same tx commit that materialises the game also
-		// removes them — no in-between state where users have no game
-		// and no queue presence.
-		//
-		// Cast $1 to uuid[] explicitly: pgx serialises a Go []string as
-		// text[], and there is no implicit text[]→uuid[] coercion for
-		// the ANY comparison. The cast happens once per query, server
-		// side, before the WHERE evaluates.
+		// Drop queue rows in the same tx that creates the game, so there's no
+		// state where users have neither game nor queue presence. The ::uuid[]
+		// cast is required: pgx sends []string as text[], which has no implicit
+		// coercion to uuid[] for the ANY comparison.
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM matchmake_queue WHERE user_id = ANY($1::uuid[])
 		`, userIDs); err != nil {

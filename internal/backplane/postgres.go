@@ -1,28 +1,14 @@
-// Package backplane provides a Postgres-backed pub/sub for cross-pod
-// notifications. It is the wake-up channel that lets every pod know
-// something happened in the canonical state (game_events row inserted,
-// matchmake_queue ticket created…), so they can fan out to whatever
-// local subscribers they hold.
+// Package backplane is a Postgres LISTEN/NOTIFY pub/sub for cross-pod wake-ups.
+// It deals only in channels and byte payloads; domain logic lives in package
+// server.
 //
-// The backplane is intentionally narrow: it knows about channels and
-// byte payloads, nothing about games, matchmaking, or events. Anything
-// domain-specific lives one layer up in package server.
+// LISTEN runs on a dedicated long-lived pgx connection because it is
+// session-scoped and can't go through database/sql's pool; NOTIFY goes through
+// the pool since it's a single statement with no session state.
 //
-// Connection model:
-//
-//   - LISTEN runs on a *dedicated* long-lived pgx connection, because
-//     database/sql's pool can hand any query to any connection and
-//     LISTEN is session-scoped — you cannot LISTEN through a pool.
-//   - NOTIFY goes through the existing *sql.DB pool. NOTIFY is just an
-//     SQL statement with no follow-up, so the pool model is fine.
-//
-// Failure model:
-//
-//   - The listener auto-reconnects on transient errors. Missed
-//     notifications during the gap are not replayed — the bus is
-//     considered lossy by design, and consumers are expected to
-//     reconcile from the canonical store (game_events, …) on
-//     reconnect.
+// The bus is lossy by design: the listener auto-reconnects but drops
+// notifications during the gap, so consumers reconcile from the canonical store
+// on reconnect.
 package backplane
 
 import (
@@ -37,13 +23,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Handler is invoked once per inbound notification on a channel.
-// Handlers run on the listener's single goroutine; long work should be
-// dispatched elsewhere so we don't hold up the next notification.
+// Handler is invoked once per inbound notification. Handlers run on the
+// listener's single goroutine; dispatch long work elsewhere.
 type Handler func(payload []byte)
 
-// Backplane is a Postgres LISTEN/NOTIFY bus. It is safe for concurrent
-// use after New returns.
+// Backplane is a Postgres LISTEN/NOTIFY bus, safe for concurrent use after New.
 type Backplane struct {
 	dsn  string
 	pool *sql.DB
@@ -56,13 +40,9 @@ type Backplane struct {
 	done   chan struct{}
 }
 
-// New constructs a Backplane. It does not open the listener
-// connection yet — call Start once every Subscribe has been
-// registered, otherwise the corresponding LISTEN statement won't run
-// until the next reconnect.
-//
-// The passed *sql.DB is reused for NOTIFY. The caller owns the pool's
-// lifecycle; Close on the Backplane only tears down the listener.
+// New constructs a Backplane without opening the listener; call Start after all
+// Subscribe calls. The *sql.DB is reused for NOTIFY and owned by the caller —
+// Close only tears down the listener.
 func New(dsn string, pool *sql.DB, log *slog.Logger) *Backplane {
 	return &Backplane{
 		dsn:      dsn,
@@ -72,20 +52,17 @@ func New(dsn string, pool *sql.DB, log *slog.Logger) *Backplane {
 	}
 }
 
-// Subscribe registers handler to be invoked every time a NOTIFY
-// arrives on channel. Multiple handlers per channel are allowed and
-// are called in registration order. Must be called before Start —
-// adding subscriptions after the listener is running will only take
-// effect on the next reconnect.
+// Subscribe registers a handler for channel, called in registration order.
+// Must be called before Start; later additions only take effect on the next
+// reconnect.
 func (b *Backplane) Subscribe(channel string, handler Handler) {
 	b.mu.Lock()
 	b.handlers[channel] = append(b.handlers[channel], handler)
 	b.mu.Unlock()
 }
 
-// Start launches the receive loop. The loop runs until ctx is
-// cancelled or Close is called. Returns immediately; errors from the
-// session loop are logged but not surfaced because we always retry.
+// Start launches the receive loop until ctx is cancelled or Close is called.
+// Returns immediately; session errors are logged, not surfaced, since we retry.
 func (b *Backplane) Start(ctx context.Context) {
 	runCtx, cancel := context.WithCancel(ctx)
 	b.cancel = cancel
@@ -93,11 +70,9 @@ func (b *Backplane) Start(ctx context.Context) {
 	go b.run(runCtx)
 }
 
-// Publish emits a NOTIFY on channel with payload. It runs on the
-// pool's connection — fire-and-forget, no session state left behind.
-// The payload is sent through pg_notify(text, text) rather than the
-// SQL-level NOTIFY statement, because the SQL statement requires an
-// identifier and forbids parameter binding for the channel name.
+// Publish emits a NOTIFY on channel via the pool (fire-and-forget). It uses
+// pg_notify(text, text) rather than the SQL NOTIFY statement, which forbids
+// parameter binding for the channel name.
 func (b *Backplane) Publish(ctx context.Context, channel string, payload []byte) error {
 	_, err := b.pool.ExecContext(ctx, "SELECT pg_notify($1, $2)", channel, string(payload))
 	if err != nil {
@@ -106,9 +81,8 @@ func (b *Backplane) Publish(ctx context.Context, channel string, payload []byte)
 	return nil
 }
 
-// Close cancels the receive loop and waits for it to return. Safe to
-// call before Start (it's a no-op). The pool passed to New is left
-// untouched — Close is for the listener only.
+// Close cancels the receive loop and waits for it to return. No-op before
+// Start; the pool passed to New is left untouched.
 func (b *Backplane) Close() error {
 	if b.cancel == nil {
 		return nil
@@ -118,10 +92,8 @@ func (b *Backplane) Close() error {
 	return nil
 }
 
-// run is the receive loop: connect, LISTEN to every registered channel,
-// WaitForNotification in a loop, dispatch to handlers. On any error
-// (broken conn, server restart) it sleeps briefly and retries. The
-// loop exits only when the context is cancelled.
+// run drives sessions, sleeping briefly and retrying on any error. Exits only
+// when ctx is cancelled.
 func (b *Backplane) run(ctx context.Context) {
 	defer close(b.done)
 
@@ -141,9 +113,8 @@ func (b *Backplane) run(ctx context.Context) {
 	}
 }
 
-// session opens one pgx connection, runs LISTEN for every known
-// channel, then loops on WaitForNotification until error or ctx done.
-// Returns the terminating error so run() can decide whether to retry.
+// session opens one pgx connection, LISTENs on every channel, then loops on
+// WaitForNotification until error or ctx done, returning the terminating error.
 func (b *Backplane) session(ctx context.Context) error {
 	conn, err := pgx.Connect(ctx, b.dsn)
 	if err != nil {
@@ -159,10 +130,9 @@ func (b *Backplane) session(ctx context.Context) error {
 	b.mu.RUnlock()
 
 	for _, ch := range channels {
-		// LISTEN takes a quoted identifier and rejects parameter
-		// binding, so we re-quote channel ourselves. The set of
-		// channels is controlled by us (server boot wires them up),
-		// not by user input, so the static format is safe.
+		// LISTEN needs a quoted identifier and rejects parameter binding, so
+		// we quote it ourselves. Channel names are server-controlled, not user
+		// input, so the format is safe.
 		if _, err := conn.Exec(ctx, fmt.Sprintf("LISTEN %q", ch)); err != nil {
 			return fmt.Errorf("listen %s: %w", ch, err)
 		}
@@ -178,9 +148,8 @@ func (b *Backplane) session(ctx context.Context) error {
 	}
 }
 
-// dispatch invokes every handler registered for channel with payload.
-// Handlers are called synchronously on the listener goroutine — they
-// must not block on long operations.
+// dispatch invokes every handler for channel synchronously on the listener
+// goroutine; handlers must not block.
 func (b *Backplane) dispatch(channel string, payload []byte) {
 	b.mu.RLock()
 	handlers := b.handlers[channel]

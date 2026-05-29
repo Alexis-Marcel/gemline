@@ -4,17 +4,8 @@ interface SearchingForOpponentProps {
   onCancel: () => void;
 }
 
-/**
- * SearchingForOpponent is the chess.com-style waiting room for matchmade
- * games. Renders before the game layout so the user sees a clean "queue"
- * state instead of an empty board. For 1v1 it just spins; for multi it
- * shows live progress (3/6 joueurs) so the user knows others are arriving.
- *
- * Mostly superseded by /play/<mode> for the initial matchmaking flow, but
- * still kicks in when a viewer lands on a public waiting game directly
- * (shared URL, race between rematch creation and the playing transition,
- * etc.).
- */
+// Waiting room shown when a viewer lands on a public waiting game directly
+// (shared URL, or the race between rematch creation and the playing transition).
 export function SearchingForOpponent({
   maxPlayers,
   seatsOccupied,

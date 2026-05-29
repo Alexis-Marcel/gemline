@@ -10,34 +10,15 @@ import (
 	"github.com/coder/websocket"
 )
 
-// Lobby plumbing. The user-facing flow is:
-//
-//   1. Authenticated client POSTs /api/matchmake/enqueue → Store.Enqueue
-//      inserts (or refreshes) a row in matchmake_queue.
-//   2. Client opens GET /ws/lobby. The handler subscribes them to the
-//      lobby Hub keyed by their userID; the connection stays open
-//      until they're matched or they navigate away.
-//   3. The matcher (running on every pod) periodically locks queue
-//      rows, pairs them, creates games + seats, deletes the rows.
-//      For every matched seat it publishes one lobby notification.
-//   4. The backplane delivers the notification to every pod. The pod
-//      that hosts the user's lobby WS fans out a "match_found" event
-//      with the game ID + the seat token; the client redirects.
-//   5. The lobby WS close handler cancels the user's ticket (idempotent
-//      after a successful match has already removed it).
-
-// LobbyEnqueueRequest is the POST /api/matchmake/enqueue body.
-// Players is 2 for 1v1, 3-6 for multi. Mode is derived server-side
-// from players (1v1 vs multi) so a client can't trick its ticket into
-// the wrong rating bucket.
+// LobbyEnqueueRequest is the POST /api/matchmake/enqueue body. Mode is derived
+// server-side from Players so a client can't pick its rating bucket.
 type LobbyEnqueueRequest struct {
 	Players int `json:"players"`
 }
 
-// LobbyMatchPayload is what the lobby WS emits when the matcher pairs
-// the user. The client uses gameId for the redirect, token to
-// authenticate the seat without a follow-up join call, and name for
-// "You're playing as <name>" before the full game state loads.
+// LobbyMatchPayload is emitted over the lobby WS when the matcher pairs the
+// user. The client uses gameId to redirect and token to authenticate the seat
+// without a follow-up join call.
 type LobbyMatchPayload struct {
 	GameID    string `json:"gameId"`
 	Token     string `json:"token"`
@@ -45,65 +26,50 @@ type LobbyMatchPayload struct {
 	Name      string `json:"name"`
 }
 
-// LobbyInvitePayload is sent to a user when someone reserves a seat for
-// them in a private game (invite_received) or when that reservation is
-// withdrawn (invite_cancelled). The client turns the former into a
-// global toast — clicking it navigates the invitee to the game page
-// where the existing in-page Accepter/Refuser flow takes over.
+// LobbyInvitePayload is sent when someone reserves a seat for the user
+// (invite_received) or withdraws it (invite_cancelled).
 type LobbyInvitePayload struct {
 	GameID    string `json:"gameId"`
 	SeatIndex int    `json:"seatIndex"`
-	// FromName / FromUserID identify the host so the toast can render
-	// "Alice t'invite à jouer" rather than just "someone". Empty when
-	// the source user can't be identified (e.g. anonymous host).
+	// FromName / FromUserID identify the host; empty when the source can't
+	// be identified (e.g. anonymous host).
 	FromName   string `json:"fromName,omitempty"`
 	FromUserID string `json:"fromUserId,omitempty"`
 }
 
-// Lobby event type discriminators. Kept as constants so backplane
-// envelopes and the WS write side use the exact same strings.
+// Lobby event type discriminators. Constants so backplane envelopes and the WS
+// write side use the exact same strings.
 const (
 	LobbyEventMatchFound      = "match_found"
 	LobbyEventInviteReceived  = "invite_received"
 	LobbyEventInviteCancelled = "invite_cancelled"
 	LobbyEventQueueUpdate     = "queue_update"
-	// LobbyEventRematchReady delivers a player's fresh seat credentials
-	// for a rematch game that pre-seated them. Wire shape matches
-	// match_found (LobbyMatchPayload) so the client can share the
-	// save-creds path; the discriminator is kept distinct so the
-	// matchmaking hook doesn't react to it as a real match.
+	// LobbyEventRematchReady carries fresh seat credentials for a rematch
+	// that pre-seated the player. Wire shape matches match_found, but the
+	// discriminator stays distinct so the matchmaking hook ignores it.
 	LobbyEventRematchReady = "rematch_ready"
 )
 
-// LobbyQueueUpdatePayload is the wire shape of the per-tick "you have
-// company" signal pushed to every user still in queue. Count is the
-// bucket's current size; ETASeconds is the remaining wait before a
-// multi room of that size auto-starts (omitted for 1v1 and for under-
-// quorum multi buckets, where no deterministic countdown applies).
+// LobbyQueueUpdatePayload is the per-tick signal pushed to queued users.
+// ETASeconds is omitted for 1v1 and under-quorum multi buckets.
 type LobbyQueueUpdatePayload struct {
 	Players    int  `json:"players"`
 	Count      int  `json:"count"`
 	ETASeconds *int `json:"etaSeconds,omitempty"`
 }
 
-// lobbyEnvelope is the JSON shape sent through ChannelLobby. UserID is
-// the routing key the LobbyHub keys on; Type discriminates between
-// match_found / invite_received / invite_cancelled; Payload is the
-// event-specific body that the WS will forward verbatim. We use
-// RawMessage on the receiving side so a payload shape change doesn't
-// require updating intermediaries.
+// lobbyEnvelope is the JSON shape sent through ChannelLobby. UserID is the
+// routing key; Payload is RawMessage so a payload shape change doesn't require
+// updating intermediaries.
 type lobbyEnvelope struct {
 	UserID  string          `json:"userId"`
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
 }
 
-// fanMatched is the matcher's onMatched callback. For every matched
-// seat it emits one NOTIFY on the lobby channel; pods that host the
-// affected user's lobby WS pick it up via handleLobbyNotif and
-// deliver. Failures are logged but do not retry — the user is in the
-// game regardless, and on next lobby WS open they'll see the dangling
-// state cleaned up (a refresh / page nav will hit the new game).
+// fanMatched is the matcher's onMatched callback: one NOTIFY per matched seat.
+// Failures are logged but not retried — the user is in the game regardless, and
+// a page nav will hit the new game.
 func (s *Server) fanMatched(seats []MatchedSeat) {
 	for _, seat := range seats {
 		s.publishLobby(seat.UserID, LobbyEventMatchFound, LobbyMatchPayload{
@@ -115,10 +81,8 @@ func (s *Server) fanMatched(seats []MatchedSeat) {
 	}
 }
 
-// fanQueueUpdate is the matcher's onQueueUpdate callback. After every
-// tick we get one entry per still-queued user; we forward each as a
-// queue_update event so the HomePage's matchmaking spinner can show a
-// live count + ETA rather than an opaque "Recherche en cours…".
+// fanQueueUpdate is the matcher's onQueueUpdate callback: forwards one
+// queue_update event per still-queued user.
 func (s *Server) fanQueueUpdate(updates []QueueUpdate) {
 	for _, u := range updates {
 		s.publishLobby(u.UserID, LobbyEventQueueUpdate, LobbyQueueUpdatePayload{
@@ -129,9 +93,8 @@ func (s *Server) fanQueueUpdate(updates []QueueUpdate) {
 	}
 }
 
-// publishLobby fans an arbitrary lobby event to one user. Routes via
-// the backplane when present (multi-pod NOTIFY) or directly through the
-// in-process LobbyHub otherwise (single-pod dev / test setups).
+// publishLobby fans a lobby event to one user, via the backplane when present
+// (multi-pod NOTIFY) or directly through the in-process LobbyHub otherwise.
 func (s *Server) publishLobby(userID, eventType string, payload any) {
 	if userID == "" {
 		return
@@ -142,9 +105,7 @@ func (s *Server) publishLobby(userID, eventType string, payload any) {
 		return
 	}
 	if s.backplane == nil {
-		// Single-process: skip the wire format and go straight to the
-		// hub. Wrapping `body` back into json.RawMessage keeps the
-		// type symmetric with the multi-pod path.
+		// Single-process: skip the wire format and go straight to the hub.
 		s.lobby.Deliver(userID, Event{Type: eventType, Payload: json.RawMessage(body)})
 		return
 	}
@@ -164,9 +125,8 @@ func (s *Server) publishLobby(userID, eventType string, payload any) {
 	}
 }
 
-// handleLobbyNotif is registered as the ChannelLobby handler in
-// Server.New. Each pod receives every notification; routing by userID
-// happens locally — pods without a sub for the targeted user no-op.
+// handleLobbyNotif is the ChannelLobby handler. Each pod receives every
+// notification; routing by userID happens locally — pods without a sub no-op.
 func (s *Server) handleLobbyNotif(payload []byte) {
 	var env lobbyEnvelope
 	if err := json.Unmarshal(payload, &env); err != nil {
@@ -174,10 +134,8 @@ func (s *Server) handleLobbyNotif(payload []byte) {
 		return
 	}
 	if env.Type == "" {
-		// Backwards-compat path: older envelopes that only carried a
-		// LobbyMatchPayload with no type field. The pod that produced
-		// it has already been upgraded out by the time this code ships,
-		// but we don't want a half-deployed cluster to drop matches.
+		// Backwards-compat: older envelopes had no type field. Default to
+		// match_found so a half-deployed cluster doesn't drop matches.
 		env.Type = LobbyEventMatchFound
 	}
 	if !s.lobby.HasSubs(env.UserID) {
@@ -186,11 +144,8 @@ func (s *Server) handleLobbyNotif(payload []byte) {
 	s.lobby.Deliver(env.UserID, Event{Type: env.Type, Payload: env.Payload})
 }
 
-// enqueueMatchmake puts the caller in the matchmaking queue. The
-// player count is taken from the request body; mode is derived from
-// the count and the caller's rating is looked up server-side so a
-// client cannot misrepresent itself. Idempotent — second click just
-// refreshes enqueued_at via the table's ON CONFLICT DO UPDATE.
+// enqueueMatchmake puts the caller in the matchmaking queue. Mode and rating
+// are resolved server-side so a client cannot misrepresent itself.
 func (s *Server) enqueueMatchmake(w http.ResponseWriter, r *http.Request) {
 	u := requireUser(w, r)
 	if u == nil {
@@ -225,9 +180,8 @@ func (s *Server) enqueueMatchmake(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// cancelMatchmake removes the caller's ticket. Always returns 204 so
-// the client doesn't need to special-case "I wasn't queued" vs "I was
-// just matched 50ms ago and got removed before this call landed".
+// cancelMatchmake removes the caller's ticket. Always returns 204 so the client
+// needn't distinguish "wasn't queued" from "just matched and already removed".
 func (s *Server) cancelMatchmake(w http.ResponseWriter, r *http.Request) {
 	u := requireUser(w, r)
 	if u == nil {
@@ -241,18 +195,13 @@ func (s *Server) cancelMatchmake(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// wsLobby serves the user's persistent per-user WebSocket. The
-// connection opens at sign-in and stays open across pages, carrying
-// every cross-page notification: match_found from the matchmaker,
-// invite_received / invite_cancelled from the seat-invite flow.
+// wsLobby serves the persistent per-user WebSocket carrying cross-page
+// notifications (match_found, invite_received / invite_cancelled).
 //
-// We deliberately do NOT cancel a pending matchmaking ticket on close
-// any more: with the socket persistent, "close" usually means a
-// network blip rather than "user gave up". The matchmake hook calls
-// the HTTP cancel endpoint explicitly when the user clicks Annuler or
-// unmounts the matchmaking UI; orphaned queue rows are caught by the
-// next matcher tick (it locks rows then drops them on a successful
-// match) and, in the rare missed case, the periodic stale cleaner.
+// Close does NOT cancel a pending matchmaking ticket: with a persistent socket,
+// "close" usually means a network blip. Cancellation happens via the explicit
+// HTTP endpoint; orphaned queue rows are caught by the next matcher tick and the
+// periodic stale cleaner.
 func (s *Server) wsLobby(w http.ResponseWriter, r *http.Request) {
 	u := requireUser(w, r)
 	if u == nil {
@@ -278,10 +227,8 @@ func (s *Server) wsLobby(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// Reader goroutine: we don't expect any messages from the lobby
-	// client today, but reading is required to detect a close (pings
-	// + handshakes flow through Read). Anything we receive is
-	// discarded.
+	// Reader goroutine: we expect no client messages, but reading is required
+	// to detect a close (pings + handshakes flow through Read). Discard all.
 	go func() {
 		defer cancel()
 		for {

@@ -29,26 +29,16 @@ type Server struct {
 	allowedOrigins []string
 }
 
-// Config holds optional dependencies that change how the server behaves.
-//
-// When SupabaseURL is set, the server fetches Supabase's JWKS document
-// from <SupabaseURL>/auth/v1/.well-known/jwks.json and verifies
-// asymmetrically-signed user JWTs. When it's empty, auth is disabled
-// and every /api/auth/* endpoint responds 401.
-//
-// AllowedOrigins controls which Origins are permitted by the CORS middleware
-// and the WebSocket upgrade. Empty/unset means "dev mode" — `*` for CORS and
-// the WS origin check is skipped. Production deployments MUST set this to
-// the actual frontend origin(s).
+// Config holds optional dependencies. Empty SupabaseURL disables auth (every
+// /api/auth/* responds 401). Empty AllowedOrigins is dev mode (CORS "*" and the
+// WS origin check skipped); production must set the real frontend origin(s).
 type Config struct {
 	SupabaseURL    string
 	AllowedOrigins []string
 }
 
-// New returns a Server backed by the given store and config. The bp
-// argument is the Postgres backplane used to fan game events across
-// pods; pass nil for single-process runs (tests, no DATABASE_URL) and
-// EventPublisher will fall back to direct local delivery.
+// New returns a Server. bp is the Postgres backplane for cross-pod event
+// fan-out; nil (tests, no DATABASE_URL) falls back to direct local delivery.
 func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *Server {
 	hub := NewHub(log, "game")
 	lobby := NewHub(log, "lobby")
@@ -63,10 +53,8 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *S
 		log:            log,
 		allowedOrigins: cfg.AllowedOrigins,
 	}
-	// When a backplane is present, register the listener handlers so
-	// notifications coming in from any pod (including ours) get fanned
-	// out to local WS subscribers. Two channels: game events and lobby
-	// match notifications.
+	// Register listener handlers so NOTIFYs from any pod (including ours) fan
+	// out to local WS subscribers: game events + lobby match notifications.
 	if bp != nil {
 		bp.Subscribe(ChannelGameEvents, srv.events.HandleGameEventNotif)
 		bp.Subscribe(ChannelLobby, srv.handleLobbyNotif)
@@ -85,8 +73,8 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *S
 		srv.verifier = kf
 		log.Info("auth enabled", "scheme", "jwks", "url", cfg.SupabaseURL)
 	}
-	// When a player's clock runs out or their disconnect grace expires,
-	// push the new state to every WS subscriber so they see the forfeit.
+	// Clock flag / disconnect-grace expiry: push fresh state so subscribers
+	// see the forfeit.
 	store.SetStateListener(func(gameID string) {
 		rec, ok, err := store.Get(context.Background(), gameID)
 		if err != nil || !ok {
@@ -97,15 +85,13 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *S
 		rec.Unlock()
 		srv.events.Publish(gameID, eventState(dto))
 	})
-	// Presence changes (a seat just went online or offline) are broadcast
-	// as a lightweight `presence` event so the UI can flip the badge
-	// without a full state push.
+	// Presence flips broadcast a lightweight `presence` event instead of a full
+	// state push.
 	store.SetPresenceListener(func(gameID string, seatIndex int, online bool) {
 		srv.events.Publish(gameID, eventPresence(seatIndex, online))
 	})
-	// Draw-offer transitions are infrequent and the change shows up on the
-	// game DTO (drawOfferBy field), so we just push a full state snapshot
-	// rather than introducing a dedicated wire event.
+	// Draw-offer transitions show up on the DTO (drawOfferBy), so a full state
+	// snapshot is enough — no dedicated wire event.
 	store.SetDrawOfferListener(func(gameID string, _ int) {
 		rec, ok, err := store.Get(context.Background(), gameID)
 		if err != nil || !ok {
@@ -116,9 +102,8 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *S
 		rec.Unlock()
 		srv.events.Publish(gameID, eventState(dto))
 	})
-	// Server-driven moves (bots) broadcast a move event with the same shape
-	// HTTP-driven moves use, so clients render captures + the new state
-	// identically whether the move came from a human or a bot.
+	// Bot moves broadcast the same move event shape as human moves so clients
+	// render captures + state identically.
 	store.SetMoveListener(func(gameID string, mv game.MoveResult) {
 		movesPlayedTotal.WithLabelValues("bot").Inc()
 		rec, ok, err := store.Get(context.Background(), gameID)
@@ -131,12 +116,9 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *S
 		resp := moveResponse{Game: dto, Captures: toCaptureDTOs(mv.Captures)}
 		srv.events.Publish(gameID, eventMove(resp))
 	})
-	// Rated callback fires once per game right after ApplyRatedGame
-	// commits. We rebuild the rating snapshot from the DB rather than
-	// piping deltas through the callback so all consumers (this WS
-	// event, the HTTP catch-up endpoint) see exactly the same shape.
-	// Slight overhead (one extra query) for a path that fires once
-	// per finished rated game — negligible.
+	// Fires once per rated game after ApplyRatedGame commits. Rebuild the
+	// snapshot from the DB (not deltas) so the WS event and the HTTP catch-up
+	// share one shape.
 	store.SetRatedListener(func(gameID string) {
 		gr, err := store.RatingsForGame(context.Background(), gameID)
 		if err != nil {
@@ -186,18 +168,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/profile", s.putProfile)
 	mux.HandleFunc("GET /api/users/me/games", s.getMyGames)
 	mux.HandleFunc("GET /api/users/me/stats", s.getMyStats)
-	// /search literal must come before the {userId} pattern with
-	// net/http's mux — pattern specificity gives literal segments
-	// priority but order helps with the registration check.
+	// Literal /search must precede the {userId} pattern.
 	mux.HandleFunc("GET /api/users/search", s.searchProfiles)
 	mux.HandleFunc("GET /api/users/{userId}", s.getPublicProfile)
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
 	app := loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, s.log, mux))))
 
-	// /metrics is scraped by Prometheus inside the cluster — bypass
-	// CORS, auth, and slog noise by registering it on a top-level mux
-	// that routes everything else through the regular middleware chain.
+	// /metrics bypasses the CORS/auth/log middleware via a top-level mux.
 	top := http.NewServeMux()
 	top.Handle("GET /metrics", metricsHandler())
 	top.Handle("/", app)
@@ -247,11 +225,8 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-// createGame creates a private game (visibility=private only; public games
-// only come from matchmaking) and atomically auto-joins the caller so the
-// client lands on the game already seated. Authenticated users have their
-// display name pulled from the profile; anonymous users must supply a name
-// in the request body. We won't ask them to retype it on the game page.
+// createGame creates a private game and auto-joins the caller. Authenticated
+// users get their name from the profile; anonymous callers must supply one.
 func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 	var req createGameRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -266,15 +241,12 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 	if vis == "" {
 		vis = VisibilityPrivate
 	}
-	// Only private games are creatable this way — public games are created
-	// implicitly by Store.Matchmake when no public candidate exists.
+	// Public games are created implicitly by matchmaking, not here.
 	if vis != VisibilityPrivate {
 		writeError(w, http.StatusBadRequest, "only private games are creatable directly; use /matchmake for public")
 		return
 	}
 
-	// Resolve the host's display name. Auth → profile (always available
-	// via displayNameFor's fallbacks). Anonymous → required from body.
 	userID := ""
 	name := strings.TrimSpace(req.Name)
 	if u, ok := userFromContext(r.Context()); ok {
@@ -308,11 +280,9 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
 }
 
-// matchmakeGame — TEST FIXTURE ONLY. Production matchmaking is the
-// async queue at POST /api/matchmake/enqueue + /ws/lobby. This
-// synchronous endpoint stays wired up so the existing server tests
-// can seat two authenticated users in a public game without spinning
-// up the queue + matcher tick + a real Postgres backend.
+// matchmakeGame — TEST FIXTURE ONLY. Production matchmaking is the async queue
+// (POST /api/matchmake/enqueue + /ws/lobby); this synchronous endpoint just
+// lets server tests seat two users without the queue + matcher + Postgres.
 func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
 	u := requireUser(w, r)
 	if u == nil {
@@ -333,10 +303,6 @@ func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not matchmake")
 		return
 	}
-	// Matchmake creates a public game when no candidate exists. We can't
-	// tell from here whether this call created the game or joined an
-	// existing one — undercounting is fine, the createGame handler covers
-	// private games which are the majority anyway. Skip the increment.
 	name := s.displayNameFor(r.Context(), u)
 	seat, token, err := s.store.Join(r.Context(), rec.ID, name, u.ID, -1)
 	if err != nil {
@@ -350,22 +316,9 @@ func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
 }
 
-// displayNameFor resolves the user's preferred display name. Priority:
-//
-//   1. The `profiles.display_name` row — the user explicitly chose
-//      this via PUT /api/profile, so it always wins.
-//   2. user_metadata.display_name from the Supabase JWT — captured at
-//      signup (`supabase.auth.signUp({ options: { data: { display_name } } })`)
-//      and the most reliable name we have before the user touches the
-//      profile endpoint. Without this fallback a fresh signup would
-//      surface as "alice" for "alice@example.com" even when the user
-//      explicitly entered "Alice Marcel" on the form.
-//   3. Email local-part as a last-resort.
-//   4. Generic "Joueur" if every field is blank.
-//
-// Used by every auto-join path (matchmake, signed-in join without a
-// body, invitation acceptance) so the user never has to retype a name
-// the system already knows.
+// displayNameFor resolves a display name by priority: profiles.display_name,
+// then the JWT's user_metadata.display_name, then the email local-part, then
+// "Joueur". Used by every auto-join path so users never retype a known name.
 func (s *Server) displayNameFor(ctx context.Context, u *AuthUser) string {
 	if p, err := s.store.Profile(ctx, u.ID); err == nil && p != nil && p.DisplayName != "" {
 		return p.DisplayName
@@ -382,8 +335,7 @@ func (s *Server) displayNameFor(ctx context.Context, u *AuthUser) string {
 	return "Joueur"
 }
 
-// addBot fills the requested empty seat with a bot. Only private waiting
-// games accept bots; matchmade public games must be filled by humans.
+// addBot fills an empty seat with a bot (private waiting games only).
 func (s *Server) addBot(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	seatIdx, err := strconv.Atoi(r.PathValue("idx"))
@@ -403,12 +355,8 @@ func (s *Server) addBot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dto)
 }
 
-// removeBot vacates a bot-occupied seat in a private waiting game. Same
-// auth model as addBot — no token check: any client with the game URL
-// can rearrange seats while the room is still waiting. The Store
-// guards on visibility=private + status=waiting + seat actually being
-// a bot, so this can't be used to kick a human or to touch a public
-// matchmaking room.
+// removeBot vacates a bot seat in a private waiting game. No token check: the
+// Store guards private+waiting+seat-is-bot, so it can't kick a human.
 func (s *Server) removeBot(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	seatIdx, err := strconv.Atoi(r.PathValue("idx"))
@@ -428,24 +376,17 @@ func (s *Server) removeBot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dto)
 }
 
-// inviteSeatRequest is the body of POST /api/games/:id/seats/:idx/invite.
-// Both fields are required — the server uses userId to enforce
-// "this seat is for that user" at join time and displayName as the
-// presentation label until the user joins (and the seat name gets
-// overwritten with whatever they have on file).
+// inviteSeatRequest is the body of the seat-invite endpoint. userId enforces
+// "this seat is for that user" at join time; displayName is the label shown
+// until they join.
 type inviteSeatRequest struct {
 	UserID      string `json:"userId"`
 	DisplayName string `json:"displayName"`
 }
 
-// inviteSeat reserves an empty seat in a private waiting game for a
-// named user. The seat shows their name with an "en attente" badge
-// in the client until they navigate to the game URL and join — at
-// which point pickSeatForUser routes them to this exact seat.
-//
-// Same auth posture as addBot: URL-shared private games allow any
-// caller with the URL to rearrange seats. Server-side guards prevent
-// abuse outside the private+waiting window.
+// inviteSeat reserves an empty seat for a named user in a private waiting game;
+// pickSeatForUser routes them to it when they join. No token check (same
+// posture as addBot — the URL is the shared secret).
 func (s *Server) inviteSeat(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	seatIdx, err := strconv.Atoi(r.PathValue("idx"))
@@ -473,12 +414,8 @@ func (s *Server) inviteSeat(w http.ResponseWriter, r *http.Request) {
 	dto := toGameDTO(rec)
 	rec.Unlock()
 	s.events.Publish(gameID, eventState(dto))
-	// Cross-page notification: the invitee may not be on this game's
-	// page yet, so we push to their per-user lobby WS. The toast UI
-	// turns this into a "X t'invite à jouer" banner that navigates to
-	// the game on click. FromName is the host's display name when we
-	// can identify them, empty for anonymous hosts (the URL is the
-	// shared secret in private games, no auth required to invite).
+	// Push to the invitee's lobby WS so they get a toast even off this page.
+	// FromName is empty for anonymous hosts.
 	fromName := ""
 	fromUserID := ""
 	if u, ok := userFromContext(r.Context()); ok {
@@ -494,11 +431,9 @@ func (s *Server) inviteSeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dto)
 }
 
-// cancelSeatInvite clears the pending invitation on a seat, freeing
-// it back up. Mirrors removeBot's semantics: same guards (private +
-// waiting + seat in range) plus the seat must carry an actual
-// invitation (otherwise this endpoint can't be used to kick humans
-// or vacate bot seats — those have their own dedicated endpoints).
+// cancelSeatInvite clears a pending invitation, freeing the seat. Guards
+// require the seat to actually carry an invitation, so it can't kick humans
+// or vacate bots (those have their own endpoints).
 func (s *Server) cancelSeatInvite(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	seatIdx, err := strconv.Atoi(r.PathValue("idx"))
@@ -506,8 +441,8 @@ func (s *Server) cancelSeatInvite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid seat index")
 		return
 	}
-	// Grab the invitee userID before the store clears it, so the
-	// invite_cancelled event lands on the right inbox.
+	// Capture the invitee before the store clears it, so invite_cancelled
+	// reaches the right inbox.
 	inviteeID := ""
 	if rec, ok, err := s.store.Get(r.Context(), gameID); err == nil && ok {
 		rec.Lock()
@@ -553,9 +488,8 @@ func statusForInviteSeatError(err error) int {
 	}
 }
 
-// startGame finalises a private game (fill empty seats with bots, flip to
-// playing). Authentication is via the seat token — any participant can
-// kick off the start in a private game.
+// startGame fills empty seats with bots and flips a private game to playing.
+// Any seated participant (seat token) may start it.
 func (s *Server) startGame(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	token := playerToken(r)
@@ -592,9 +526,7 @@ func statusForStartError(err error) int {
 	}
 }
 
-// leaveSeat frees the caller's seat in a still-waiting game. Equivalent to
-// "cancel matchmaking" from the user's perspective: they vacate the seat
-// they were holding and the game becomes joinable again.
+// leaveSeat frees the caller's seat in a still-waiting game.
 func (s *Server) leaveSeat(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	token := playerToken(r)
@@ -657,15 +589,10 @@ func statusForRemoveBotError(err error) int {
 	}
 }
 
-// offerRematch is the chess.com-style "Propose / Accept rematch" endpoint.
-// The first caller creates an offer (bots pre-marked accepted); each
-// subsequent caller adds their seat to the acceptance set. When every
-// needed human seat has accepted, the new game is created (pre-seated
-// with bots + the same authed humans), and the original's RematchGameID
-// gets set — clients see that on the broadcast state event and navigate
-// over. Pre-seated humans receive their fresh seat token through the
-// lobby's rematch_ready event so they pick up the new game without
-// having to re-join.
+// offerRematch adds the caller's seat to the acceptance set (bots pre-accept).
+// Once every human seat has accepted, a new pre-seated game is created and its
+// id is set on the original's RematchGameID; seated humans get their fresh seat
+// token via the lobby's rematch_ready event so they don't re-join.
 func (s *Server) offerRematch(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	token := playerToken(r)
@@ -694,9 +621,8 @@ func (s *Server) offerRematch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dto)
 }
 
-// declineRematch withdraws the pending offer (proposer cancels) or refuses
-// it (other player declines). Wire shape is identical for both — the
-// outcome is the same: offer cleared, everyone back to the "propose" UI.
+// declineRematch withdraws or refuses the pending offer — same outcome either
+// way: offer cleared, everyone back to "propose".
 func (s *Server) declineRematch(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	token := playerToken(r)
@@ -716,10 +642,8 @@ func (s *Server) declineRematch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dto)
 }
 
-// declineInvite is the invitee-side refusal of a private-game invitation.
-// Auth is via the Supabase JWT (not a seat token — the invitee doesn't
-// hold one yet). Mirrors cancelSeatInvite's outcome (seat freed) but
-// the auth check enforces that only the invited userID may call this.
+// declineInvite is the invitee refusing an invitation. Auth is the JWT (no seat
+// token yet); only the invited userID may call it.
 func (s *Server) declineInvite(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	seatIdx, err := strconv.Atoi(r.PathValue("idx"))
@@ -761,10 +685,8 @@ func statusForDeclineInviteError(err error) int {
 	}
 }
 
-// resignGame, offerDraw, acceptDraw, declineDraw all share the same shape:
-// extract the seat token, hand off to a Store method, broadcast the new state
-// on success. The differences are which method to call and what status codes
-// the errors map to.
+// resignGame, offerDraw, acceptDraw, declineDraw share one shape: extract the
+// seat token, call a Store method, broadcast new state on success.
 
 func (s *Server) resignGame(w http.ResponseWriter, r *http.Request) {
 	s.endByConcession(w, r, s.store.Resign, "resign")
@@ -810,8 +732,7 @@ func (s *Server) declineDraw(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dto)
 }
 
-// endByConcession is the shared body of resign + accept-draw — they both
-// auth via seat token, end the game, and broadcast a state snapshot.
+// endByConcession is the shared body of resign + accept-draw.
 func (s *Server) endByConcession(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -833,9 +754,7 @@ func (s *Server) endByConcession(
 	dto := toGameDTO(rec)
 	rec.Unlock()
 	s.events.Publish(gameID, eventState(dto))
-	// WinKind.String() gives a low-cardinality label (alignment4/5/6,
-	// capture, resign, draw, timeout) — same vocabulary used on the wire
-	// and in the DB, so it lines up with manual queries.
+	// WinKind.String() is a low-cardinality metric label.
 	gamesFinishedTotal.WithLabelValues(dto.WinKind.String()).Inc()
 	s.log.Info("game ended", "op", op, "game", gameID, "winner", dto.Winner, "kind", dto.WinKind)
 	writeJSON(w, http.StatusOK, dto)
@@ -886,22 +805,13 @@ func statusForRematchError(err error) int {
 	}
 }
 
-// catchupLimit caps how many events one /events call can return. A
-// client that's been disconnected for hours could otherwise pull
-// thousands of rows in a single request. 1000 covers a generously long
-// game (a 6P session might rack up ~200-400 events end-to-end) without
-// letting a hostile or buggy client DoS the DB.
+// catchupLimit caps how many events one /events call returns, so a long-
+// disconnected (or hostile) client can't pull unbounded rows. ~200-400 covers
+// a full 6P game.
 const catchupLimit = 1000
 
-// getGameEvents serves the WebSocket catch-up endpoint. Clients call it
-// on reconnect with their last-seen seq; the server returns every event
-// with seq > since, in ascending order. A fresh connect uses since=0
-// (or omits the parameter) and gets the full event log — usually the
-// caller will rely on the connect-time state snapshot instead.
-//
-// No authentication is required beyond what /api/games/:id already
-// expects: any game ID known to the caller is already exposed by /get,
-// so /events on the same ID surfaces nothing new in terms of access.
+// getGameEvents is the reconnect catch-up endpoint: returns events with
+// seq > since, ascending. No extra auth — the game ID already exposes /get.
 func (s *Server) getGameEvents(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	since := 0
@@ -927,12 +837,9 @@ func (s *Server) getGameEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rows)
 }
 
-// getGameRatings serves the Elo snapshot for the end-of-game modal +
-// in-game Scoreboard line. Returns Rated=false (with empty seats) for
-// games that aren't matchmaking-eligible — the client UI uses that
-// flag to hide the Elo section entirely. No auth required: ratings
-// are public information for a given game ID, same as the existing
-// /api/games/:id endpoint.
+// getGameRatings serves the Elo snapshot. Returns Rated=false for
+// non-matchmaking games so the client hides the Elo section. No auth — public
+// per game ID.
 func (s *Server) getGameRatings(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	gr, err := s.store.RatingsForGame(r.Context(), id)

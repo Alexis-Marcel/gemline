@@ -1,10 +1,5 @@
-# Path-based routing on a single hostname:
-#   /api/*, /ws/*, /healthz, /readyz → server
-#   everything else                  → web (Caddy serves the SPA)
-#
-# TLS is provisioned automatically by cert-manager once the
-# letsencrypt-prod ClusterIssuer is in place (see DEPLOY.md).
-# Traefik is the default ingress controller on k3s, so no install needed.
+# Path-based routing on one hostname: /api, /ws, /healthz, /readyz -> server,
+# everything else -> web. TLS provisioned by cert-manager via letsencrypt-prod.
 
 apiVersion: networking.k8s.io/v1
 kind: Ingress

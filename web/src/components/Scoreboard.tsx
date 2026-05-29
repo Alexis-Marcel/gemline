@@ -4,15 +4,9 @@ import { SeatCard } from "./SeatCard";
 interface ScoreboardProps {
   game: Game;
   mySeatIndex: number | null;
-  /** Supabase user id of the local viewer, or null if anonymous. Used to
-   *  detect "this seat's invitation is for me" so the Accept/Refuse
-   *  buttons render on the invitee's own row. */
+  // Used to detect "this seat's invitation is for me" for the Accept/Refuse row.
   myUserId: string | null;
-  /** Per-seat presence flags pushed by the server (key = seatIndex). */
   presence?: Record<number, boolean>;
-  /** Live ratings snapshot for the game. When ratings.rated is true,
-   *  each seat surfaces its current Elo as a small chip; otherwise
-   *  hidden. */
   ratings?: GameRatings | null;
   onAddBot?: (seatIndex: number) => void;
   onRemoveBot?: (seatIndex: number) => void;
@@ -22,13 +16,6 @@ interface ScoreboardProps {
   onDeclineInvite?: (seatIndex: number) => void;
 }
 
-/**
- * Scoreboard is the desktop-rail seat list: one card per seat, stacked
- * vertically on lg+. The card rendering itself lives in SeatCard
- * (shared with PlayerStrip's horizontal mobile variant); this
- * component only owns the container — a flex column on desktop, a
- * sticky 2-col grid on phones for legacy callers.
- */
 export function Scoreboard({
   game,
   mySeatIndex,

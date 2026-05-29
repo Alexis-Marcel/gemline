@@ -1,20 +1,7 @@
 ---
-# Rôle "k3s_agent" — installe k3s en mode "agent" (worker) sur tous les
-# nodes workers. Idempotent : skip si k3s déjà là.
-#
-# HA model (phase 3): workers join the cluster through the Load
-# Balancer (https://{{ lb_ipv4 }}:6443), not via a specific CP IP. This
-# means a worker survives the loss of any individual CP — the LB
-# auto-routes to whichever CP is still healthy.
-#
-# Variables attendues :
-#   - private_ip          : IP privée DU WORKER (10.0.1.{N})
-#   - private_iface       : interface privée (enp7s0)
-#   - k3s_channel         : "stable", "latest" ou version pinnée
-#   - k3s_token           : token du cluster (vault)
-#   - lb_ipv4             : IP publique du Hetzner LB (pour K3S_URL)
+# Installs k3s agent on workers. They join via the LB (not a specific CP
+# IP) so a worker survives the loss of any single CP.
 
-# Précondition : token.
 - name: Ensure k3s_token is provided
   ansible.builtin.assert:
     that:
@@ -22,7 +9,6 @@
       - k3s_token | length > 0
     fail_msg: "k3s_token missing - provide via Ansible Vault"
 
-# Précondition : LB IP.
 - name: Ensure lb_ipv4 is provided
   ansible.builtin.assert:
     that:
@@ -30,15 +16,12 @@
       - lb_ipv4 | length > 0
     fail_msg: "lb_ipv4 missing from inventory - Hetzner LB not provisioned?"
 
-# Idempotence : skip si k3s déjà là.
+# Idempotence: skip install if k3s already present.
 - name: Check if k3s is already installed
   ansible.builtin.stat:
     path: /usr/local/bin/k3s
   register: k3s_binary
 
-# Joins the cluster via the LB endpoint. The LB load-balances 6443
-# across all CPs, so this worker can be installed whichever CP is
-# currently leader. K3S_URL replaces the older direct-CP wiring.
 - name: Install k3s agent (joins via LB at {{ lb_ipv4 }})
   ansible.builtin.shell: |
     curl -sfL https://get.k3s.io | \
@@ -53,10 +36,7 @@
   when: not k3s_binary.stat.exists
   no_log: true
 
-# `kubectl wait` from the first CP — that node has kubectl and a valid
-# kubeconfig (the additional CPs do too, but the first is always there).
-# delegate_to: l'exécution est faite sur le premier CP, pas sur le
-# worker. Pattern Ansible standard pour "vérifier depuis ailleurs".
+# Delegated to the first CP, which has kubectl and a valid kubeconfig.
 - name: Wait for this node to be Ready in the cluster
   ansible.builtin.command: >
     /usr/local/bin/kubectl wait

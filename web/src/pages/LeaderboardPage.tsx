@@ -8,9 +8,8 @@ export function LeaderboardPage() {
   const [mode, setMode] = useState<RatingMode>("1v1");
   const [entries, setEntries] = useState<LeaderboardEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Derived-state reset: clearing entries/error during render rather
-  // than in an effect keeps the loading state visible on the very
-  // render that observes the mode change (one fewer paint).
+  // Reset during render (not in an effect) so the loading state shows on
+  // the same render that observes the mode change — one fewer paint.
   const [prevMode, setPrevMode] = useState(mode);
   if (prevMode !== mode) {
     setPrevMode(mode);

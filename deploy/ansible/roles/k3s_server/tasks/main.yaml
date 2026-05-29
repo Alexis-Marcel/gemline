@@ -1,39 +1,9 @@
 ---
-# Rôle "k3s_server" — installe k3s en mode "server" (control plane) sur
-# tous les CPs du groupe `control_plane`. Idempotent : skip si k3s est
-# déjà là.
-#
-# HA model (phase 3 of the migration):
-#
-#   - The FIRST CP (groups['control_plane'][0]) bootstraps the embedded
-#     etcd cluster with `--cluster-init`. It is the only node that
-#     creates the cluster.
-#   - SUBSEQUENT CPs join the existing cluster by pointing at the
-#     Load Balancer with `--server https://<lb-ipv4>:6443`. They get
-#     their etcd state from the existing members.
-#   - All CPs add `--tls-san {{ lb_ipv4 }}` so the API server cert is
-#     valid when clients connect via the LB rather than a specific CP.
-#
-# This file is intentionally usable for both layouts:
-#   - cp_count == 1: only the "first CP" branch runs, --cluster-init
-#     still creates the etcd cluster (size 1, no fault tolerance, but
-#     usable as a stepping stone toward HA).
-#   - cp_count >= 3: first CP bootstraps; others join. Quorum kicks in.
-#
-# Run with `serial: 1` from the playbook so the first CP finishes
-# `--cluster-init` BEFORE other CPs try to `--server` against it.
-# Without serial:1, the join attempts race with the bootstrap and fail.
-#
-# Variables attendues :
-#   - private_ip          : IP privée du node (10.0.1.10, 10.0.1.11, …)
-#   - private_iface       : interface privée (enp7s0)
-#   - k3s_channel         : "stable", "latest" ou version pinnée
-#   - k3s_token           : token cluster (vault)
-#   - ansible_host        : IP publique du node (pour --tls-san)
-#   - lb_ipv4             : IP publique du Hetzner LB (pour --tls-san +
-#                           pour la cible --server des CPs supplémentaires)
+# Installs k3s server on every control_plane node. The first CP runs
+# --cluster-init to bootstrap embedded etcd; the rest join via the LB
+# with --server. All add --tls-san {{ lb_ipv4 }} so the API cert is valid
+# when clients connect through the LB. Requires serial: 1 (see playbook).
 
-# Précondition : token disponible.
 - name: Ensure k3s_token is provided
   ansible.builtin.assert:
     that:
@@ -43,8 +13,6 @@
       k3s_token is missing. Provide it via Ansible Vault (see
       group_vars/all/vault.yaml) and run with --ask-vault-pass.
 
-# Précondition : LB IP disponible (sinon les --tls-san et --server ne
-# peuvent pas être construits).
 - name: Ensure lb_ipv4 is provided
   ansible.builtin.assert:
     that:
@@ -55,28 +23,21 @@
       Balancer exists (terraform apply) and that inventory.tf.py
       reads load_balancer_ipv4 from terraform output.
 
-# Idempotence : skip si k3s déjà installé.
+# Idempotence: skip install if k3s already present.
 - name: Check if k3s is already installed
   ansible.builtin.stat:
     path: /usr/local/bin/k3s
   register: k3s_binary
 
-# Détecte si on est le premier CP. C'est ce host qui exécute
-# --cluster-init ; les autres font --server.
 - name: Determine cluster-init role
   ansible.builtin.set_fact:
     is_first_cp: "{{ inventory_hostname == groups['control_plane'][0] }}"
 
-# Common SANs added to the API cert so clients can connect via several
-# names (own IP, LB IP, FQDN if you want to add one later). Listed once
-# so both install branches share the same SAN block.
 - name: Build TLS SAN list
   ansible.builtin.set_fact:
     tls_sans:
       - "{{ ansible_host }}"   # this node's public IP
       - "{{ lb_ipv4 }}"        # the Load Balancer's public IP
-
-# --- Branch 1: first CP bootstraps the cluster ------------------------
 
 - name: Install k3s server (FIRST CP - cluster init)
   ansible.builtin.shell: |
@@ -97,8 +58,6 @@
     - is_first_cp
   no_log: true
 
-# --- Branch 2: additional CPs join the existing cluster ---------------
-
 - name: Install k3s server (ADDITIONAL CP - join via LB)
   ansible.builtin.shell: |
     curl -sfL https://get.k3s.io | \
@@ -116,16 +75,9 @@
   when:
     - not k3s_binary.stat.exists
     - not is_first_cp
-  # `no_log` masque la sortie qui contient le K3S_TOKEN. Si tu débuggues un join
-  # qui foire (par ex. LB pas joignable, cert SAN absent), bascule temporairement
-  # à `no_log: false` pour voir l'output de l'install script.
+  # no_log hides K3S_TOKEN; flip to false temporarily to debug a failed join.
   no_log: true
 
-# --- Final wait: API reachable from this node -------------------------
-
-# Attente active. On verifie que kubectl get nodes répond. Sur le
-# premier CP (cluster-init), ça valide que le bootstrap a réussi. Sur
-# les CPs additionnels, ça valide que le join etcd s'est fait.
 - name: Wait for k3s API to be reachable on this node
   ansible.builtin.command: /usr/local/bin/kubectl get nodes
   environment:

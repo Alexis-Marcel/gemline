@@ -1,15 +1,7 @@
-// Shared invitation state for the authenticated user. Owns a stack of
-// pending invitations sourced from the persistent userSocket, plus the
-// HTTP actions to dismiss one (accept = navigate, decline = POST). Two
-// consumers today:
-//
-//   - InvitationToast renders the stack as a column of banners.
-//   - UserNav renders a count badge.
-//
-// We keep a list rather than a single current invite so a quick burst
-// of invites doesn't clobber the earlier ones the user hadn't reacted
-// to yet. Each entry is keyed by (gameId, seatIndex) so duplicates
-// (server re-publishes on reconnect, etc.) coalesce instead of stacking.
+// Shared pending-invitation stack for the authed user, sourced from the
+// userSocket plus the HTTP dismiss/decline actions. A list (not a single
+// invite) so a burst doesn't clobber earlier ones; entries keyed by
+// (gameId, seatIndex) so reconnect re-publishes coalesce.
 
 import {
   useCallback,
@@ -37,11 +29,8 @@ export function InvitationsProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const [invitations, setInvitations] = useState<PendingInvitation[]>([]);
 
-  // Reset the stack on sign-out — the persistent socket also closes on
-  // logout, but state is per-user and shouldn't survive an auth change.
-  // Implemented as derived state (compare prev user, reset during
-  // render) rather than an effect so the empty stack is visible on the
-  // same render that observed the sign-out, not the one after.
+  // Reset the stack on sign-out. Derived state (reset during render) so the
+  // empty stack shows on the same render that observes the sign-out.
   const [prevUserId, setPrevUserId] = useState(user?.id ?? null);
   const currUserId = user?.id ?? null;
   if (prevUserId !== currUserId) {
@@ -49,16 +38,9 @@ export function InvitationsProvider({ children }: { children: ReactNode }) {
     if (!currUserId) setInvitations([]);
   }
 
-  // Wire the lobby socket:
-  //  - invite_received pushes onto the stack;
-  //  - invite_cancelled removes from it (host withdrew the offer while
-  //    the toast was still visible);
-  //  - rematch_ready saves the fresh seat creds the server issued for
-  //    a rematch game pre-seating this user. We piggyback this here
-  //    rather than spinning a dedicated provider — same lobby socket,
-  //    same per-user lifetime, and the only side-effect we need is the
-  //    localStorage write (GamePage picks the change up via the
-  //    subscribeCredentials hook).
+  // Wire the lobby socket: invite_received pushes, invite_cancelled removes,
+  // rematch_ready saves fresh seat creds (piggybacked here since it shares
+  // the lobby socket; GamePage picks up the write via subscribeCredentials).
   useEffect(() => {
     return userSocket.subscribe((ev) => {
       if (ev.type === "invite_received") {
@@ -98,14 +80,13 @@ export function InvitationsProvider({ children }: { children: ReactNode }) {
 
   const decline = useCallback(
     async (gameId: string, seatIndex: number) => {
-      // Optimistic dismiss — even if the API call fails (host already
-      // cancelled, network blip), the local stack stays clean. The
-      // server side is the source of truth for the seat itself.
+      // Optimistic dismiss: the local stack stays clean even if the POST
+      // fails (host already cancelled, blip); the server owns the seat.
       dismiss(gameId, seatIndex);
       try {
         await api.declineSeatInvite(gameId, seatIndex);
       } catch {
-        /* swallow — best-effort */
+        // best-effort
       }
     },
     [dismiss],

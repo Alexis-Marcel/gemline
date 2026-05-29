@@ -11,9 +11,8 @@ terraform {
     }
   }
 
-  # Remote state on S3, locked via DynamoDB.
-  # AWS creds resolved through the standard chain — set
-  # AWS_PROFILE=gemline (or use OIDC in CI) before running terraform.
+  # Remote state on S3, locked via DynamoDB. Set AWS_PROFILE=gemline
+  # (or use OIDC in CI) so the standard credential chain resolves.
   backend "s3" {
     bucket         = "gemline-tfstate-386324384913"
     key            = "infra/terraform.tfstate"

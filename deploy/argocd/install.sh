@@ -1,44 +1,24 @@
 #!/usr/bin/env bash
-# Install ArgoCD on the cluster, then declare the Gemline + monitoring
-# Applications so they self-sync from the repo.
+# Install ArgoCD and declare the app-of-apps so they self-sync from the repo.
 #
-# ⚠️  FRESH CLUSTERS DON'T NEED THIS SCRIPT.
-# The control-plane cloud-init
-# (deploy/terraform/cloud-init/control-plane.sh.tpl) already installs
-# ArgoCD and applies both Applications at first boot. Use this script
-# only to:
-#   - Re-bootstrap ArgoCD on a cluster where it was removed
-#   - Upgrade ArgoCD on an existing cluster (bump ARGOCD_VERSION below)
-#   - Apply the Applications on a cluster that was provisioned by some
-#     other means than this repo's Terraform
-#
-# Run from your laptop with KUBECONFIG pointed at the cluster.
-# Idempotent: re-running it picks up new ArgoCD releases or Application
-# spec changes.
+# Fresh clusters don't need this: `make deploy` runs Ansible, which already
+# installs ArgoCD and applies the Applications. Use this script only to
+# re-bootstrap or upgrade ArgoCD on an existing cluster, from your laptop
+# with KUBECONFIG set. Idempotent.
 
 set -euo pipefail
 
-# v3 is required for k3s 1.31+: v2 ships an older Deployment schema that
-# doesn't know about .status.terminatingReplicas, so diff calculation
-# fails ("field not declared in schema") and sync status oscillates as
-# Unknown.
+# v3 required for k3s 1.31+: v2's Deployment schema lacks
+# .status.terminatingReplicas, so diff calc fails and sync status oscillates.
 ARGOCD_VERSION="v3.4.1"
 
 echo "==> creating argocd namespace"
 kubectl get namespace argocd >/dev/null 2>&1 || kubectl create namespace argocd
 
 echo "==> installing ArgoCD ${ARGOCD_VERSION}"
-# We deliberately use the flat install.yaml (not the kustomize bundle at
-# manifests/cluster-install) because the latter silently falls back to
-# kubectl's current namespace if `argocd` doesn't exist yet — landing
-# the install in `default`. The flat manifest has the namespace baked
-# in and combined with `-n argocd` is unambiguous.
-#
-# --server-side is required: the applicationsets.argoproj.io CRD carries
-# an OpenAPI schema larger than the 256KB limit on the
-# last-applied-configuration annotation that client-side apply uses.
-# --force-conflicts lets us take ownership of fields previously managed
-# by an older ArgoCD install.
+# --server-side: the applicationsets CRD's OpenAPI schema exceeds the 256KB
+# client-side-apply annotation limit. --force-conflicts takes ownership of
+# fields managed by an older ArgoCD install.
 kubectl apply -n argocd --server-side --force-conflicts \
   -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
 
@@ -49,28 +29,18 @@ done
 kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=3m
 
 echo "==> applying the sealed-secrets Application"
-# Apply first so the controller is up when the gemline kustomize
-# carries a SealedSecret. The CRD is what the SealedSecret manifest
-# references; ArgoCD's gemline sync waits/retries until it exists.
+# Before gemline so its SealedSecret CRD exists when the gemline sync runs.
 kubectl apply -f "$(dirname "$0")/app-sealed-secrets.yaml"
 
 echo "==> applying the external-secrets Application"
-# ESO + Infisical for cluster secrets (DSN, etc.). Apply before gemline
-# so the ExternalSecret CRD exists when the gemline kustomize tries to
-# create ExternalSecret resources.
+# Before gemline so the ExternalSecret CRD exists for the gemline kustomize.
 kubectl apply -f "$(dirname "$0")/app-external-secrets.yaml"
 
 echo "==> applying the eso-config Application"
-# Cross-namespace ESO resources (Infisical auth SealedSecret,
-# ClusterSecretStore, ExternalSecrets for shared services).
 kubectl apply -f "$(dirname "$0")/app-eso-config.yaml"
 
 echo "==> applying the monitoring Application (kube-prometheus-stack)"
-# Apply this BEFORE app-gemline so the ServiceMonitor CRD exists when
-# ArgoCD syncs the gemline kustomize (which includes a ServiceMonitor).
-# We don't block on the sync completing here — auto-sync will pick it
-# up, and the gemline ServiceMonitor carries SkipDryRunOnMissingResource
-# so it'll retry until the CRD is registered.
+# Before gemline so the ServiceMonitor CRD exists when ArgoCD syncs gemline.
 kubectl apply -f "$(dirname "$0")/app-monitoring.yaml"
 
 echo "==> applying the Gemline Application manifest"

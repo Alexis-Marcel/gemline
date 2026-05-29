@@ -1,420 +1,358 @@
 # Deploying Gemline
 
-Reproducible deploy of Gemline to a fresh self-hosted Kubernetes cluster
-on Hetzner Cloud, with TLS, GitOps, and CI/CD wired end-to-end.
+Reproducible deploy of Gemline to a self-hosted Kubernetes cluster on
+Hetzner Cloud, with HA control plane, TLS, GitOps, GitOps-managed
+secrets, monitoring, and CI/CD wired end-to-end.
 
-## What you get
+The whole stack stands up with **one command** (`make deploy`): Terraform
+provisions the infrastructure, Ansible turns the VMs into a k3s cluster
+and installs ArgoCD, and ArgoCD takes over from there — pulling every
+workload from this repo.
+
+## Architecture
 
 ```
-              Internet (HTTPS)
-                     │
-                     ▼
-         ┌───────────────────────┐
-         │  Traefik (k3s, :443)  │
-         │   TLS via             │
-         │   cert-manager + LE   │
-         └─────┬─────────┬───────┘
-               │         │
-   /api/* /ws/*│         │ /
-   /healthz    ▼         ▼
-         ┌────────┐  ┌──────────┐
-         │ server │  │ web      │
-         │ Go     │  │ Caddy +  │
-         │ 1 pod  │  │ 3 pods   │
-         └────┬───┘  └──────────┘
-              │
-              │ outbound HTTPS
-              ▼
-        ┌──────────┐
-        │ Supabase │
-        └──────────┘
+                         Internet (HTTPS)
+                                │
+                    Cloudflare DNS (A record, Terraform-managed)
+                                │
+                                ▼
+                   ┌─────────────────────────┐
+                   │  Hetzner Load Balancer   │  lb11
+                   │  :6443 (kube API)        │  → control-plane nodes
+                   │  :80 / :443 (app)        │     (private network)
+                   └────────────┬─────────────┘
+                                │
+                                ▼
+                   ┌─────────────────────────┐
+                   │  Traefik (k3s ingress)   │
+                   │  TLS via cert-manager+LE │
+                   └─────┬──────────────┬─────┘
+            /api /ws     │              │   /
+            /healthz     ▼              ▼
+                  ┌────────────┐  ┌────────────┐
+                  │  server    │  │  web       │
+                  │  Go        │  │  Caddy SPA │
+                  │  2 pods    │  │  3 pods    │
+                  └─────┬──────┘  └────────────┘
+                        │ outbound HTTPS
+                        ▼
+                  ┌────────────┐
+                  │  Supabase  │  (Postgres + auth)
+                  └────────────┘
 ```
 
-- 2 VPS Hetzner cx23 (2 vCPU / 4 GB each): control plane + 1 worker
-- k3s with klipper-lb (no external load balancer needed)
-- cert-manager + Let's Encrypt for automatic TLS
-- ArgoCD pulling manifests from this repo, auto-syncing on every push
-- GitHub Actions building images to GHCR on every commit to `main`,
-  then bumping the kustomization tag back to git for ArgoCD to roll out
+Cross-pod live events (WebSocket fan-out, cache invalidation,
+matchmaking) travel through a Postgres `LISTEN/NOTIFY` backplane, so the
+backend runs **2+ replicas** with no sticky sessions.
 
-## Cost
+## Stack at a glance
 
-| | |
-|---|---|
-| 2× Hetzner cx23 | ~9 €/mo |
-| Domain | ~10 €/year |
-| Supabase free tier | 0 € |
-| GitHub Actions + GHCR (public repo) | 0 € |
+| Layer | Tool | Notes |
+|---|---|---|
+| Infrastructure | **Terraform** | Hetzner VMs + private network + firewall + Load Balancer, Cloudflare DNS. Remote state on **S3 + DynamoDB lock**. |
+| Configuration | **Ansible** | Installs k3s (HA embedded etcd), cert-manager, ArgoCD, and the ArgoCD app-of-apps. Dynamic inventory from Terraform outputs. |
+| Cluster | **k3s** | Lightweight Kubernetes, bundled Traefik ingress. |
+| GitOps | **ArgoCD** v3.4.1 | App-of-apps; auto-sync + self-heal from `main`. |
+| Secrets | **Sealed Secrets → Infisical → External Secrets** | One committed (encrypted) bootstrap secret; everything else pulled from Infisical at runtime. |
+| TLS | **cert-manager** v1.16.1 + Let's Encrypt | HTTP-01 via Traefik. |
+| Monitoring | **kube-prometheus-stack** 75.6.0 | Prometheus (15d retention) + Grafana + Alertmanager; app `ServiceMonitor` scrapes `/metrics`. |
+| Registry | **GHCR** | Public images, no pull secret needed. |
+| CI/CD | **GitHub Actions** | Tests, image build + manifest bump, Terraform plan/apply with OIDC. |
+
+## Topology & cost
+
+Node counts are configurable in `deploy/terraform/terraform.tfvars`:
+
+- `cp_count` — control-plane nodes. **Default 3** (HA via k3s embedded
+  etcd; quorum needs an odd number ≥ 3). Set `1` for a cheaper, non-HA
+  learning cluster.
+- `worker_count` — worker nodes. **Default 1**.
+
+All nodes are `cx23` (2 vCPU / 4 GB) in `fsn1` by default.
+
+| Config | Nodes | Approx. monthly |
+|---|---|---|
+| Non-HA (`cp_count=1`) | 1 CP + 1 worker + LB | ~€14 |
+| HA (`cp_count=3`, default) | 3 CP + 1 worker + LB | ~€23 |
+
+Plus: domain ~€10/yr, Supabase free tier, GHCR (public) free, Infisical
+free tier, AWS S3+DynamoDB state (cents/month). Prices are approximate —
+check Hetzner's current `cx23` and `lb11` rates.
 
 ## Prerequisites
 
-Before running anything, make sure you have:
+1. **Hetzner Cloud** account + API token (Read & Write).
+2. **Cloudflare** zone for your domain + an API token scoped to *Edit
+   zone DNS* on it.
+3. **AWS** account hosting the Terraform state backend (an S3 bucket +
+   DynamoDB lock table). Local runs authenticate via `AWS_PROFILE`; CI
+   uses OIDC (no long-lived keys).
+4. **Supabase** project (Postgres + auth). Note its Session-pooler
+   `DATABASE_URL` and project URL.
+5. **Infisical** project `gemline` with an environment `prod` holding:
+   `DATABASE_URL`, `SUPABASE_URL`, `ALLOWED_ORIGINS`, and the Grafana
+   `admin-user` / `admin-password`. Plus a Universal-Auth machine
+   identity (its `clientId`/`clientSecret` bootstrap External Secrets).
+6. **Local tools**: `terraform`, `ansible`, `kubectl`, `kubeseal`,
+   `make`, `jq`, plus an SSH key.
 
-1. **Hetzner Cloud account** with an API token (Console → Security → API
-   Tokens → "Read & Write").
-2. **A registered domain** with control over its DNS records.
-3. **A Supabase project** with auth enabled. Note its:
-   - Project URL (`https://<ref>.supabase.co`)
-   - Database password
-   - Region (visible in the project settings)
-4. **This repo forked or cloned**, with:
-   - The GitHub repository **public** (or set up ArgoCD repo credentials
-     in step 6 — public is simpler).
-   - GHCR packages **public** for both `gemline-server` and `gemline-web`
-     (Settings → Packages → Visibility), so the cluster can pull without
-     an imagePullSecret.
-5. **Local tools**: `terraform`, `kubectl`, `git`, `openssl`, `curl`.
+> If you fork the repo, search-and-replace the hard-coded identifiers:
+> hostname `gemline.werilo.fr`, email `alexismarcel55@gmail.com`, repo
+> `Alexis-Marcel/gemline`, GHCR `alexis-marcel/...`, and the AWS/Infisical
+> IDs in `.github/workflows/` and `deploy/terraform/versions.tf`.
 
-## One-time setup
-
-### 1. Provision the cluster — Terraform
-
-```sh
-cd deploy/terraform
-cp terraform.tfvars.example terraform.tfvars
-```
-
-Edit `terraform.tfvars`:
-
-```hcl
-hcloud_token = "<your Hetzner token>"
-k3s_token    = "<run: openssl rand -hex 32>"
-
-# Your IP, so kubectl can reach the API server directly.
-# Closed by default (empty list). To find yours:
-#   curl -s -4 ifconfig.me           # IPv4
-#   curl -s -6 ifconfig.me           # IPv6 — take first 4 groups + "::/64"
-kubeapi_allowed_ips = [
-  "<your IPv4>/32",
-  "<your IPv6 /64 prefix>",
-]
-```
-
-Apply:
+## One-command bootstrap
 
 ```sh
-terraform init
-terraform apply
+cd deploy
+
+# 1. Fill in your secrets / vars (gitignored):
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+$EDITOR terraform/terraform.tfvars      # hcloud_token, cloudflare_api_token,
+                                        # dns_zone/subdomain, cp_count, …
+
+export AWS_PROFILE=gemline              # for the S3 state backend
+
+# 2. Provision + configure everything:
+make deploy                            # = terraform apply  +  ansible-playbook
 ```
 
-This brings up 1 control-plane + 1 worker VPS in ~3 minutes. Cloud-init
-installs k3s on both, joins the worker via the private network, and
-deploys cert-manager on the CP.
+`make deploy` runs two layers:
 
-**Verify**:
+### Terraform layer (`terraform apply`)
+
+Provisions the VMs, private network (`10.0.0.0/16`), a public firewall
+(22/80/443 open; the kube API on 6443 closed unless you list your IP in
+`kubeapi_allowed_ips`), a Hetzner Load Balancer fronting the control
+plane, and the Cloudflare A record pointing the app hostname at the LB.
+cloud-init only brings up the private NIC — k3s and everything else is
+Ansible's job. State lives remotely on S3 (locked via DynamoDB).
+
+### Ansible layer (`ansible-playbook --ask-vault-pass`)
+
+The inventory is **dynamic** (`inventory.tf.py` reads `terraform output
+-json` — no IPs to maintain by hand). Roles run in order:
+
+1. `networking` — base network setup on every node.
+2. `k3s_server` (control plane, `serial: 1`) — the first CP runs
+   `--cluster-init` to bootstrap embedded etcd; additional CPs join
+   through the Load Balancer. All add the LB IP as a TLS SAN.
+3. `k3s_agent` (workers) — join the cluster over the private network.
+4. `cert_manager`, `argocd`, `argocd_apps` (first CP only) — install
+   cert-manager + ArgoCD, then apply the ArgoCD Applications.
+
+The k3s join token is stored encrypted in Ansible Vault
+(`group_vars/all/vault.yaml`), so the playbook prompts for the vault
+password (`--ask-vault-pass`).
+
+Once ArgoCD is up, it owns the cluster: it reconciles everything below
+straight from `main`.
+
+### Grab the kubeconfig
 
 ```sh
-terraform output         # note the IPv4 — you'll need it everywhere
-```
-
-### 2. Point your domain at the cluster
-
-In your DNS provider, create:
-
-```
-gemline.<your-domain>.   A   <cp-ipv4 from terraform output>
-TTL: 60s (raise it later once things are stable)
-```
-
-**Verify** (wait until this returns the right IP):
-
-```sh
-dig +short gemline.<your-domain>
-```
-
-### 3. Fetch the kubeconfig
-
-```sh
-PUBLIC_IP=<your cp ipv4>
-scp root@$PUBLIC_IP:/etc/rancher/k3s/k3s.yaml ~/.kube/gemline.yaml
-sed -i '' "s/127.0.0.1/$PUBLIC_IP/" ~/.kube/gemline.yaml   # on macOS
-# or:    sed -i "s/127.0.0.1/$PUBLIC_IP/" ~/.kube/gemline.yaml   # on Linux
-
+make kubeconfig                        # writes ~/.kube/gemline.yaml
 export KUBECONFIG=~/.kube/gemline.yaml
-# Make it persistent so future shells inherit it:
-echo "export KUBECONFIG=~/.kube/gemline.yaml" >> ~/.zshrc
+kubectl get nodes                      # cp_count + worker_count, all Ready
 ```
 
-**Verify**:
+## GitOps — the app-of-apps
+
+Ansible applies five ArgoCD `Application`s (listed in
+`deploy/ansible/group_vars/all/vars.yaml`); ArgoCD syncs each from this
+repo or an upstream Helm chart, with `prune` + `selfHeal` +
+`ServerSideApply`:
+
+| Application | Source | What it deploys |
+|---|---|---|
+| `sealed-secrets` | Helm (Bitnami) 2.16.2 | Sealed Secrets controller in `kube-system`. |
+| `external-secrets` | Helm 0.11.0 | External Secrets Operator (ESO) in `external-secrets`. |
+| `eso-config` | git `deploy/k8s/external-secrets` | The bootstrap SealedSecret, the `ClusterSecretStore`, and the `ExternalSecret`s. |
+| `monitoring` | Helm kube-prometheus-stack 75.6.0 | Prometheus + Grafana + Alertmanager in `monitoring`. |
+| `gemline` | git `deploy/k8s` | The app: server (×2), web (×3), services, ingress, ClusterIssuer, ServiceMonitor. |
+
+Day-to-day, **nobody runs `kubectl apply`** for the app — you push to
+`main` and ArgoCD rolls the change forward.
+
+## Secrets — Sealed Secrets → Infisical → ESO
+
+No plaintext secret is ever committed, and no secret is created by hand
+on the cluster. The chain bootstraps itself:
+
+```
+  committed (encrypted)          in-cluster                 runtime
+ ┌──────────────────────┐   ┌──────────────────┐   ┌────────────────────┐
+ │ sealed-infisical-    │ → │ Secret           │ → │ ClusterSecretStore │
+ │ auth.yaml            │   │ infisical-auth   │   │ infisical-prod     │
+ │ (SealedSecret)       │   │ (clientId/secret)│   │ (talks to Infisical)│
+ └──────────────────────┘   └──────────────────┘   └─────────┬──────────┘
+   decrypted by the                                           │ pulls
+   Sealed Secrets controller                                  ▼
+                                              ┌────────────────────────────┐
+                                              │ ExternalSecret → K8s Secret │
+                                              │  gemline-env, grafana-admin │
+                                              └────────────────────────────┘
+                                                  consumed via envFrom
+```
+
+Only the Infisical machine-identity credentials are sealed into git
+(encrypted, useless without the cluster's private key). Everything else
+(`DATABASE_URL`, `SUPABASE_URL`, `ALLOWED_ORIGINS`, Grafana admin) is
+pulled live from Infisical by ESO and refreshed hourly.
+
+**Bootstrap gotcha:** a fresh cluster generates a *new* Sealed Secrets
+key, so the committed `sealed-infisical-auth.yaml` (sealed with the old
+key) won't decrypt. Either restore the backed-up key, or re-seal:
 
 ```sh
-kubectl get nodes        # 2 nodes, both Ready
+kubeseal --controller-namespace kube-system --fetch-cert > pub.pem
+# craft the infisical-auth Secret locally, then:
+kubeseal --cert pub.pem -o yaml \
+  < infisical-auth-secret.yaml \
+  > deploy/k8s/external-secrets/sealed-infisical-auth.yaml
+git commit && git push     # ArgoCD applies it; the controller decrypts it
 ```
 
-### 4. Edit the hostname-bearing manifests
+> **Back up the Sealed Secrets master key** (`Secret sealed-secrets-key`
+> in `kube-system`) before any teardown — it's the only thing that can
+> decrypt committed SealedSecrets on a rebuild.
 
-Both `deploy/k8s/ingress.yaml` and `deploy/k8s/cluster-issuer.yaml` ship
-with the live hostnames from this repo. **If you forked**, change:
+## TLS & ingress
 
-- `gemline.werilo.fr` → your hostname (in `ingress.yaml`)
-- `alexismarcel55@gmail.com` → your email (in `cluster-issuer.yaml`)
-- `Alexis-Marcel/gemline` → `<you>/gemline` (in `deploy/argocd/app-gemline.yaml`,
-  `.github/workflows/deploy.yml`, `deploy/k8s/kustomization.yaml`)
+Traefik (bundled with k3s) terminates TLS. cert-manager requests a
+Let's Encrypt **production** certificate via the `letsencrypt-prod`
+`ClusterIssuer` (HTTP-01 over Traefik). The `gemline` Ingress routes
+`/api`, `/ws`, `/healthz`, `/readyz` to the server and everything else
+to the web SPA, all on one hostname.
 
-Commit and push these edits — ArgoCD will pick them up from git in
-step 6.
+## Monitoring
 
-### 5. Apply the cluster-wide bits
-
-These never live in the GitOps loop — the Secret carries credentials,
-the ClusterIssuer is cluster-scoped:
+kube-prometheus-stack runs Prometheus (15-day persistent retention),
+Grafana, and Alertmanager. The app exposes Prometheus metrics at
+`/metrics` (top-level, outside the CORS/auth/log middleware); the
+`gemline-server` `ServiceMonitor` wires it up for scraping. Grafana's
+admin credentials come from Infisical via ESO.
 
 ```sh
-# ClusterIssuer for Let's Encrypt production.
-kubectl apply -f deploy/k8s/cluster-issuer.yaml
-
-# Namespace (ArgoCD will also create it later, but we need it now to
-# host the Secret before pods come up).
-kubectl create namespace gemline
-
-# Supabase credentials.
-# IMPORTANT: use the Session pooler URL, not the direct connection.
-# The direct connection (db.<ref>.supabase.co) is IPv6-only since 2024
-# and most VPS providers don't give you IPv6 egress — connections will
-# fail with "network is unreachable". The Session pooler is IPv4 and
-# behaves the same way for long-lived backends.
-# Find it in Supabase: Project → Connect → Session pooler.
-kubectl -n gemline create secret generic gemline-env \
-  --from-literal=DATABASE_URL='postgresql://postgres.<ref>:<password>@aws-X-<region>.pooler.supabase.com:5432/postgres' \
-  --from-literal=SUPABASE_URL='https://<ref>.supabase.co'
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+# open http://localhost:3000
 ```
 
-**Verify**:
+## CI/CD
 
-```sh
-kubectl -n gemline get secret gemline-env       # DATA: 2
-kubectl get clusterissuer letsencrypt-prod      # READY: True (within ~10s)
-```
+Four GitHub Actions workflows:
 
-### 6. Install ArgoCD and declare the Gemline Application
+| Workflow | Trigger | Does |
+|---|---|---|
+| `test` | push / PR | `go vet`, `go test -race -cover`; `npm ci` + `npm run build`. |
+| `deploy` | push to `main` (app paths) | Builds `gemline-server` + `gemline-web`, pushes to GHCR tagged with the commit SHA, then `kustomize edit set image` + commits the bump back to `main` with `[skip ci]`. |
+| `terraform-plan` | PR touching `deploy/terraform/**` | OIDC to AWS (read-only) + Infisical; fmt / validate / tflint / Trivy / plan; posts the plan as a PR comment. |
+| `terraform-apply` | push to `main` touching `deploy/terraform/**` | OIDC to AWS (write) + Infisical; pauses on the `production` environment approval gate, then plan-then-apply of the saved plan. |
 
-```sh
-bash deploy/argocd/install.sh
-```
+CI never talks to the cluster: it commits an image-tag bump and **ArgoCD
+does the rollout from inside the cluster**. No `KUBECONFIG` secret
+needed. There are zero long-lived cloud credentials in GitHub — both
+AWS and Infisical are reached via OIDC.
 
-This installs ArgoCD in its own namespace and applies the
-`Application` manifest watching `deploy/k8s/` on `main` with
-auto-sync + self-heal.
-
-The script uses `kubectl apply --server-side --force-conflicts`. That
-matters: the ArgoCD CRDs (specifically `applicationsets.argoproj.io`)
-embed an OpenAPI schema larger than the 256 KB limit Kubernetes places
-on the `last-applied-configuration` annotation that client-side apply
-uses. Server-side apply moves the diff to the API server and avoids
-that annotation entirely.
-
-**Verify** (give it ~2 min for the first rollout):
-
-```sh
-kubectl -n argocd get pods                # all Running
-kubectl -n argocd get application gemline # SYNC: Synced, HEALTH: Healthy
-kubectl -n gemline get pods               # 1 server + 3 web, all Running
-kubectl -n gemline get certificate        # READY: True (within ~1 min)
-kubectl -n gemline get ingress            # ADDRESS = your cp ipv4
-curl -I https://gemline.<your-domain>     # HTTP/2 200 with a real LE cert
-```
-
-If `Healthy` takes a while, watch with `-w`. cert-manager runs an
-HTTP-01 challenge against your domain; it needs DNS to resolve and
-port 80 to reach the cluster.
-
-### 7. Configure GitHub Actions secrets
-
-In **Settings → Secrets and variables → Actions** on the repo, add:
-
-| Secret name                     | Value                            |
-| ------------------------------- | -------------------------------- |
-| `VITE_SUPABASE_URL`             | `https://<ref>.supabase.co`      |
-| `VITE_SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_...`             |
-
-CI doesn't talk to the cluster directly — it commits new image tags
-back to `deploy/k8s/kustomization.yaml`, and ArgoCD does the rollout
-from inside the cluster. So no `KUBECONFIG` secret needed.
+End-to-end on an app change: **~3 min from `git push` to live.**
 
 ## Day-to-day
 
 ### Deploying
 
-Push to `main`. The `deploy` workflow:
-
-1. Builds the two images and pushes them to GHCR tagged with the
-   commit SHA.
-2. Updates `deploy/k8s/kustomization.yaml` to point at those SHAs
-   and commits the bump back to `main` with `[skip ci]`.
-3. ArgoCD picks up the new commit within ~60 s, syncs, and rolls
-   the deployments.
-
-End-to-end: ~3 min from `git push` to live.
+Push to `main`. The `deploy` workflow builds the images and bumps
+`deploy/k8s/kustomization.yaml`; ArgoCD picks up the commit within ~60 s
+and rolls the deployments (surge-up, drain, terminate — no downtime at
+`replicas: 2`).
 
 ### Rolling back
 
-`git revert <bad-sha>` on `main` — CI rebuilds the images for the
-previous code, the manifest bump reverts to the older SHA, and ArgoCD
-re-syncs. Pure git workflow.
-
-If you need to roll back to a specific already-built SHA without
-touching the code:
+`git revert <bad-sha>` on `main` — CI rebuilds for the previous code and
+ArgoCD re-syncs. Or pin an already-built SHA without touching code:
 
 ```sh
 cd deploy/k8s
-kustomize edit set image ghcr.io/<you>/gemline-server=ghcr.io/<you>/gemline-server:<sha>
-kustomize edit set image ghcr.io/<you>/gemline-web=ghcr.io/<you>/gemline-web:<sha>
+kustomize edit set image ghcr.io/alexis-marcel/gemline-server=ghcr.io/alexis-marcel/gemline-server:<sha>
+kustomize edit set image ghcr.io/alexis-marcel/gemline-web=ghcr.io/alexis-marcel/gemline-web:<sha>
 git commit -am "rollback to <sha>" && git push
 ```
-
-### Updating the Secret
-
-```sh
-kubectl -n gemline create secret generic gemline-env \
-  --from-literal=DATABASE_URL='...' \
-  --from-literal=SUPABASE_URL='...' \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl -n gemline rollout restart deployment/gemline-server
-```
-
-The `--dry-run | apply` form upserts: it replaces the existing Secret
-instead of erroring out.
 
 ### Inspecting
 
 ```sh
 kubectl -n gemline get pods
 kubectl -n gemline logs deployment/gemline-server --tail=100 -f
-kubectl -n gemline describe ingress gemline
 kubectl -n gemline get certificate
+kubectl -n argocd get applications
+kubectl -n argocd port-forward svc/argocd-server 8443:443   # ArgoCD UI
 ```
 
-### The ArgoCD dashboard
-
-```sh
-kubectl -n argocd port-forward svc/argocd-server 8443:443
-# open https://localhost:8443
-```
-
-Login as `admin`. The initial password is in the cluster:
+ArgoCD's initial admin password:
 
 ```sh
 kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
-Change it via the UI (User Info → Update Password) on first login.
-
 ## Scaling
 
-### Adding workers
-
-Bump `worker_count` in `deploy/terraform/terraform.tfvars`, then
-`terraform apply`. New nodes provision in ~90 s and join automatically.
-The web Deployment has `topologySpreadConstraints` on the hostname so
-its 3 replicas spread across nodes as you add them.
-
-```sh
-kubectl -n gemline get pods -o wide       # one web pod per node, ideally
-```
-
-### Why the backend stays at replicas = 1
-
-The WebSocket hub lives in-process. With 2+ server pods, a player whose
-WS lands on pod A sees moves broadcast from pod A; a player on pod B
-sees moves broadcast from pod B. Postgres stays consistent via the REST
-path, but live updates diverge.
-
-The fix is a pub/sub backplane via Postgres `LISTEN/NOTIFY` (we already
-have Postgres) or Redis pub/sub. Not implemented yet — `replicas: 1`
-is the honest current ceiling.
-
-## Tearing down and rebuilding
-
-The whole stack is reproducible by design. To validate that:
-
-```sh
-cd deploy/terraform
-terraform destroy           # 5 min, nukes the cluster cleanly
-terraform apply             # 3 min, brings it back
-
-# New IP — update DNS A record (lower TTL beforehand if you want)
-
-# Refresh kubeconfig (see step 3)
-
-# Update terraform.tfvars kubeapi_allowed_ips if your IP changed
-
-# Apply cluster-wide bits (step 5)
-kubectl apply -f deploy/k8s/cluster-issuer.yaml
-kubectl create namespace gemline
-kubectl -n gemline create secret generic gemline-env --from-literal=...
-
-# Install ArgoCD (step 6)
-bash deploy/argocd/install.sh
-```
-
-**Watch out for Let's Encrypt rate limits**: 5 certificates per week
-per hostname in production. If you rebuild the cluster many times in a
-row and re-issue the same cert each time, you'll be blocked for 7 days.
-
-For repeated test rebuilds, point the ClusterIssuer at the LE **staging**
-endpoint instead. Edit `deploy/k8s/cluster-issuer.yaml`:
-
-```yaml
-server: https://acme-staging-v02.api.letsencrypt.org/directory
-```
-
-The cert won't be trusted by browsers (untrusted root), but the full
-pipeline gets validated without quota cost. Switch back to prod once
-you trust the setup.
+- **More workers**: bump `worker_count`, `make deploy`. New nodes
+  provision and join automatically; the deployments' topology-spread
+  constraints redistribute pods.
+- **HA control plane**: set `cp_count` to `3` (or `5`/`7`) and re-run.
+  The Load Balancer targets CPs by label, so new control planes are
+  picked up without Terraform churn.
+- **More backend throughput**: raise `replicas` on `gemline-server` —
+  the Postgres backplane keeps all replicas in sync.
 
 ## Known limits
 
-- **Single backend replica** — see above.
-- **Single control-plane node** — if the CP node dies, the cluster API
-  is down even if workers keep running their pods. HA needs 3+ CP nodes
-  with embedded etcd (`k3s server --cluster-init` + `--server` join).
-  Doable but not wired into the current Terraform.
-- **No in-cluster Postgres** — we lean on Supabase. If Supabase is
-  down, the SPA still serves but games don't load.
+- **No in-cluster Postgres** — we lean on Supabase. If Supabase is down,
+  the SPA still serves but games don't load.
+- **Single region** — all nodes share one Hetzner location.
+- **No rate limiting** at the app layer yet.
+
+## Tearing down & rebuilding
+
+```sh
+cd deploy
+# Back up the Sealed Secrets key first (see Secrets section)!
+make destroy            # terraform destroy (interactive confirmation)
+make deploy             # bring it back
+```
+
+**Let's Encrypt rate limits**: 5 certificates per week per hostname in
+production. For repeated test rebuilds, point the ClusterIssuer at the
+LE **staging** endpoint
+(`https://acme-staging-v02.api.letsencrypt.org/directory`) — untrusted
+in browsers, but it validates the full pipeline without burning quota.
 
 ## Troubleshooting
 
 ### Pods stuck `CreateContainerConfigError`
+A referenced Secret/ConfigMap is missing. If it's `gemline-env`, the
+secrets chain hasn't completed — check the `ExternalSecret` status
+(`kubectl -n gemline describe externalsecret gemline-env`) and that
+`infisical-auth` decrypted in `external-secrets`.
 
-A referenced Secret or ConfigMap doesn't exist in the namespace. Check
-the Events of one of the affected pods — kubelet tells you which.
+### `runAsNonRoot` errors on distroless images
+The server runs distroless with a symbolic `USER nonroot`; kubelet can't
+verify the UID statically. The deployment sets `runAsUser: 65532`
+(Google distroless nonroot UID) to satisfy it.
 
-### Pods stuck `CrashLoopBackOff` with `exec: operation not permitted`
-
-The container image has a binary with file capabilities (e.g. Caddy with
-`cap_net_bind_service`) and the pod's `securityContext.capabilities.drop`
-removes that capability at the bounding-set level. The kernel refuses
-exec with EPERM. Either keep the capability or remove the drop.
-
-### Pods stuck on `runAsNonRoot` for distroless images
-
-Distroless images set `USER nonroot` (symbolic). Kubelet can't verify
-statically whether that's UID 0, so it refuses. Add
-`runAsUser: 65532` (the nonroot UID in Google's distroless) to the
-pod's `securityContext`.
+### Caddy `CrashLoopBackOff` with `exec: operation not permitted`
+The web image's Caddy binary carries `cap_net_bind_service`; dropping all
+capabilities makes the kernel refuse exec (EPERM). The web pod keeps the
+capability (only `allowPrivilegeEscalation: false`).
 
 ### Certificate stuck `READY: False`
-
-`kubectl -n gemline describe certificate gemline-tls` and look at the
-Challenge. Common causes, in order:
-
-1. DNS doesn't yet point at the cluster. Wait, or fix the A record.
-2. Port 80 isn't reachable from the public internet. Either the
-   firewall blocks it, or `kube-system/traefik` has no `EXTERNAL-IP`
-   (klipper-lb missing — the Terraform cloud-init should have it
-   enabled by default).
-3. Let's Encrypt rate-limited you. Switch to staging and wait a week.
+`kubectl -n gemline describe certificate gemline-tls`. Usual causes, in
+order: (1) DNS not yet pointing at the LB; (2) port 80 not reachable
+from the internet (firewall, or the LB http service unhealthy);
+(3) Let's Encrypt rate limit — switch to staging.
 
 ### ArgoCD `SYNC STATUS: Unknown`
-
-Check `kubectl -n argocd describe application gemline | grep Message`.
-The two cases we've hit:
-
-- `authentication required` → the GitHub repo is private and ArgoCD has
-  no credentials. Make the repo public, or add a Repository secret in
-  the `argocd` namespace.
-- `field not declared in schema: .status.terminatingReplicas` →
-  ArgoCD < v3 doesn't know about K8s 1.31+ Deployment fields. Bump
-  `ARGOCD_VERSION` in `deploy/argocd/install.sh` and re-run.
+`kubectl -n argocd describe application gemline | grep Message`. If
+`authentication required`, the repo is private and ArgoCD has no creds —
+make it public or add a Repository secret in the `argocd` namespace.

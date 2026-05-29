@@ -1,18 +1,7 @@
-# Infisical Gateway — Deployment custom au lieu du Helm chart officiel.
-#
-# Pourquoi pas la chart : le chart v1.0.5 (le plus récent) ne câble pas
-# proprement les args de la CLI Infisical depuis ses values quand on
-# utilise enrollment.method=token. On se retrouve en mode "legacy" qui
-# demande une autre structure de Secret. Plus simple de gérer
-# nous-mêmes le Deployment — la commande à lancer est juste celle que
-# l'UI Infisical nous donne :
-#   infisical gateway start <name> --enroll-method=token --token=<T> --domain=<D>
-#
-# Le Gateway établit un tunnel outbound vers Infisical SaaS pour qu'on
-# puisse faire du Kubernetes Auth sans ouvrir le firewall.
-#
-# Le token est lu depuis un Secret (créé par sealed-secrets depuis
-# sealed-infisical-gateway-environment.yaml) avec la clé `enrollment-token`.
+# Custom Deployment instead of the Helm chart: chart v1.0.5 doesn't wire
+# the CLI args from values for enrollment.method=token. The Gateway opens
+# an outbound tunnel to Infisical SaaS so K8s auth works without opening
+# the firewall. Token read from a sealed-secrets-created Secret.
 
 apiVersion: apps/v1
 kind: Deployment
@@ -23,8 +12,7 @@ metadata:
     app: infisical-gateway
 spec:
   replicas: 1
-  # Stratégie Recreate : un seul Gateway à la fois, pas de rolling
-  # update (la connexion outbound se réinitialise mieux comme ça).
+  # Recreate, not rolling: only one Gateway at a time so the outbound tunnel resets cleanly.
   strategy:
     type: Recreate
   selector:
@@ -35,18 +23,30 @@ spec:
       labels:
         app: infisical-gateway
     spec:
+      # fsGroup=1000 chowns the emptyDir so runAsUser=1000 can write its
+      # $HOME/.infisical config dir.
+      securityContext:
+        fsGroup: 1000
+      volumes:
+        - name: home
+          emptyDir: {}
       containers:
         - name: gateway
-          # Image officielle CLI Infisical — la CLI a la sous-commande
-          # `gateway start`. Pin une version pour la reproductibilité.
           image: infisical/cli:0.43.85
           imagePullPolicy: IfNotPresent
           env:
+            # Points HOME at the writable emptyDir; otherwise the CLI tries
+            # to write to the read-only / and bails.
+            - name: HOME
+              value: /home/infisical
             - name: ENROLLMENT_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: infisical-gateway-environment
                   key: enrollment-token
+          volumeMounts:
+            - name: home
+              mountPath: /home/infisical
           command: ["infisical"]
           args:
             - "gateway"
@@ -63,11 +63,8 @@ spec:
               memory: 128Mi
           securityContext:
             runAsNonRoot: true
-            # L'image infisical/cli n'a pas de USER non-root dans son
-            # Dockerfile. On force runAsUser à 1000 (= ce que fait la
-            # chart Helm officielle). K8s n'enforce le runAsNonRoot
-            # que si soit l'image a un USER non-root, soit on lui dit
-            # explicitement quel UID utiliser.
+            # infisical/cli has no non-root USER, so set the UID explicitly
+            # or runAsNonRoot can't be enforced.
             runAsUser: 1000
             allowPrivilegeEscalation: false
             capabilities:

@@ -1,15 +1,13 @@
 # Terraform Plan on PR.
 #
-# Triggered on any PR that touches deploy/terraform/** or this workflow.
-# Runs fmt-check / init / validate / tflint / trivy / plan, and posts
-# the plan output as a PR comment.
+# Triggered on any PR that touches deploy/terraform/**. Runs static checks
+# (fmt / init / validate / tflint / trivy) + plan, then posts the plan
+# output as a PR comment.
 #
-# Auth: zero long-lived secrets in GitHub.
-#   - AWS (state bucket + lock table): OIDC -> arn:aws:iam::386324384913:role/gemline-tf-plan
-#   - Infisical (HCLOUD_TOKEN, CLOUDFLARE_API_TOKEN, ...): OIDC -> machine identity
-#
-# The role is least-privilege: it can only read the state object and
-# CRUD the lock item. No write to state, no other AWS service access.
+# Auth: zero long-lived secrets in GitHub. AWS OIDC -> gemline-tf-plan
+# (state read-only + GetSecretValue on gemline/tf-vars). TF input vars
+# (HCLOUD_TOKEN, CLOUDFLARE_API_TOKEN, KUBEAPI_ALLOWED_IPS) are fetched
+# at runtime from Secrets Manager.
 
 name: Terraform Plan
 
@@ -51,22 +49,17 @@ jobs:
           role-to-assume: arn:aws:iam::386324384913:role/gemline-tf-plan
           aws-region: eu-west-3
 
-      # Infisical OIDC: same pattern, different provider.
-      # Exposes every secret in env=prod as env vars on the runner.
-      - name: Infisical OIDC + fetch secrets
-        uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995  # v1.0.16
-        with:
-          method: oidc
-          # EU region - project lives on eu.infisical.com, not global
-          # app.infisical.com. Wrong region returns 404.
-          domain: https://eu.infisical.com
-          identity-id: 09158407-59f2-474f-b5b4-0b5e1d6febb2
-          # Audience must match Infisical's Bound Audiences exactly.
-          # We use the identity ID as a unique, meaningful audience.
-          oidc-audience: 09158407-59f2-474f-b5b4-0b5e1d6febb2
-          project-slug: gemline
-          env-slug: prod
-          secret-path: /
+      # Pull TF input vars from Secrets Manager (one JSON secret with N keys).
+      # Each value is masked before being exposed, so the runner's logs can't
+      # accidentally leak it via a `set -x` or echo.
+      - name: Fetch TF variables from Secrets Manager
+        run: |
+          SECRET=$(aws secretsmanager get-secret-value --secret-id gemline/tf-vars --query SecretString --output text)
+          for KEY in HCLOUD_TOKEN CLOUDFLARE_API_TOKEN KUBEAPI_ALLOWED_IPS; do
+            VAL=$(echo "$SECRET" | jq -cr --arg k "$KEY" '.[$k]')
+            echo "::add-mask::$VAL"
+            echo "$KEY=$VAL" >> "$GITHUB_ENV"
+          done
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3
         with:
@@ -104,17 +97,13 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: '1'
 
-      # The actual plan. TF_VAR_* env vars are picked up by Terraform as
-      # input variables. The Infisical secrets are already on the
-      # runner's env from the auth step above; we just rename them with
-      # the TF_VAR_ prefix.
+      # TF picks up TF_VAR_* as input variables. kubeapi_allowed_ips is
+      # list-typed; TF parses values that start with [ as JSON.
       - name: terraform plan
         id: plan
         env:
           TF_VAR_hcloud_token: ${{ env.HCLOUD_TOKEN }}
           TF_VAR_cloudflare_api_token: ${{ env.CLOUDFLARE_API_TOKEN }}
-          # List-typed var: TF parses JSON when value starts with [ or {.
-          # Infisical stores it as `["x.y.z.t/32", ...]`.
           TF_VAR_kubeapi_allowed_ips: ${{ env.KUBEAPI_ALLOWED_IPS }}
         run: |
           set -o pipefail

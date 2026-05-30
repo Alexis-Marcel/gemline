@@ -1,20 +1,14 @@
 # Terraform Apply on push to main.
 #
-# Triggered when a commit lands on main that touches deploy/terraform/**
-# (typically via PR merge). Pauses on the `production` GitHub
-# Environment until a required reviewer clicks Approve, then runs
-# terraform apply -auto-approve.
+# Triggered when a commit lands on main that touches deploy/terraform/**.
+# Pauses on the `production` GitHub Environment until a required reviewer
+# Approves, then plan-then-apply against the saved plan.
 #
-# Auth: zero long-lived secrets in GitHub.
-#   - AWS state: OIDC -> arn:aws:iam::386324384913:role/gemline-tf-apply
-#     (write-enabled — has s3:PutObject on the state file)
-#   - Infisical: OIDC -> machine identity scoped to ref:refs/heads/main
-#     (separate from the plan identity, mirroring the IAM split)
-#
-# Why the plan workflow doesn't run apply itself: PR plans run before
-# merge and use a read-only role. Once the PR is merged, we need a
-# *fresh* invocation against the committed code, with a write role,
-# behind a human gate. That's this workflow.
+# Auth: zero long-lived secrets in GitHub. AWS OIDC -> gemline-tf-apply
+# (state write + Secrets Manager + IAM + S3 on gemline-* resources). TF
+# input vars are fetched at runtime from Secrets Manager. Why a separate
+# apply workflow: PR plans use a read-only role; merged-to-main runs need
+# a fresh invocation with a write role behind a human gate.
 
 name: Terraform Apply
 
@@ -59,16 +53,17 @@ jobs:
           role-to-assume: arn:aws:iam::386324384913:role/gemline-tf-apply
           aws-region: eu-west-3
 
-      - name: Infisical OIDC + fetch secrets
-        uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995  # v1.0.16
-        with:
-          method: oidc
-          domain: https://eu.infisical.com
-          identity-id: 423b475e-dd1a-427b-adfe-0dd9dcb2b7ed
-          oidc-audience: 423b475e-dd1a-427b-adfe-0dd9dcb2b7ed
-          project-slug: gemline
-          env-slug: prod
-          secret-path: /
+      # Pull TF input vars from Secrets Manager (one JSON secret with N keys).
+      # Each value is masked before being exposed, so the runner's logs can't
+      # accidentally leak it via a `set -x` or echo.
+      - name: Fetch TF variables from Secrets Manager
+        run: |
+          SECRET=$(aws secretsmanager get-secret-value --secret-id gemline/tf-vars --query SecretString --output text)
+          for KEY in HCLOUD_TOKEN CLOUDFLARE_API_TOKEN KUBEAPI_ALLOWED_IPS; do
+            VAL=$(echo "$SECRET" | jq -cr --arg k "$KEY" '.[$k]')
+            echo "::add-mask::$VAL"
+            echo "$KEY=$VAL" >> "$GITHUB_ENV"
+          done
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3
         with:

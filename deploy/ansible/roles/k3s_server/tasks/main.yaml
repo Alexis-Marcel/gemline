@@ -48,6 +48,8 @@
                         --node-ip={{ private_ip }} \
                         --advertise-address={{ private_ip }} \
                         --flannel-iface={{ private_iface }} \
+                        --kube-apiserver-arg=service-account-issuer={{ oidc_issuer_url }} \
+                        --kube-apiserver-arg=service-account-jwks-uri={{ oidc_issuer_url }}/openid/v1/jwks \
                         {% for san in tls_sans %}--tls-san={{ san }} {% endfor %}" \
       K3S_TOKEN="{{ k3s_token }}" \
       sh -
@@ -67,6 +69,8 @@
                         --node-ip={{ private_ip }} \
                         --advertise-address={{ private_ip }} \
                         --flannel-iface={{ private_iface }} \
+                        --kube-apiserver-arg=service-account-issuer={{ oidc_issuer_url }} \
+                        --kube-apiserver-arg=service-account-jwks-uri={{ oidc_issuer_url }}/openid/v1/jwks \
                         {% for san in tls_sans %}--tls-san={{ san }} {% endfor %}" \
       K3S_TOKEN="{{ k3s_token }}" \
       sh -

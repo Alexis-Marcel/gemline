@@ -75,3 +75,13 @@ output "next_steps" {
     (`make deploy` runs terraform apply + ansible in one shot.) See DEPLOY.md.
   EOT
 }
+
+output "oidc_issuer_url" {
+  description = "Public OIDC issuer URL. Used by ESO ClusterSecretStore (auth: jwt) to assume the AWS role."
+  value       = local.oidc_issuer
+}
+
+output "eso_role_arn" {
+  description = "IAM role ARN that ESO assumes via the cluster's ServiceAccount token to read Secrets Manager."
+  value       = aws_iam_role.eso.arn
+}

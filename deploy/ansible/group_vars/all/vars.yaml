@@ -4,6 +4,13 @@ k3s_channel: "stable"   # or pin: k3s_version: "v1.35.4+k3s1"
 # Indirection to vault.yaml keeps the real token out of git.
 k3s_token: "{{ vault_k3s_token }}"
 
+# Public OIDC issuer URL the k3s API server advertises in pod JWTs. The
+# matching JWKS is published to S3 by `make publish-jwks`; AWS STS uses
+# both to validate pod tokens before handing out role credentials (IRSA-
+# equivalent). Bucket name is gemline-cluster-oidc-<account-id>, region
+# from deploy/terraform/versions.tf.
+oidc_issuer_url: "https://gemline-cluster-oidc-386324384913.s3.eu-west-3.amazonaws.com"
+
 cert_manager_version: "v1.16.1"
 cert_manager_manifest_url: "https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.yaml"
 
@@ -13,7 +20,6 @@ argocd_install_manifest: "https://raw.githubusercontent.com/argoproj/argo-cd/{{ 
 # ArgoCD Applications pulled from git so they stay in sync with what's committed.
 argocd_apps_repo_raw: "https://raw.githubusercontent.com/Alexis-Marcel/gemline/main/deploy/argocd"
 argocd_apps:
-  - app-sealed-secrets.yaml
   - app-external-secrets.yaml
   - app-eso-config.yaml
   - app-monitoring.yaml

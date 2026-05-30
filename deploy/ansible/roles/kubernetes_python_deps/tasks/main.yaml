@@ -11,10 +11,14 @@
 
 # --break-system-packages: PEP 668 blocks global pip on Ubuntu 24.04;
 # fine here since these VMs are single-purpose.
+# --ignore-installed: kubernetes>=36 requires PyYAML>=6.0.3, but Ubuntu
+# 24.04 ships PyYAML 6.0.1 via dpkg with no RECORD file -> pip can't
+# uninstall it to upgrade. --ignore-installed makes pip install fresh
+# into /usr/local/lib (which shadows /usr/lib for Python imports)
+# without touching the dpkg copy that cloud-init / apt rely on.
 - name: Install kubernetes Python SDK
   ansible.builtin.pip:
     name:
       - kubernetes>=28.0.0
-      - PyYAML
     state: present
-    extra_args: --break-system-packages
+    extra_args: --break-system-packages --ignore-installed

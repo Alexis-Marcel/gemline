@@ -55,6 +55,22 @@
       "Effect": "Allow",
       "Action": "secretsmanager:ListSecrets",
       "Resource": "*"
+    },
+    {
+      "Sid": "ReadLokiChunksBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:GetBucketAcl",
+        "s3:GetBucketPolicy",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetBucketOwnershipControls",
+        "s3:GetBucketTagging",
+        "s3:GetBucketVersioning",
+        "s3:GetLifecycleConfiguration",
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::gemline-loki-chunks-386324384913"
     }
   ]
 }

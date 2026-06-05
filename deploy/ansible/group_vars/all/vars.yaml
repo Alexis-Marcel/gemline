@@ -23,4 +23,6 @@ argocd_apps:
   - app-external-secrets.yaml
   - app-eso-config.yaml
   - app-monitoring.yaml
+  - app-loki.yaml
+  - app-alloy.yaml
   - app-gemline.yaml

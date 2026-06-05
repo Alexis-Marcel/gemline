@@ -1,0 +1,147 @@
+# Loki, single-binary mode, log chunks on S3.
+# AuthN to AWS via IRSA (the SA below carries the gemline-loki-storage
+# role ARN; the same OIDC-via-S3 dance the cluster uses for ESO).
+# Datasource ConfigMap is shipped as extraObjects so Grafana's sidecar
+# auto-discovers it in the monitoring namespace.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loki
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: loki
+    targetRevision: 6.18.0
+    helm:
+      releaseName: loki
+      values: |
+        deploymentMode: SingleBinary
+
+        loki:
+          auth_enabled: false
+
+          commonConfig:
+            replication_factor: 1
+
+          schemaConfig:
+            configs:
+              - from: "2024-04-01"
+                store: tsdb
+                object_store: s3
+                schema: v13
+                index:
+                  prefix: loki_index_
+                  period: 24h
+
+          storage:
+            type: s3
+            bucketNames:
+              chunks: gemline-loki-chunks-386324384913
+              ruler: gemline-loki-chunks-386324384913
+              admin: gemline-loki-chunks-386324384913
+            s3:
+              region: eu-west-3
+              s3forcepathstyle: false
+
+          # Cardinality + retention guardrails. Loki forgives almost
+          # everything except a label index that grows without bound,
+          # so we cap the obvious knobs and let the compactor enforce TTL.
+          limits_config:
+            retention_period: 720h
+            max_global_streams_per_user: 5000
+            max_label_name_length: 1024
+            max_label_value_length: 2048
+            reject_old_samples: true
+            reject_old_samples_max_age: 168h
+
+          compactor:
+            retention_enabled: true
+            delete_request_store: s3
+
+        singleBinary:
+          replicas: 1
+          persistence:
+            enabled: true
+            size: 10Gi
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+
+        # Disable scalable-mode components (we're single-binary).
+        backend:
+          replicas: 0
+        read:
+          replicas: 0
+        write:
+          replicas: 0
+        chunksCache:
+          enabled: false
+        resultsCache:
+          enabled: false
+        gateway:
+          enabled: false
+
+        # IRSA: pod gets short-lived creds for gemline-loki-storage.
+        serviceAccount:
+          create: true
+          name: loki
+          annotations:
+            eks.amazonaws.com/role-arn: arn:aws:iam::386324384913:role/gemline-loki-storage
+
+        # Skip the chart's bundled self-monitoring / canary / smoke tests.
+        monitoring:
+          selfMonitoring:
+            enabled: false
+            grafanaAgent:
+              installOperator: false
+          lokiCanary:
+            enabled: false
+        test:
+          enabled: false
+
+        # Grafana sidecar auto-discovers ConfigMaps with this label and
+        # wires Loki as a datasource. No manual UI clicks.
+        extraObjects:
+          - apiVersion: v1
+            kind: ConfigMap
+            metadata:
+              name: loki-grafana-datasource
+              labels:
+                grafana_datasource: "1"
+            data:
+              loki-datasource.yaml: |
+                apiVersion: 1
+                datasources:
+                  - name: Loki
+                    type: loki
+                    access: proxy
+                    url: http://loki:3100
+                    isDefault: false
+                    jsonData:
+                      maxLines: 1000
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

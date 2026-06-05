@@ -1,0 +1,124 @@
+# Grafana Alloy as the log shipper. Runs as a DaemonSet, discovers pods
+# via the K8s API, tails container logs, parses slog JSON to surface
+# `level` as a label (low cardinality, high signal), and writes to Loki.
+#
+# Alloy is Grafana's successor to Promtail — Promtail is in maintenance
+# mode and Grafana recommends Alloy for new deployments. Same job, OTel-
+# native, one agent for logs + metrics + traces later.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: alloy
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: alloy
+    targetRevision: 0.9.2
+    helm:
+      releaseName: alloy
+      values: |
+        controller:
+          type: daemonset
+
+        alloy:
+          configMap:
+            create: true
+            content: |
+              // Pod discovery via the K8s API. No host-path mounts needed —
+              // loki.source.kubernetes streams logs through the API.
+              discovery.kubernetes "pods" {
+                role = "pod"
+              }
+
+              // Keep labels low-cardinality. Anything per-game or per-user
+              // stays in the log content and is queried via `| json` in LogQL.
+              discovery.relabel "logs" {
+                targets = discovery.kubernetes.pods.targets
+
+                rule {
+                  source_labels = ["__meta_kubernetes_namespace"]
+                  target_label  = "namespace"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_name"]
+                  target_label  = "pod"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_container_name"]
+                  target_label  = "container"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+                  target_label  = "app"
+                }
+                rule {
+                  source_labels = ["__meta_kubernetes_node_name"]
+                  target_label  = "node"
+                }
+              }
+
+              loki.source.kubernetes "pods" {
+                targets    = discovery.relabel.logs.output
+                forward_to = [loki.process.parse_json.receiver]
+              }
+
+              // Best-effort slog JSON parse. Non-JSON lines pass through
+              // untouched. `level` becomes a label (low cardinality);
+              // `msg` and the rest stay queryable via `| json`.
+              loki.process "parse_json" {
+                forward_to = [loki.write.local.receiver]
+
+                stage.json {
+                  expressions = {
+                    level = "level",
+                    msg   = "msg",
+                  }
+                }
+
+                stage.labels {
+                  values = {
+                    level = "level",
+                  }
+                }
+              }
+
+              loki.write "local" {
+                endpoint {
+                  url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+                }
+              }
+
+          resources:
+            requests:
+              cpu: 20m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+
+        # The chart creates a SA with RBAC for pods + pods/log out of the box.
+        serviceAccount:
+          create: true
+          name: alloy
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

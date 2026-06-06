@@ -15,6 +15,7 @@ import (
 	"github.com/alexis/gemline/internal/backplane"
 	"github.com/alexis/gemline/internal/game"
 	"github.com/golang-jwt/jwt/v5"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type Server struct {
@@ -173,7 +174,16 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/users/{userId}", s.getPublicProfile)
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
-	app := loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, s.log, mux))))
+	inner := loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, s.log, mux))))
+
+	// otelhttp wraps the entire app handler so every request starts a server
+	// span. Skip the health probes — kubelet hits them every 5–20 s and the
+	// spans would drown out useful traffic.
+	app := otelhttp.NewHandler(inner, "http.request",
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
+		}),
+	)
 
 	// /metrics bypasses the CORS/auth/log middleware via a top-level mux.
 	top := http.NewServeMux()

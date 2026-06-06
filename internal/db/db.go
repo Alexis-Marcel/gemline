@@ -8,17 +8,35 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/XSAM/otelsql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// driverName is the otelsql-wrapped pgx driver name. When the global tracer
+// provider is the SDK noop (no OTEL_EXPORTER_OTLP_ENDPOINT), the wrapper is
+// essentially free — calls go through but no spans are recorded.
+var driverName string
+
+func init() {
+	n, err := otelsql.Register("pgx",
+		otelsql.WithAttributes(semconv.DBSystemPostgreSQL),
+	)
+	if err != nil {
+		// Programmer mistake (duplicate registration); surface at startup, not later.
+		panic(fmt.Errorf("otelsql.Register: %w", err))
+	}
+	driverName = n
+}
+
 // Open opens a connection pool to dsn and applies any pending migrations. The
 // caller must Close the returned pool on shutdown.
 func Open(ctx context.Context, dsn string) (*sql.DB, error) {
-	pool, err := sql.Open("pgx", dsn)
+	pool, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sql.Open: %w", err)
 	}

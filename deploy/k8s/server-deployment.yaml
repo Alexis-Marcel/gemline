@@ -48,6 +48,20 @@ spec:
           env:
             - name: ADDR
               value: ":8080"
+            # OTLP traces go to Alloy (cross-namespace, hence the FQDN). The
+            # SDK appends /v1/traces. Empty endpoint = tracing disabled.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://alloy.monitoring.svc.cluster.local:4318"
+            - name: OTEL_SERVICE_NAME
+              value: "gemline-server"
+            # Tag traces with the pod name + namespace so Tempo can group
+            # spans per instance and Grafana's serviceMap works.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=gemline,k8s.pod.name=$(POD_NAME)"
           resources:
             requests:
               cpu: 50m

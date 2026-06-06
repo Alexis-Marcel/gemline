@@ -32,11 +32,12 @@ spec:
       values: |
         replicaCount: 1
 
-        # Let the chart generate a self-signed serving cert at install
-        # time (init container). Keeps the dependency surface minimal —
-        # no extra cert-manager Issuer just for this webhook.
-        certManager:
-          enabled: false
+        # Default behaviour: cert-manager (already installed in the
+        # cluster) auto-creates a SelfSigned Issuer + Certificate for the
+        # webhook's serving cert. Nothing extra to wire up.
+        pki:
+          certManager:
+            enabled: true
 
         resources:
           requests:

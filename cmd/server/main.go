@@ -14,8 +14,12 @@ import (
 	"github.com/alexis/gemline/internal/backplane"
 	"github.com/alexis/gemline/internal/db"
 	"github.com/alexis/gemline/internal/server"
+	"github.com/alexis/gemline/internal/tracing"
 	"github.com/joho/godotenv"
 )
+
+// version is overridable via -ldflags at build time; "dev" is the local default.
+var version = "dev"
 
 func main() {
 	// .env.local first: godotenv.Load doesn't overwrite already-set vars,
@@ -29,6 +33,21 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Tracing must come up before anything that emits spans (db.Open does, via
+	// the otelsql-wrapped driver). Setup is a no-op when OTEL_EXPORTER_OTLP_ENDPOINT
+	// is unset, so dev runs without a collector still work.
+	shutdownTracing, err := tracing.Setup(ctx, "gemline-server", version)
+	if err != nil {
+		log.Error("tracing setup failed", "err", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			log.Error("tracing shutdown", "err", err)
+		}
+	}()
 
 	var (
 		repo server.Repository

@@ -25,5 +25,6 @@ argocd_apps:
   - app-pod-identity-webhook.yaml
   - app-monitoring.yaml
   - app-loki.yaml
+  - app-tempo.yaml
   - app-alloy.yaml
   - app-gemline.yaml

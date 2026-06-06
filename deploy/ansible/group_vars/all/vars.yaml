@@ -22,6 +22,7 @@ argocd_apps_repo_raw: "https://raw.githubusercontent.com/Alexis-Marcel/gemline/m
 argocd_apps:
   - app-external-secrets.yaml
   - app-eso-config.yaml
+  - app-pod-identity-webhook.yaml
   - app-monitoring.yaml
   - app-loki.yaml
   - app-alloy.yaml

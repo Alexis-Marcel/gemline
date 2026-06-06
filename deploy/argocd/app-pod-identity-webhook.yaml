@@ -1,0 +1,64 @@
+# Self-hosted equivalent of what EKS ships by default. Mutates pods whose
+# ServiceAccount carries the eks.amazonaws.com/role-arn annotation to
+# inject AWS_ROLE_ARN, AWS_WEB_IDENTITY_TOKEN_FILE and a projected token
+# with audience sts.amazonaws.com.
+#
+# Without it, that annotation is just a label nobody reads — the AWS SDK
+# in workloads like Loki / Tempo finds no credential provider in the
+# chain and crashes at boot. External Secrets Operator does not need
+# this webhook: ESO has its own jwt auth path that reads the SA token
+# straight through the Kubernetes API.
+#
+# Sync order: this must be present before workloads that rely on IRSA
+# AWS-SDK auth (Loki, Tempo, …) — pods only get mutated at admission, so
+# any pod scheduled before the webhook is up will need to be deleted and
+# recreated.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pod-identity-webhook
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://jkroepke.github.io/helm-charts
+    chart: amazon-eks-pod-identity-webhook
+    targetRevision: 2.2.0
+    helm:
+      releaseName: pod-identity-webhook
+      values: |
+        replicaCount: 1
+
+        # Let the chart generate a self-signed serving cert at install
+        # time (init container). Keeps the dependency surface minimal —
+        # no extra cert-manager Issuer just for this webhook.
+        certManager:
+          enabled: false
+
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            memory: 128Mi
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

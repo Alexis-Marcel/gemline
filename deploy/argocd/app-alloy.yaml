@@ -29,6 +29,8 @@ spec:
           configMap:
             create: true
             content: |
+              // ---------- Logs pipeline (existing) -------------------
+
               // Pod discovery via the K8s API. No host-path mounts needed —
               // loki.source.kubernetes streams logs through the API.
               discovery.kubernetes "pods" {
@@ -92,6 +94,52 @@ spec:
                   url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
                 }
               }
+
+              // ---------- Traces pipeline (new) ----------------------
+
+              // OTLP receiver — apps push spans via gRPC :4317 or HTTP :4318.
+              // Both ports are exposed on the Service (see alloy.extraPorts below)
+              // so any pod can reach them at alloy.monitoring.svc.cluster.local:4317.
+              otelcol.receiver.otlp "default" {
+                grpc {
+                  endpoint = "0.0.0.0:4317"
+                }
+                http {
+                  endpoint = "0.0.0.0:4318"
+                }
+
+                output {
+                  traces = [otelcol.processor.batch.tempo.input]
+                }
+              }
+
+              // Batch spans before shipping so we don't slam Tempo per request.
+              otelcol.processor.batch "tempo" {
+                output {
+                  traces = [otelcol.exporter.otlp.tempo.input]
+                }
+              }
+
+              // Forward to Tempo's OTLP gRPC port. In-cluster traffic, no TLS.
+              otelcol.exporter.otlp "tempo" {
+                client {
+                  endpoint = "tempo.monitoring.svc.cluster.local:4317"
+                  tls {
+                    insecure = true
+                  }
+                }
+              }
+
+          # Expose the OTLP ports on the pod + Service.
+          extraPorts:
+            - name: otlp-grpc
+              port: 4317
+              targetPort: 4317
+              protocol: TCP
+            - name: otlp-http
+              port: 4318
+              targetPort: 4318
+              protocol: TCP
 
           resources:
             requests:

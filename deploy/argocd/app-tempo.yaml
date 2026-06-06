@@ -1,0 +1,121 @@
+# Tempo, single-binary mode, trace blocks on S3.
+# AuthN to AWS via IRSA — the same OIDC-via-S3 dance Loki uses, scoped
+# this time to the tempo ServiceAccount in the monitoring namespace.
+# Datasource ConfigMap is shipped as extraObjects so Grafana's sidecar
+# auto-discovers it (no manual UI clicks), mirroring the Loki app.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tempo
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: tempo
+    targetRevision: 1.24.4
+    helm:
+      releaseName: tempo
+      values: |
+        # Single-binary StatefulSet (this chart deploys monolithic Tempo;
+        # scalable mode lives in the separate tempo-distributed chart).
+        replicas: 1
+
+        # The OTLP receivers Alloy forwards to. Tempo speaks OTLP natively,
+        # no translation needed.
+        tempo:
+          reportingEnabled: false
+
+          receivers:
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+
+          storage:
+            trace:
+              backend: s3
+              s3:
+                bucket: gemline-tempo-traces-386324384913
+                endpoint: s3.eu-west-3.amazonaws.com
+                region: eu-west-3
+              # Block retention — the compactor enforces this. The
+              # bucket lifecycle rule (60d) is a safety net at 2×.
+              block:
+                retention: 720h
+
+          metricsGenerator:
+            enabled: false
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+
+        persistence:
+          enabled: true
+          size: 10Gi
+
+        # IRSA: pod gets short-lived creds for gemline-tempo-storage.
+        serviceAccount:
+          create: true
+          name: tempo
+          annotations:
+            eks.amazonaws.com/role-arn: arn:aws:iam::386324384913:role/gemline-tempo-storage
+
+        # Grafana sidecar auto-discovers ConfigMaps with this label and
+        # wires Tempo as a datasource. Includes the trace-to-logs link
+        # so clicking a span in Tempo pivots to the matching Loki logs.
+        extraObjects:
+          - apiVersion: v1
+            kind: ConfigMap
+            metadata:
+              name: tempo-grafana-datasource
+              labels:
+                grafana_datasource: "1"
+            data:
+              tempo-datasource.yaml: |
+                apiVersion: 1
+                datasources:
+                  - name: Tempo
+                    type: tempo
+                    access: proxy
+                    url: http://tempo:3100
+                    isDefault: false
+                    jsonData:
+                      tracesToLogsV2:
+                        datasourceUid: loki
+                        spanStartTimeShift: "-1m"
+                        spanEndTimeShift: "1m"
+                        tags:
+                          - key: service.name
+                            value: service
+                      serviceMap:
+                        datasourceUid: prometheus
+                      nodeGraph:
+                        enabled: true
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

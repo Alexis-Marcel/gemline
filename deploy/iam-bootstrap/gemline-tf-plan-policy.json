@@ -64,6 +64,15 @@
         "s3:ListBucket"
       ],
       "Resource": "arn:aws:s3:::gemline-loki-chunks-386324384913"
+    },
+    {
+      "Sid": "ReadTempoTracesBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:Get*",
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::gemline-tempo-traces-386324384913"
     }
   ]
 }

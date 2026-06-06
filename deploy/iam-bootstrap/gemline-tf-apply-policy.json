@@ -87,6 +87,26 @@
         "s3:PutLifecycleConfiguration"
       ],
       "Resource": "arn:aws:s3:::gemline-loki-chunks-386324384913"
+    },
+    {
+      "Sid": "TempoTracesBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:ListBucket",
+        "s3:Get*",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:DeleteBucketPublicAccessBlock",
+        "s3:PutBucketOwnershipControls",
+        "s3:DeleteBucketOwnershipControls",
+        "s3:PutBucketTagging",
+        "s3:PutBucketVersioning",
+        "s3:PutLifecycleConfiguration"
+      ],
+      "Resource": "arn:aws:s3:::gemline-tempo-traces-386324384913"
     }
   ]
 }

@@ -44,10 +44,13 @@ spec:
                 bucket: gemline-tempo-traces-386324384913
                 endpoint: s3.eu-west-3.amazonaws.com
                 region: eu-west-3
-              # Block retention — the compactor enforces this. The
-              # bucket lifecycle rule (60d) is a safety net at 2×.
-              block:
-                retention: 720h
+
+          # Block retention is enforced by the compactor, not by the
+          # storage block — that's a common Tempo config trap. The S3
+          # lifecycle rule (60d) stays as the safety net at 2×.
+          compactor:
+            compaction:
+              block_retention: 720h
 
           metricsGenerator:
             enabled: false

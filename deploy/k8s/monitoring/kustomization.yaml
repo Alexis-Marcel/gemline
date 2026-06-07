@@ -1,7 +1,9 @@
-# Each JSON file under dashboards/ becomes its own ConfigMap, picked up by
-# the kube-prometheus-stack Grafana sidecar via the grafana_dashboard label.
-# Adding a new dashboard = drop a new file in dashboards/ and add a
-# configMapGenerator entry below.
+# Two kinds of monitoring config shipped from one kustomize layer:
+#  - dashboards/*.json     → ConfigMaps labelled grafana_dashboard=1
+#                            (Grafana sidecar auto-discovers and loads them)
+#  - rules/*.yaml          → PrometheusRule resources synced as-is;
+#                            kube-prometheus-stack's Prometheus picks them up
+#                            because ruleSelectorNilUsesHelmValues=false.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -19,3 +21,6 @@ configMapGenerator:
   - name: dashboard-gemline-overview
     files:
       - dashboards/gemline-overview.json
+
+resources:
+  - rules/gemline.yaml

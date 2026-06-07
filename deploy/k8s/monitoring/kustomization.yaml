@@ -1,0 +1,21 @@
+# Each JSON file under dashboards/ becomes its own ConfigMap, picked up by
+# the kube-prometheus-stack Grafana sidecar via the grafana_dashboard label.
+# Adding a new dashboard = drop a new file in dashboards/ and add a
+# configMapGenerator entry below.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: monitoring
+
+# disableNameSuffixHash keeps the ConfigMap name stable across edits — without
+# it Kustomize appends a content hash and ArgoCD would prune-and-recreate on
+# every dashboard change, briefly hiding the dashboard from Grafana.
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    grafana_dashboard: "1"
+
+configMapGenerator:
+  - name: dashboard-gemline-overview
+    files:
+      - dashboards/gemline-overview.json

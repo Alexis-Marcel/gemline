@@ -4,7 +4,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/alexis/gemline/internal/game"
@@ -72,19 +71,46 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 		rec.Unlock()
 		return rec, nil, ErrBadToken
 	}
-	if rec.RematchOffer == nil {
-		rec.RematchOffer = newRematchOffer(rec)
+	// Snapshot the bot seat indices so the repo can pre-accept them when it
+	// initialises a fresh offer. Done under the lock so we read a consistent
+	// seat layout.
+	var botSeats []int
+	for i, st := range rec.Seats {
+		if st.Occupied && st.IsBot {
+			botSeats = append(botSeats, i)
+		}
 	}
-	rec.RematchOffer.AcceptedSeats[seat.Index] = true
-	complete := rematchOfferComplete(rec)
-	// Persist the offer (under the lock): without it, a second acceptor on
-	// another pod would reload a fresh offer with only their seat.
-	offerBlob, _ := json.Marshal(rec.RematchOffer)
 	rec.Unlock()
 
-	if err := s.repo.SaveRematchOffer(ctx, gameID, offerBlob); err != nil {
+	// Atomic merge at the DB layer. With a Postgres repo this runs as a
+	// SELECT ... FOR UPDATE + read-modify-write + UPDATE in one transaction,
+	// so a second pod whose cache hadn't yet been invalidated by the first
+	// pod's NOTIFY can't blindly overwrite the first acceptance with a
+	// fresh single-seat offer — the cause of the "accept does nothing"
+	// rematch bug under load on a multi-pod deploy.
+	merged, err := s.repo.MergeRematchAcceptance(ctx, gameID, seat.Index, botSeats)
+	if err != nil {
 		return rec, nil, err
 	}
+	// The noop repo (no DATABASE_URL — single-process mode) returns nil:
+	// there's no cross-pod race to guard against, so we fall back to the
+	// in-memory merge.
+	if merged == nil {
+		rec.Lock()
+		if rec.RematchOffer == nil {
+			rec.RematchOffer = newRematchOffer(rec)
+		}
+		rec.RematchOffer.AcceptedSeats[seat.Index] = true
+		merged = rec.RematchOffer
+		rec.Unlock()
+	}
+
+	// Sync the in-memory cache from the authoritative merged offer and
+	// decide whether we just completed it.
+	rec.Lock()
+	rec.RematchOffer = merged
+	complete := rematchOfferComplete(rec)
+	rec.Unlock()
 
 	if !complete {
 		return rec, nil, nil

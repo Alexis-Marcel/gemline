@@ -132,10 +132,21 @@ type Repository interface {
 	// without locking, for queue_update notifications after each tick.
 	MatchmakeQueueSnapshot(ctx context.Context, players int, mode string) ([]QueuedUser, error)
 
-	// SaveRematchOffer writes (JSON body) or clears (nil) rematch_offer. Must
-	// be called on every rec.RematchOffer mutation so other pods see it on
-	// reload after invalidation.
+	// SaveRematchOffer writes (JSON body) or clears (nil) rematch_offer. Used
+	// for the clear-on-decline / clear-after-rematch paths; the accept path
+	// must go through MergeRematchAcceptance to be race-safe across pods.
 	SaveRematchOffer(ctx context.Context, gameID string, offer []byte) error
+
+	// MergeRematchAcceptance atomically records seatIdx as accepting the
+	// rematch — initialising the offer with botSeats pre-accepted if it
+	// doesn't exist yet. The whole read-modify-write runs under a SELECT
+	// FOR UPDATE on the games row, so a second pod whose cache hadn't yet
+	// been invalidated by the first pod's NOTIFY cannot blindly overwrite
+	// the first pod's acceptance with an offer that's missing it. Returns
+	// the resulting offer for the caller to sync into its in-memory copy;
+	// returns nil on the no-op repo (single-process mode has no race to
+	// guard against).
+	MergeRematchAcceptance(ctx context.Context, gameID string, seatIdx int, botSeats []int) (*RematchOffer, error)
 
 	// SaveDrawOffer writes draw_offer_by (offering seat index, or -1 to clear).
 	// Must follow every rec.DrawOfferBy mutation: the opponent's /draw/accept
@@ -395,3 +406,6 @@ func (noopRepo) MatchmakeQueueSnapshot(context.Context, int, string) ([]QueuedUs
 }
 func (noopRepo) SaveRematchOffer(context.Context, string, []byte) error { return nil }
 func (noopRepo) SaveDrawOffer(context.Context, string, int) error       { return nil }
+func (noopRepo) MergeRematchAcceptance(context.Context, string, int, []int) (*RematchOffer, error) {
+	return nil, nil
+}

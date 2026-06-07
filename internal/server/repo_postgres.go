@@ -923,6 +923,65 @@ func (r *PostgresRepo) SaveRematchOffer(ctx context.Context, gameID string, offe
 	return nil
 }
 
+// MergeRematchAcceptance atomically merges seatIdx's acceptance into the
+// persisted rematch_offer. The read and write run inside a transaction with
+// SELECT ... FOR UPDATE on the games row, so two pods racing on the same
+// game serialise at the DB layer: the second one sees the first's offer
+// (including the first's seat) and adds itself, instead of overwriting it
+// with a fresh single-seat offer — which was the cause of the
+// "accept does nothing" rematch bug on multi-pod deploys.
+func (r *PostgresRepo) MergeRematchAcceptance(ctx context.Context, gameID string, seatIdx int, botSeats []int) (*RematchOffer, error) {
+	tx, err := r.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var current []byte
+	err = tx.QueryRowContext(ctx,
+		`SELECT rematch_offer FROM games WHERE id = $1 FOR UPDATE`, gameID,
+	).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrGameNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select rematch offer: %w", err)
+	}
+
+	var offer RematchOffer
+	if len(current) > 0 {
+		if err := json.Unmarshal(current, &offer); err != nil {
+			return nil, fmt.Errorf("unmarshal rematch offer: %w", err)
+		}
+		if offer.AcceptedSeats == nil {
+			offer.AcceptedSeats = make(map[int]bool)
+		}
+	} else {
+		offer = RematchOffer{
+			AcceptedSeats: make(map[int]bool, len(botSeats)+1),
+			CreatedAt:     time.Now(),
+		}
+		for _, b := range botSeats {
+			offer.AcceptedSeats[b] = true
+		}
+	}
+	offer.AcceptedSeats[seatIdx] = true
+
+	blob, err := json.Marshal(&offer)
+	if err != nil {
+		return nil, fmt.Errorf("marshal rematch offer: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE games SET rematch_offer = $2 WHERE id = $1`, gameID, blob,
+	); err != nil {
+		return nil, fmt.Errorf("update rematch offer: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit rematch offer: %w", err)
+	}
+	return &offer, nil
+}
+
 // SaveDrawOffer writes the offering seat index (or -1 to clear). Without it, an
 // opponent's accept on a non-originating pod would reload a DB row unaware of
 // the offer.

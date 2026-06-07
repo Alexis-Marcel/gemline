@@ -88,6 +88,8 @@ spec:
                 apiVersion: 1
                 datasources:
                   - name: Tempo
+                    # Explicit uid so dashboards can reference it deterministically.
+                    uid: tempo
                     type: tempo
                     access: proxy
                     url: http://tempo:3100

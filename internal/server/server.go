@@ -16,6 +16,8 @@ import (
 	"github.com/alexis/gemline/internal/game"
 	"github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Server struct {
@@ -178,8 +180,11 @@ func (s *Server) Routes() http.Handler {
 
 	// otelhttp wraps the entire app handler so every request starts a server
 	// span. Skip the health probes — kubelet hits them every 5–20 s and the
-	// spans would drown out useful traffic.
-	app := otelhttp.NewHandler(inner, "http.request",
+	// spans would drown out useful traffic. patternSpanNamer sits between
+	// otelhttp and the mux so it sees r.Pattern after dispatch and can
+	// rename the span from the generic "http.request" to "{METHOD} {pattern}"
+	// — collapses every game id under the same span name in Tempo searches.
+	app := otelhttp.NewHandler(patternSpanNamer(inner), "http.request",
 		otelhttp.WithFilter(func(r *http.Request) bool {
 			return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
 		}),
@@ -190,6 +195,27 @@ func (s *Server) Routes() http.Handler {
 	top.Handle("GET /metrics", metricsHandler())
 	top.Handle("/", app)
 	return top
+}
+
+// patternSpanNamer renames the active OTel span from "http.request" to
+// "{METHOD} {pattern}" once the mux has matched the route, and stamps the
+// matched pattern as an http.route attribute. It runs BEFORE otelhttp ends
+// the span (so the rename takes effect) but AFTER the mux dispatch (so
+// r.Pattern is populated). Without this, Tempo sees every concrete URL —
+// including all distinct game ids — as a separate span name.
+func patternSpanNamer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+		if r.Pattern == "" {
+			return
+		}
+		span := trace.SpanFromContext(r.Context())
+		if !span.IsRecording() {
+			return
+		}
+		span.SetName(r.Method + " " + r.Pattern)
+		span.SetAttributes(attribute.String("http.route", r.Pattern))
+	})
 }
 
 // StartMatcher kicks off the background matchmaker ticker on this pod.

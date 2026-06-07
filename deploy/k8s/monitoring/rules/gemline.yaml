@@ -1,0 +1,73 @@
+# Application-layer alerts for gemline-server. Infrastructure/Kubernetes
+# alerts (pod crashloop, deployment unavailable, node not ready, etc.) are
+# already shipped by kube-prometheus-stack — no need to redefine them here.
+#
+# Prometheus picks this up because our values set
+#   ruleSelectorNilUsesHelmValues: false
+# in deploy/argocd/app-monitoring.yaml — any PrometheusRule in any
+# namespace is ingested. Alertmanager routes them with its default config
+# (catchall to the bundled UI); a real Slack/email receiver is a separate
+# AlertmanagerConfig change.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gemline-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: gemline
+spec:
+  groups:
+    - name: gemline-http
+      interval: 30s
+      rules:
+        - alert: GemlineHigh5xxRate
+          expr: |
+            (sum(rate(gemline_http_requests_total{status=~"5.."}[5m])) or vector(0))
+              / clamp_min(sum(rate(gemline_http_requests_total[5m])), 1e-9)
+              > 0.01
+          for: 5m
+          labels:
+            severity: warning
+            service: gemline-server
+          annotations:
+            summary: "gemline-server: 5xx rate above 1%"
+            description: |
+              The gemline-server is returning 5xx on more than 1% of requests
+              over the last 5 minutes. Current rate: {{ $value | humanizePercentage }}.
+            runbook_url: "https://github.com/Alexis-Marcel/gemline/blob/main/DEPLOY.md#troubleshooting"
+
+        - alert: GemlineHighRequestLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le) (rate(gemline_http_request_duration_seconds_bucket[5m]))
+            ) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+            service: gemline-server
+          annotations:
+            summary: "gemline-server: HTTP p99 latency above 500 ms"
+            description: |
+              p99 HTTP latency has been above 500 ms for the past 10 minutes
+              (current: {{ $value | humanizeDuration }}). Likely suspects: a
+              slow Postgres query, a saturated connection pool, or backplane
+              fan-out lag.
+
+    - name: gemline-persistence
+      interval: 30s
+      rules:
+        - alert: GemlinePersistErrors
+          expr: |
+            sum by (op) (rate(gemline_persist_errors_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: gemline-server
+          annotations:
+            summary: "gemline-server: persistence errors on {{ $labels.op }}"
+            description: |
+              The Store is swallowing persistence errors on operation
+              "{{ $labels.op }}" (in-memory state still wins, so users
+              see nothing — but the next pod restart drops the state).
+              Rate: {{ $value }} errors/second over the last 5 minutes.
+              Investigate Postgres availability and recent migrations.

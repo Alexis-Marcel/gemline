@@ -73,39 +73,9 @@ spec:
           annotations:
             eks.amazonaws.com/role-arn: arn:aws:iam::386324384913:role/gemline-tempo-storage
 
-        # Grafana sidecar auto-discovers ConfigMaps with this label and
-        # wires Tempo as a datasource. Includes the trace-to-logs link
-        # so clicking a span in Tempo pivots to the matching Loki logs.
-        extraObjects:
-          - apiVersion: v1
-            kind: ConfigMap
-            metadata:
-              name: tempo-grafana-datasource
-              labels:
-                grafana_datasource: "1"
-            data:
-              tempo-datasource.yaml: |
-                apiVersion: 1
-                datasources:
-                  - name: Tempo
-                    # Explicit uid so dashboards can reference it deterministically.
-                    uid: tempo
-                    type: tempo
-                    access: proxy
-                    url: http://tempo:3100
-                    isDefault: false
-                    jsonData:
-                      tracesToLogsV2:
-                        datasourceUid: loki
-                        spanStartTimeShift: "-1m"
-                        spanEndTimeShift: "1m"
-                        tags:
-                          - key: service.name
-                            value: service
-                      serviceMap:
-                        datasourceUid: prometheus
-                      nodeGraph:
-                        enabled: true
+        # NOTE: the Grafana Tempo datasource ConfigMap is shipped from the
+        # monitoring kustomize layer (deploy/k8s/monitoring/tempo-datasource.yaml)
+        # — this chart's extraObjects field didn't render it in 1.24.4.
 
   destination:
     server: https://kubernetes.default.svc

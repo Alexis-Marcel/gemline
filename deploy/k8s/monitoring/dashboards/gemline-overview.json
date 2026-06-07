@@ -70,7 +70,7 @@
       "id": 3,
       "targets": [
         {
-          "expr": "sum(rate(gemline_http_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(gemline_http_requests_total[5m])), 1e-9)",
+          "expr": "(sum(rate(gemline_http_requests_total{status=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(gemline_http_requests_total[5m])), 1e-9)",
           "refId": "A"
         }
       ],
@@ -175,7 +175,7 @@
       "id": 7,
       "targets": [
         {
-          "expr": "sum by (op) (rate(gemline_persist_errors_total[5m]))",
+          "expr": "sum by (op) (rate(gemline_persist_errors_total[5m])) or vector(0)",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
@@ -196,6 +196,28 @@
         "colorMode": "background",
         "graphMode": "none",
         "reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Recent errors (Loki)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "id": 8,
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{namespace=\"gemline\", level=\"error\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": false,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending",
+        "enableLogDetails": true
       }
     }
   ],

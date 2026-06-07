@@ -121,6 +121,9 @@ spec:
                 apiVersion: 1
                 datasources:
                   - name: Loki
+                    # Explicit uid so other datasources (Tempo's tracesToLogs)
+                    # and dashboards can reference it deterministically.
+                    uid: loki
                     type: loki
                     access: proxy
                     url: http://loki:3100

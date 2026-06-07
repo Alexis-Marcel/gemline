@@ -27,4 +27,5 @@ argocd_apps:
   - app-loki.yaml
   - app-tempo.yaml
   - app-alloy.yaml
+  - app-monitoring-dashboards.yaml
   - app-gemline.yaml

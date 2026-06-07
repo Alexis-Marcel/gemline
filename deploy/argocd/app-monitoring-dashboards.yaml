@@ -1,0 +1,33 @@
+# Grafana dashboards as code. The Kustomize layer turns every JSON file
+# under deploy/k8s/monitoring/dashboards/ into a ConfigMap labelled
+# grafana_dashboard=1 — the kube-prometheus-stack Grafana sidecar
+# auto-discovers them at runtime, no UI clicks.
+#
+# Adding a dashboard = drop a JSON file + add a configMapGenerator entry
+# in kustomization.yaml. ArgoCD syncs the change within ~3 min, sidecar
+# pushes it into Grafana within seconds.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-dashboards
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/Alexis-Marcel/gemline.git
+    targetRevision: main
+    path: deploy/k8s/monitoring
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

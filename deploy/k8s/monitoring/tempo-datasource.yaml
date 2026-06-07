@@ -1,0 +1,36 @@
+# Tempo datasource for Grafana. The Tempo chart's extraObjects field
+# didn't render this in 1.24.4, so we ship it as a plain ConfigMap from
+# the monitoring kustomize layer instead — picked up the same way the
+# overview dashboard is, via the grafana_datasource label that the
+# kube-prometheus-stack Grafana sidecar watches.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-grafana-datasource
+  namespace: monitoring
+  labels:
+    grafana_datasource: "1"
+data:
+  tempo-datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Tempo
+        uid: tempo
+        type: tempo
+        access: proxy
+        url: http://tempo:3100
+        isDefault: false
+        jsonData:
+          # Pivot from a span to the matching Loki logs on the same
+          # time window — the killer cross-pillar workflow.
+          tracesToLogsV2:
+            datasourceUid: loki
+            spanStartTimeShift: "-1m"
+            spanEndTimeShift: "1m"
+            tags:
+              - key: service.name
+                value: service
+          serviceMap:
+            datasourceUid: prometheus
+          nodeGraph:
+            enabled: true

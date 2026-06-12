@@ -154,6 +154,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite", s.inviteSeat)
 	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/invite", s.cancelSeatInvite)
 	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite/decline", s.declineInvite)
+	mux.HandleFunc("POST /api/games/{id}/seat/claim", s.claimSeat)
 	mux.HandleFunc("POST /api/games/{id}/leave", s.leaveSeat)
 	mux.HandleFunc("POST /api/games/{id}/start", s.startGame)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
@@ -947,6 +948,42 @@ func (s *Server) joinGame(w http.ResponseWriter, r *http.Request) {
 	resp := joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token}
 	s.events.Publish(gameID, eventState(dto))
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// claimSeat reissues the authed caller's seat token for a game they were
+// pre-seated into (rematch). The lobby rematch_ready push normally delivers
+// these creds instantly; this is the reliable pull fallback so a missed push
+// can't strand a player as a spectator in their own seat.
+func (s *Server) claimSeat(w http.ResponseWriter, r *http.Request) {
+	u := requireUser(w, r)
+	if u == nil {
+		return
+	}
+	gameID := r.PathValue("id")
+	seat, token, err := s.store.ClaimSeat(r.Context(), gameID, u.ID)
+	if err != nil {
+		writeError(w, statusForClaimError(err), err.Error())
+		return
+	}
+	rec, _, _ := s.store.Get(r.Context(), gameID)
+	rec.Lock()
+	dto := toGameDTO(rec)
+	rec.Unlock()
+	// Broadcast so other pods invalidate their cache and pick up the rotated
+	// token hash (mirrors joinGame); the DTO payload itself is unchanged.
+	s.events.Publish(gameID, eventState(dto))
+	writeJSON(w, http.StatusOK, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
+}
+
+func statusForClaimError(err error) int {
+	switch {
+	case errors.Is(err, ErrGameNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrSeatNotForUser):
+		return http.StatusForbidden
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (s *Server) postMove(w http.ResponseWriter, r *http.Request) {

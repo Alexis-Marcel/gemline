@@ -252,11 +252,6 @@ export function GamePage() {
     }
   }
 
-  // Auto-join a still-waiting game without creds: authed users join
-  // directly, anonymous users get a name modal first. Spectating is
-  // reserved for in-progress/finished games. autoJoinAttempted is a ref
-  // so the effect re-fires across state pushes without re-joining; a
-  // failed attempt falls back to spectator silently.
   const ownedSeatIndex =
     user && game
       ? (game.seats.find((s) => s.occupied && s.userId === user.id)?.index ??
@@ -641,6 +636,17 @@ export function GamePage() {
     drawOfferBy >= 0 &&
     drawOfferBy !== creds.seatIndex;
 
+  // presence: false = explicit offline event; undefined = unknown (assume online).
+  const opponentDisconnected =
+    game.status === "playing" &&
+    game.seats.some(
+      (s) =>
+        s.occupied &&
+        !s.isBot &&
+        s.index !== (creds?.seatIndex ?? -1) &&
+        presence[s.index] === false,
+    );
+
   return (
     // Single-viewport layout (h-dvh + overflow-hidden): the board's
     // pinch-pan wrapper competes with page scroll on phones. pb-24
@@ -670,6 +676,13 @@ export function GamePage() {
           <UserNav />
         </div>
       </header>
+
+      {opponentDisconnected && (
+        <div className="mt-2 flex items-center justify-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-center text-sm text-amber-200">
+          <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-400" />
+          Adversaire déconnecté — partie en pause, en attente de reconnexion…
+        </div>
+      )}
 
       {/* Mobile: flex-col (strip on top, board flex-1). Desktop (lg+):
           3-col grid (scoreboard | board | actions). Per-layout elements

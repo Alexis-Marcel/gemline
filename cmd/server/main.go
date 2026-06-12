@@ -78,7 +78,11 @@ func main() {
 
 	// server.New registers the backplane handlers; Start the listener only
 	// afterwards so the first LISTEN session subscribes to the right channels.
-	apiServer := server.New(log, store, bp, cfg)
+	apiServer, err := server.New(log, store, bp, cfg)
+	if err != nil {
+		log.Error("server init failed", "err", err)
+		os.Exit(1)
+	}
 	if bp != nil {
 		bp.Start(ctx)
 		defer bp.Close()

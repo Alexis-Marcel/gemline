@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alexis/gemline/internal/backplane"
 	"github.com/alexis/gemline/internal/game"
@@ -18,6 +20,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 )
 
 type Server struct {
@@ -28,6 +31,7 @@ type Server struct {
 	backplane *backplane.Backplane
 	log       *slog.Logger
 	verifier  jwt.Keyfunc
+	limiter   *rateLimiter
 	// nil/empty = dev-permissive (CORS `*`, WS skips origin).
 	allowedOrigins []string
 }
@@ -42,7 +46,7 @@ type Config struct {
 
 // New returns a Server. bp is the Postgres backplane for cross-pod event
 // fan-out; nil (tests, no DATABASE_URL) falls back to direct local delivery.
-func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *Server {
+func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) (*Server, error) {
 	hub := NewHub(log, "game")
 	lobby := NewHub(log, "lobby")
 	podID := newPodID()
@@ -54,6 +58,7 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *S
 		events:         NewEventPublisher(store.Repo(), hub, bp, log, podID, store.Invalidate),
 		backplane:      bp,
 		log:            log,
+		limiter:        newRateLimiter(),
 		allowedOrigins: cfg.AllowedOrigins,
 	}
 	// Register listener handlers so NOTIFYs from any pod (including ours) fan
@@ -70,9 +75,12 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *S
 
 	if cfg.SupabaseURL == "" {
 		log.Warn("auth disabled — set SUPABASE_URL to enable")
-	} else if kf, err := jwksKeyfunc(cfg.SupabaseURL); err != nil {
-		log.Error("could not initialise JWKS verifier", "err", err)
 	} else {
+		// Don't start auth-disabled when auth was configured — crashloop instead.
+		kf, err := jwksKeyfunc(cfg.SupabaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("initialise JWKS verifier: %w", err)
+		}
 		srv.verifier = kf
 		log.Info("auth enabled", "scheme", "jwks", "url", cfg.SupabaseURL)
 	}
@@ -130,7 +138,7 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) *S
 		}
 		srv.events.Publish(gameID, eventRated(gr))
 	})
-	return srv
+	return srv, nil
 }
 
 func (s *Server) Routes() http.Handler {
@@ -138,7 +146,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 
-	mux.HandleFunc("POST /api/games", s.createGame)
+	mux.HandleFunc("POST /api/games", s.limited("create", rate.Every(2*time.Second), 5, s.createGame))
 	mux.HandleFunc("POST /api/games/matchmake", s.matchmakeGame)
 	mux.HandleFunc("GET /api/games/{id}", s.getGame)
 	mux.HandleFunc("POST /api/games/{id}/join", s.joinGame)
@@ -161,11 +169,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/games/{id}/events", s.getGameEvents)
 	mux.HandleFunc("GET /api/games/{id}/ratings", s.getGameRatings)
 	mux.HandleFunc("GET /api/games/{id}/messages", s.getChat)
-	mux.HandleFunc("POST /api/games/{id}/messages", s.postChat)
+	mux.HandleFunc("POST /api/games/{id}/messages", s.limited("chat", rate.Every(time.Second), 5, s.postChat))
 	mux.HandleFunc("GET /ws/games/{id}", s.wsGame)
 	mux.HandleFunc("GET /ws/lobby", s.wsLobby)
 
-	mux.HandleFunc("POST /api/matchmake/enqueue", s.enqueueMatchmake)
+	mux.HandleFunc("POST /api/matchmake/enqueue", s.limited("enqueue", rate.Every(2*time.Second), 3, s.enqueueMatchmake))
 	mux.HandleFunc("DELETE /api/matchmake/enqueue", s.cancelMatchmake)
 	mux.HandleFunc("GET /api/matchmake/current", s.currentMatchmade)
 
@@ -174,11 +182,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/users/me/games", s.getMyGames)
 	mux.HandleFunc("GET /api/users/me/stats", s.getMyStats)
 	// Literal /search must precede the {userId} pattern.
-	mux.HandleFunc("GET /api/users/search", s.searchProfiles)
+	mux.HandleFunc("GET /api/users/search", s.limited("search", rate.Every(500*time.Millisecond), 10, s.searchProfiles))
 	mux.HandleFunc("GET /api/users/{userId}", s.getPublicProfile)
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
-	inner := loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, jwtMiddleware(s.verifier, s.log, mux))))
+	inner := loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, maxBytesMiddleware(jwtMiddleware(s.verifier, s.log, mux)))))
 
 	// otelhttp wraps the entire app handler so every request starts a server
 	// span. Skip the health probes — kubelet hits them every 5–20 s and the

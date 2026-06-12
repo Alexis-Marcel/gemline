@@ -78,6 +78,12 @@ func parseSupabaseJWT(token string, verifier jwt.Keyfunc) (*supabaseClaims, erro
 	return claims, nil
 }
 
+// testAuthHook is wired only by test builds (auth_testhook_test.go) so server
+// tests can authenticate without a real JWT. It is nil in the production binary
+// — the *_test.go that sets it is never compiled in — so no header can bypass
+// auth in production, whatever the verifier's state.
+var testAuthHook func(*http.Request) *AuthUser
+
 // jwtMiddleware attaches an AuthUser when a valid bearer is present but never
 // rejects: bad/missing tokens fall through as anonymous so public endpoints
 // keep working. Endpoints that need a user call requireUser.
@@ -85,16 +91,9 @@ func jwtMiddleware(verifier jwt.Keyfunc, log *slog.Logger, next http.Handler) ht
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := authorizationBearer(r)
 		if token == "" || verifier == nil {
-			// Test back door: with auth disabled, honour X-Test-User-ID so
-			// server tests can hit auth-requiring endpoints. verifier is
-			// non-nil in production, so this never runs there.
-			if verifier == nil {
-				if id := r.Header.Get("X-Test-User-ID"); id != "" {
-					ctx := context.WithValue(r.Context(), userCtxKey{}, &AuthUser{
-						ID:    id,
-						Email: id + "@test.local",
-					})
-					next.ServeHTTP(w, r.WithContext(ctx))
+			if testAuthHook != nil {
+				if u := testAuthHook(r); u != nil {
+					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userCtxKey{}, u)))
 					return
 				}
 			}

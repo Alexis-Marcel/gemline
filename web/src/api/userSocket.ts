@@ -12,11 +12,10 @@ export type LobbyEventType =
   | "invite_cancelled"
   | "queue_update";
 
+// A navigation hint only — the client redirects to gameId and resolves its seat
+// token there. A dropped push is recovered by polling /matchmake/current.
 export interface MatchFoundPayload {
   gameId: string;
-  token: string;
-  seatIndex: number;
-  name: string;
 }
 
 export interface InvitePayload {

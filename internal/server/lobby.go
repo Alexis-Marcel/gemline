@@ -17,13 +17,10 @@ type LobbyEnqueueRequest struct {
 }
 
 // LobbyMatchPayload is emitted over the lobby WS when the matcher pairs the
-// user. The client uses gameId to redirect and token to authenticate the seat
-// without a follow-up join call.
+// user — a navigation hint. The client redirects to gameId and resolves its
+// seat token there; a missed push is recovered by polling /matchmake/current.
 type LobbyMatchPayload struct {
-	GameID    string `json:"gameId"`
-	Token     string `json:"token"`
-	SeatIndex int    `json:"seatIndex"`
-	Name      string `json:"name"`
+	GameID string `json:"gameId"`
 }
 
 // LobbyInvitePayload is sent when someone reserves a seat for the user
@@ -64,16 +61,11 @@ type lobbyEnvelope struct {
 }
 
 // fanMatched is the matcher's onMatched callback: one NOTIFY per matched seat.
-// Failures are logged but not retried — the user is in the game regardless, and
-// a page nav will hit the new game.
+// A missed push isn't retried — the search page polls /matchmake/current as the
+// durable fallback.
 func (s *Server) fanMatched(seats []MatchedSeat) {
 	for _, seat := range seats {
-		s.publishLobby(seat.UserID, LobbyEventMatchFound, LobbyMatchPayload{
-			GameID:    seat.GameID,
-			Token:     seat.Token,
-			SeatIndex: seat.SeatIndex,
-			Name:      seat.Name,
-		})
+		s.publishLobby(seat.UserID, LobbyEventMatchFound, LobbyMatchPayload{GameID: seat.GameID})
 	}
 }
 
@@ -189,6 +181,23 @@ func (s *Server) cancelMatchmake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// currentMatchmade is the durable navigation fallback the search page polls:
+// returns the game the caller was matched into ({"gameId":""} when none), so a
+// dropped match_found push can't leave a matched player stuck searching.
+func (s *Server) currentMatchmade(w http.ResponseWriter, r *http.Request) {
+	u := requireUser(w, r)
+	if u == nil {
+		return
+	}
+	gameID, err := s.store.CurrentMatchmadeGame(r.Context(), u.ID)
+	if err != nil {
+		s.log.Error("current matchmade game", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not look up match")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"gameId": gameID})
 }
 
 // wsLobby serves the persistent per-user WebSocket carrying cross-page

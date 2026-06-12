@@ -96,6 +96,12 @@ export const api = {
     return request<void>("/api/matchmake/enqueue", { method: "DELETE" });
   },
 
+  // Durable navigation fallback: the game the caller was matched into, or "".
+  // Polled by the search page so a dropped match_found push can't strand them.
+  currentMatch() {
+    return request<{ gameId: string }>("/api/matchmake/current");
+  },
+
   // Hands back the token for the seat the authed caller already owns in a game
   // they were pre-seated into (matchmaking or rematch). The single, reliable way
   // to obtain seat creds by JWT; 403 if the caller owns no seat in the game.

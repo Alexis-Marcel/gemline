@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMatchmake, type MatchmakeState } from "../api/matchmake";
 import { useAuth } from "../auth/useAuth";
-import { saveCredentials } from "../lib/credentials";
 
 const MULTIPLAYER_MAX_SEATS = 6;
 
@@ -14,7 +13,7 @@ interface MatchmakingPageProps {
  * MatchmakingPage owns the matchmake queue lifecycle for one search session:
  * start on mount, navigate on "matched", cancel on unmount. A dedicated route
  * keeps a single useMatchmake owner (no cross-page userSocket races) and a
- * stable URL that survives refresh (server reissues match_found on reconnect).
+ * stable URL that survives refresh (the poll re-finds the match after a blip).
  * Anonymous visitors are bounced to /login (matchmaking is auth-gated).
  */
 export function MatchmakingPage({ mode }: MatchmakingPageProps) {
@@ -42,13 +41,7 @@ export function MatchmakingPage({ mode }: MatchmakingPageProps) {
 
   useEffect(() => {
     if (matchmake.state.status === "matched") {
-      const { match } = matchmake.state;
-      saveCredentials(match.gameId, {
-        token: match.token,
-        seatIndex: match.seatIndex,
-        name: match.name,
-      });
-      navigate(`/game/${match.gameId}`, { replace: true });
+      navigate(`/game/${matchmake.state.match.gameId}`, { replace: true });
     }
   }, [matchmake.state, navigate]);
 

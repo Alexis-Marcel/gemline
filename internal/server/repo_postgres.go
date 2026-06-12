@@ -1090,24 +1090,19 @@ func (r *PostgresRepo) MatchmakeTick(
 
 		userIDs := make([]string, 0, len(g))
 		for i, u := range g {
-			token := newToken()
 			name := u.DisplayName
 			if name == "" {
 				name = "Joueur"
 			}
+			// Reserved by identity, no token — the player resolves it by JWT on
+			// arrival (ResolveSeat), same as a rematch seat.
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO seats (game_id, seat_index, color, name, token_hash, user_id, occupied, is_bot)
-				VALUES ($1, $2, $3, $4, $5, $6, TRUE, FALSE)
-			`, gameID, i, int(game.Color(i+1)), name, hashToken(token), u.UserID); err != nil {
+				VALUES ($1, $2, $3, $4, NULL, $5, TRUE, FALSE)
+			`, gameID, i, int(game.Color(i+1)), name, u.UserID); err != nil {
 				return nil, fmt.Errorf("insert matched seat: %w", err)
 			}
-			seats = append(seats, MatchedSeat{
-				UserID:    u.UserID,
-				GameID:    gameID,
-				SeatIndex: i,
-				Token:     token,
-				Name:      name,
-			})
+			seats = append(seats, MatchedSeat{UserID: u.UserID, GameID: gameID})
 			userIDs = append(userIDs, u.UserID)
 		}
 
@@ -1126,4 +1121,24 @@ func (r *PostgresRepo) MatchmakeTick(
 		return nil, err
 	}
 	return seats, nil
+}
+
+func (r *PostgresRepo) CurrentMatchmadeGame(ctx context.Context, userID string) (string, error) {
+	var id string
+	err := r.pool.QueryRowContext(ctx, `
+		SELECT g.id
+		FROM games g
+		JOIN seats s ON s.game_id = g.id
+		WHERE s.user_id = $1 AND s.occupied
+		  AND g.visibility = 'public' AND g.status <> 'finished'
+		ORDER BY g.created_at DESC
+		LIMIT 1
+	`, userID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("current matchmade game: %w", err)
+	}
+	return id, nil
 }

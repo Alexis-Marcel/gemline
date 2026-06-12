@@ -25,6 +25,13 @@ func (s *Store) CancelMatchmake(ctx context.Context, userID string) error {
 	return s.repo.CancelMatchmake(ctx, userID)
 }
 
+// CurrentMatchmadeGame returns the id of the game the user was matched into, or
+// "" — the durable signal the search page polls when the match_found push is
+// missed.
+func (s *Store) CurrentMatchmadeGame(ctx context.Context, userID string) (string, error) {
+	return s.repo.CurrentMatchmadeGame(ctx, userID)
+}
+
 // QueueUpdate is published to each user still in queue after a tick. Count is
 // the bucket's current size; ETASeconds is the remaining wait before a multi
 // room of that size auto-starts (nil for 1v1 or under-quorum buckets).

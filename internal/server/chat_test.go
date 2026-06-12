@@ -51,7 +51,11 @@ func newChatTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := NewStore(&memChatRepo{}).WithBotDelay(0)
-	return httptest.NewServer(New(log, store, nil, Config{}).Routes())
+	srv, err := New(log, store, nil, Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return httptest.NewServer(srv.Routes())
 }
 
 func postChatMessage(t *testing.T, ts *httptest.Server, gameID, token, body string) *http.Response {

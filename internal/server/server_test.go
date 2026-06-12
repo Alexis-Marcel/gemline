@@ -21,7 +21,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// Bots play instantly so assertions don't have to sleep.
 	store := NewStore(nil).WithBotDelay(0)
-	return httptest.NewServer(New(log, store, nil, Config{}).Routes())
+	srv, err := New(log, store, nil, Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return httptest.NewServer(srv.Routes())
 }
 
 func TestHealthz(t *testing.T) {
@@ -249,6 +253,30 @@ func TestRematchOffer_AuthedHumansArePreSeated(t *testing.T) {
 	}
 	if !rematch.Seats[1].Occupied || rematch.Seats[1].UserID != "bob-uuid" {
 		t.Fatalf("seat 1 must carry Bob's UserID, got %+v", rematch.Seats[1])
+	}
+}
+
+// TestRateLimit_Enqueue: bursting past the enqueue limit yields a 429.
+func TestRateLimit_Enqueue(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	got429 := false
+	for i := 0; i < 10; i++ {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/matchmake/enqueue", strings.NewReader(`{"players":2}`))
+		req.Header.Set("X-Test-User-ID", "rl-user")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			got429 = true
+			break
+		}
+	}
+	if !got429 {
+		t.Fatal("expected a 429 after exceeding the enqueue rate limit")
 	}
 }
 

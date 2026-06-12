@@ -10,8 +10,7 @@ export type LobbyEventType =
   | "match_found"
   | "invite_received"
   | "invite_cancelled"
-  | "queue_update"
-  | "rematch_ready";
+  | "queue_update";
 
 export interface MatchFoundPayload {
   gameId: string;
@@ -19,10 +18,6 @@ export interface MatchFoundPayload {
   seatIndex: number;
   name: string;
 }
-
-// Same shape as match_found: fresh per-seat creds for a rematch game,
-// letting pre-seated players save the token without a re-join roundtrip.
-export type RematchReadyPayload = MatchFoundPayload;
 
 export interface InvitePayload {
   gameId: string;
@@ -45,8 +40,7 @@ export type LobbyEvent =
   | { type: "match_found"; payload: MatchFoundPayload }
   | { type: "invite_received"; payload: InvitePayload }
   | { type: "invite_cancelled"; payload: InvitePayload }
-  | { type: "queue_update"; payload: QueueUpdatePayload }
-  | { type: "rematch_ready"; payload: RematchReadyPayload };
+  | { type: "queue_update"; payload: QueueUpdatePayload };
 
 type Listener = (ev: LobbyEvent) => void;
 

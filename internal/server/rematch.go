@@ -47,29 +47,28 @@ func rematchOfferComplete(rec *GameRecord) bool {
 
 // OfferRematch records the token's seat accepting a rematch, creating the offer
 // (bots pre-accepted) on the first call. When every human seat has accepted it
-// creates the new game and sets rec.RematchGameID. On that final call it returns
-// fresh seat tokens for the pre-seated authed humans (nil otherwise) for the
-// caller to push via the lobby. Idempotent for a seat that already accepted.
-func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRecord, []RematchSeat, error) {
+// creates the new game and sets rec.RematchGameID. Idempotent for a seat that
+// already accepted.
+func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRecord, error) {
 	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	rec.Lock()
 	if rec.Status != StatusFinished {
 		rec.Unlock()
-		return rec, nil, ErrNotFinished
+		return rec, ErrNotFinished
 	}
 	if rec.RematchGameID != "" {
 		// Already created — caller can just navigate to it.
 		rec.Unlock()
-		return rec, nil, nil
+		return rec, nil
 	}
 	seat, ok := rec.SeatByToken(token)
 	if !ok {
 		rec.Unlock()
-		return rec, nil, ErrBadToken
+		return rec, ErrBadToken
 	}
 	// Snapshot the bot seat indices so the repo can pre-accept them when it
 	// initialises a fresh offer. Done under the lock so we read a consistent
@@ -90,7 +89,7 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 	// rematch bug under load on a multi-pod deploy.
 	merged, err := s.repo.MergeRematchAcceptance(ctx, gameID, seat.Index, botSeats)
 	if err != nil {
-		return rec, nil, err
+		return rec, err
 	}
 	// The noop repo (no DATABASE_URL — single-process mode) returns nil:
 	// there's no cross-pod race to guard against, so we fall back to the
@@ -113,27 +112,25 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 	rec.Unlock()
 
 	if !complete {
-		return rec, nil, nil
+		return rec, nil
 	}
 	// Unanimous — create the rematch game. Rematch() does its own locking and
 	// race handling, so call it without rec.Lock, then clear the moot offer.
-	newRec, authedSeats, err := s.Rematch(ctx, gameID)
+	newRec, err := s.Rematch(ctx, gameID)
 	if err != nil {
-		return rec, nil, err
+		return rec, err
 	}
-	// Stamp the link onto the exact record the handler reads for its state
-	// broadcast. Rematch mutates the cached game *it* fetched, which under a
-	// multi-pod cache invalidation can be a different pointer than `rec` — so
-	// without this the completion event could ship an empty rematchGameId and
-	// leave the other player stuck on "en attente" forever.
+	// Rematch may have mutated a different cached pointer than `rec` (multi-pod
+	// invalidation), so stamp the link onto the record the handler broadcasts —
+	// otherwise the completion event ships an empty rematchGameId.
 	rec.Lock()
 	if newRec != nil {
 		rec.RematchGameID = newRec.ID
 	}
 	rec.RematchOffer = nil
 	rec.Unlock()
-	_ = s.repo.SaveRematchOffer(ctx, gameID, nil)
-	return rec, authedSeats, nil
+	noteSwallowedErr("rematch_offer_clear", s.repo.SaveRematchOffer(ctx, gameID, nil))
+	return rec, nil
 }
 
 // DeclineRematch clears a pending offer on a finished game — withdraw or refuse,
@@ -160,44 +157,35 @@ func (s *Store) DeclineRematch(ctx context.Context, gameID, token string) (*Game
 	rec.RematchOffer = nil
 	rec.Unlock()
 	// Clear in DB so other pods don't resurrect the offer on reload.
-	_ = s.repo.SaveRematchOffer(ctx, gameID, nil)
+	noteSwallowedErr("rematch_offer_clear", s.repo.SaveRematchOffer(ctx, gameID, nil))
 	return rec, nil
-}
-
-// RematchSeat carries the fresh credentials for an authed human pre-seated in a
-// new rematch game, pushed via lobby `rematch_ready` events.
-type RematchSeat struct {
-	SeatIndex int
-	UserID    string
-	Name      string
-	Token     string
 }
 
 // Rematch creates a fresh game mirroring originalID (player count, config,
 // visibility), pre-seats the original's bots + authed humans, and links the two
 // via rematch_game_id. Idempotent: a later caller is sent to the same game.
-// Returns fresh tokens for pre-seated authed humans (empty on a race-loss).
-// Anonymous players aren't pre-seated — they re-join via the normal join path.
-func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []RematchSeat, error) {
+// Authed seats are reserved by UserID with no token (resolved on arrival);
+// anonymous players aren't pre-seated and re-join via the normal path.
+func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, error) {
 	orig, ok, err := s.Get(ctx, originalID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if !ok {
-		return nil, nil, ErrGameNotFound
+		return nil, ErrGameNotFound
 	}
 
 	orig.Lock()
 	if orig.Status != StatusFinished {
 		orig.Unlock()
-		return nil, nil, ErrNotFinished
+		return nil, ErrNotFinished
 	}
 	if linked := orig.RematchGameID; linked != "" {
 		orig.Unlock()
 		// Another caller already created the rematch — fetch and return it.
 		rec, ok, err := s.Get(ctx, linked)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if !ok {
 			// The link points to a game that no longer exists (rare —
@@ -205,7 +193,7 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []
 			// in-memory copy could still hold a stale ID). Treat as
 			// "no rematch yet" and create a new one.
 		} else {
-			return rec, nil, nil
+			return rec, nil
 		}
 	}
 	numPlayers := len(orig.Seats)
@@ -217,12 +205,9 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []
 	orig.Unlock()
 
 	// Build the new game inline (not via Create) so we can write the
-	// rematch_game_id link atomically. Mirror the original seating: bots and
-	// authed humans return (authed humans get fresh tokens pushed via the
-	// lobby), anon humans are left empty. All-occupied starts in `playing`.
+	// rematch_game_id link atomically. All-occupied starts in `playing`.
 	colors := make([]game.Color, numPlayers)
 	seats := make([]Seat, numPlayers)
-	var authedSeats []RematchSeat
 	allOccupied := true
 	for i := 0; i < numPlayers; i++ {
 		colors[i] = game.Color(i + 1)
@@ -238,19 +223,12 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []
 			seats[i].Occupied = true
 			seats[i].IsBot = true
 		case prior.UserID != "":
-			tok := newToken()
+			// Reserved by identity; no TokenHash until the player resolves it.
 			seats[i].Name = prior.Name
 			seats[i].UserID = prior.UserID
-			seats[i].TokenHash = hashToken(tok)
 			seats[i].Occupied = true
-			authedSeats = append(authedSeats, RematchSeat{
-				SeatIndex: i,
-				UserID:    prior.UserID,
-				Name:      prior.Name,
-				Token:     tok,
-			})
 		default:
-			// Anonymous human: no UserID, no way to deliver a token. They
+			// Anonymous human: no stable identity to reserve against. They
 			// fall back to the join path when their client lands on the
 			// rematch URL.
 			allOccupied = false
@@ -274,7 +252,7 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []
 		rec.State.StartClock(time.Now())
 	}
 	if err := s.repo.SaveNewGame(ctx, rec); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Link original → new. If two goroutines raced past the early-out above,
@@ -282,20 +260,19 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []
 	// link is already set and returns the winner's game ID.
 	winnerID, err := s.repo.SetRematchLink(ctx, originalID, rec.ID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	s.mu.Lock()
 	if existing, found := s.games[winnerID]; found && winnerID != rec.ID {
 		// Lost the race — discard the freshly-built record and return the
 		// winner's. The orphaned `rec` row remains in the DB but is unlinked;
-		// it'll age out via normal cleanup paths. The winner's pod has
-		// already published its own seat tokens, so we suppress ours.
+		// it'll age out via normal cleanup paths.
 		s.mu.Unlock()
 		orig.Lock()
 		orig.RematchGameID = winnerID
 		orig.Unlock()
-		return existing, nil, nil
+		return existing, nil
 	}
 	if winnerID == rec.ID {
 		s.games[rec.ID] = rec
@@ -310,9 +287,9 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []
 		// Race lost but the cache didn't have the winner — fetch through Get.
 		winner, _, err := s.Get(ctx, winnerID)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return winner, nil, nil
+		return winner, nil
 	}
 	if status == StatusPlaying {
 		// Mirror the seat-claiming paths (AddBot / Join): start the timeout
@@ -320,5 +297,5 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, []
 		s.armClock(rec)
 		go s.maybeScheduleBot(rec)
 	}
-	return rec, authedSeats, nil
+	return rec, nil
 }

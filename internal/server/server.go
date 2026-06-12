@@ -154,7 +154,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite", s.inviteSeat)
 	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/invite", s.cancelSeatInvite)
 	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite/decline", s.declineInvite)
-	mux.HandleFunc("POST /api/games/{id}/seat/claim", s.claimSeat)
+	mux.HandleFunc("POST /api/games/{id}/seat/resolve", s.resolveSeat)
 	mux.HandleFunc("POST /api/games/{id}/leave", s.leaveSeat)
 	mux.HandleFunc("POST /api/games/{id}/start", s.startGame)
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
@@ -627,9 +627,9 @@ func statusForRemoveBotError(err error) int {
 }
 
 // offerRematch adds the caller's seat to the acceptance set (bots pre-accept).
-// Once every human seat has accepted, a new pre-seated game is created and its
-// id is set on the original's RematchGameID; seated humans get their fresh seat
-// token via the lobby's rematch_ready event so they don't re-join.
+// Once every human seat has accepted, a new pre-seated game is created and its id
+// is set on the original's RematchGameID. The broadcast state carries that id;
+// clients navigate to it and resolve their seat over HTTP — no token is pushed.
 func (s *Server) offerRematch(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	token := playerToken(r)
@@ -637,24 +637,15 @@ func (s *Server) offerRematch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "missing player token")
 		return
 	}
-	rec, authedSeats, err := s.store.OfferRematch(r.Context(), gameID, token)
+	rec, err := s.store.OfferRematch(r.Context(), gameID, token)
 	if err != nil {
 		writeError(w, statusForRematchError(err), err.Error())
 		return
 	}
 	rec.Lock()
 	dto := toGameDTO(rec)
-	rematchID := rec.RematchGameID
 	rec.Unlock()
 	s.events.Publish(gameID, eventState(dto))
-	for _, seat := range authedSeats {
-		s.publishLobby(seat.UserID, LobbyEventRematchReady, LobbyMatchPayload{
-			GameID:    rematchID,
-			Token:     seat.Token,
-			SeatIndex: seat.SeatIndex,
-			Name:      seat.Name,
-		})
-	}
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -950,22 +941,24 @@ func (s *Server) joinGame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-// claimSeat reissues the authed caller's seat token for a game they were
-// pre-seated into (rematch). The lobby rematch_ready push normally delivers
-// these creds instantly; this is the reliable pull fallback so a missed push
-// can't strand a player as a spectator in their own seat.
-func (s *Server) claimSeat(w http.ResponseWriter, r *http.Request) {
+// resolveSeat hands the authed caller the token for the seat they already own,
+// pulled by JWT when their client lands on a pre-seated game without local creds.
+func (s *Server) resolveSeat(w http.ResponseWriter, r *http.Request) {
 	u := requireUser(w, r)
 	if u == nil {
 		return
 	}
 	gameID := r.PathValue("id")
-	seat, token, err := s.store.ClaimSeat(r.Context(), gameID, u.ID)
+	seat, token, err := s.store.ResolveSeat(r.Context(), gameID, u.ID)
 	if err != nil {
-		writeError(w, statusForClaimError(err), err.Error())
+		writeError(w, statusForResolveSeatError(err), err.Error())
 		return
 	}
-	rec, _, _ := s.store.Get(r.Context(), gameID)
+	rec, ok, err := s.store.Get(r.Context(), gameID)
+	if err != nil || !ok {
+		writeError(w, http.StatusInternalServerError, "could not reload game")
+		return
+	}
 	rec.Lock()
 	dto := toGameDTO(rec)
 	rec.Unlock()
@@ -975,7 +968,7 @@ func (s *Server) claimSeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
 }
 
-func statusForClaimError(err error) int {
+func statusForResolveSeatError(err error) int {
 	switch {
 	case errors.Is(err, ErrGameNotFound):
 		return http.StatusNotFound

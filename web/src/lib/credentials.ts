@@ -52,9 +52,6 @@ export function subscribeCredentials(listener: Listener): () => void {
   };
 }
 
-// Live seat credentials for `gameId` as React state, via
-// useSyncExternalStore so out-of-band writes (e.g. a rematch_ready push)
-// flow through React's scheduling rather than a setState-in-effect dance.
 export function useCredentials(gameId: string): Credentials | null {
   // Cache the parsed creds so getSnapshot returns referentially-stable
   // values between writes — otherwise a fresh object each call would make

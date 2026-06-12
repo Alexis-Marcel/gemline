@@ -278,6 +278,32 @@ export function GamePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game, creds, user, joining, nameModalOpen]);
 
+  // Self-heal creds: an authed user pre-seated into this game (rematch) but
+  // missing the local token — e.g. the lobby rematch_ready push never landed —
+  // reclaims it over HTTP instead of being stranded as a spectator in their own
+  // seat. Ref-guarded so it runs at most once per mount; a failure (not our
+  // seat, race) falls back to spectator silently.
+  const claimAttempted = useRef(false);
+  useEffect(() => {
+    if (!game || creds || !user) return;
+    if (claimAttempted.current) return;
+    const mine = game.seats.some((s) => s.occupied && s.userId === user.id);
+    if (!mine) return;
+    claimAttempted.current = true;
+    void (async () => {
+      try {
+        const res = await api.claimSeat(id);
+        saveCredentials(id, {
+          token: res.token,
+          seatIndex: res.seat.index,
+          name: res.seat.name,
+        });
+      } catch {
+        // Not our seat / race — stay a spectator.
+      }
+    })();
+  }, [game, creds, user, id]);
+
   // Vacate a seat in a still-waiting game and go home. Clear creds eagerly
   // so a stale WS state event doesn't re-seat us.
   async function handleCancelMatchmaking() {

@@ -252,6 +252,57 @@ func TestRematchOffer_AuthedHumansArePreSeated(t *testing.T) {
 	}
 }
 
+// TestClaimSeat_RecoversRematchCreds: a pre-seated authed human can pull their
+// rematch seat token over HTTP (the reliable fallback when the lobby
+// rematch_ready push is missed) and the reissued token authorises play.
+func TestClaimSeat_RecoversRematchCreds(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	g := createGame(t, ts, 2)
+	a := joinGameAs(t, ts, g.ID, "Alice", "alice-uuid", nil)
+	b := joinGameAs(t, ts, g.ID, "Bob", "bob-uuid", nil)
+	finishGame(t, ts, g.ID, a.Token, b.Token)
+
+	_ = postRematchOffer(t, ts, g.ID, a.Token, http.StatusOK)
+	d := postRematchOffer(t, ts, g.ID, b.Token, http.StatusOK)
+	if d.RematchGameID == "" {
+		t.Fatalf("rematch must be created after both accept")
+	}
+
+	claim := postClaimSeatAs(t, ts, d.RematchGameID, "alice-uuid", http.StatusOK)
+	if claim.Seat.Index != 0 || claim.Token == "" {
+		t.Fatalf("claim must return Alice's seat 0 with a token, got %+v", claim)
+	}
+	// The reissued token must authorise Alice's opening move in the rematch.
+	_ = postMove(t, ts, d.RematchGameID, claim.Token, 0, 0, http.StatusOK)
+
+	// A user with no seat in the game is refused.
+	_ = postClaimSeatAs(t, ts, d.RematchGameID, "carol-uuid", http.StatusForbidden)
+}
+
+func postClaimSeatAs(t *testing.T, ts *httptest.Server, gameID, userID string, wantStatus int) joinResponse {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+gameID+"/seat/claim", nil)
+	req.Header.Set("X-Test-User-ID", userID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("claimSeat: status=%d (want %d) body=%s", resp.StatusCode, wantStatus, body)
+	}
+	if wantStatus != http.StatusOK {
+		return joinResponse{}
+	}
+	var j joinResponse
+	if err := json.NewDecoder(resp.Body).Decode(&j); err != nil {
+		t.Fatal(err)
+	}
+	return j
+}
+
 func TestLastMove_PopulatedOnDTOAfterMove(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()

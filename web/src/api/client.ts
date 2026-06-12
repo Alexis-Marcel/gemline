@@ -96,11 +96,11 @@ export const api = {
     return request<void>("/api/matchmake/enqueue", { method: "DELETE" });
   },
 
-  // Reissues the authed caller's seat token for a game they were pre-seated
-  // into (rematch). The reliable pull fallback when the lobby rematch_ready
-  // push was missed; 403 if the caller owns no seat in the game.
-  claimSeat(id: string) {
-    return request<JoinResponse>(`/api/games/${id}/seat/claim`, {
+  // Hands back the token for the seat the authed caller already owns in a game
+  // they were pre-seated into (matchmaking or rematch). The single, reliable way
+  // to obtain seat creds by JWT; 403 if the caller owns no seat in the game.
+  resolveSeat(id: string) {
+    return request<JoinResponse>(`/api/games/${id}/seat/resolve`, {
       method: "POST",
     });
   },

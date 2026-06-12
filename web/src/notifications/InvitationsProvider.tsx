@@ -12,7 +12,6 @@ import {
 } from "react";
 import { api } from "../api/client";
 import { useAuth } from "../auth/useAuth";
-import { saveCredentials } from "../lib/credentials";
 import { playNotificationSound } from "../lib/notificationSound";
 import { userSocket } from "../api/userSocket";
 import {
@@ -38,9 +37,10 @@ export function InvitationsProvider({ children }: { children: ReactNode }) {
     if (!currUserId) setInvitations([]);
   }
 
-  // Wire the lobby socket: invite_received pushes, invite_cancelled removes,
-  // rematch_ready saves fresh seat creds (piggybacked here since it shares
-  // the lobby socket; GamePage picks up the write via subscribeCredentials).
+  // Wire the lobby socket: invite_received pushes, invite_cancelled removes.
+  // Rematch seat credentials are NOT delivered here — clients resolve them over
+  // HTTP (see GamePage's seat-resolution effect), so a missed push can't strand
+  // a player.
   useEffect(() => {
     return userSocket.subscribe((ev) => {
       if (ev.type === "invite_received") {
@@ -62,12 +62,6 @@ export function InvitationsProvider({ children }: { children: ReactNode }) {
               ),
           ),
         );
-      } else if (ev.type === "rematch_ready") {
-        saveCredentials(ev.payload.gameId, {
-          token: ev.payload.token,
-          seatIndex: ev.payload.seatIndex,
-          name: ev.payload.name,
-        });
       }
     });
   }, []);

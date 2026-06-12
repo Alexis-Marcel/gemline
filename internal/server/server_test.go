@@ -223,8 +223,8 @@ func TestRematchOffer_BotIsPreAccepted(t *testing.T) {
 	}
 }
 
-// TestRematchOffer_AuthedHumansArePreSeated: the rematch carries the same
-// UserIDs at the same seats (with fresh tokens delivered via rematch_ready) and
+// TestRematchOffer_AuthedHumansArePreSeated: the rematch reserves the same
+// UserIDs at the same seats (no token yet — clients resolve it on arrival) and
 // starts in `playing` since every seat is filled — no "Recherche" flash.
 func TestRematchOffer_AuthedHumansArePreSeated(t *testing.T) {
 	ts := newTestServer(t)
@@ -252,10 +252,10 @@ func TestRematchOffer_AuthedHumansArePreSeated(t *testing.T) {
 	}
 }
 
-// TestClaimSeat_RecoversRematchCreds: a pre-seated authed human can pull their
-// rematch seat token over HTTP (the reliable fallback when the lobby
-// rematch_ready push is missed) and the reissued token authorises play.
-func TestClaimSeat_RecoversRematchCreds(t *testing.T) {
+// TestResolveSeat_PreSeatedHumanPullsCreds: a pre-seated authed human (no token
+// until they ask) pulls their seat token over HTTP by JWT, and that token
+// authorises play. This is the single creds channel for matchmaking and rematch.
+func TestResolveSeat_PreSeatedHumanPullsCreds(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 	g := createGame(t, ts, 2)
@@ -269,20 +269,20 @@ func TestClaimSeat_RecoversRematchCreds(t *testing.T) {
 		t.Fatalf("rematch must be created after both accept")
 	}
 
-	claim := postClaimSeatAs(t, ts, d.RematchGameID, "alice-uuid", http.StatusOK)
-	if claim.Seat.Index != 0 || claim.Token == "" {
-		t.Fatalf("claim must return Alice's seat 0 with a token, got %+v", claim)
+	resolved := postResolveSeatAs(t, ts, d.RematchGameID, "alice-uuid", http.StatusOK)
+	if resolved.Seat.Index != 0 || resolved.Token == "" {
+		t.Fatalf("resolve must return Alice's seat 0 with a token, got %+v", resolved)
 	}
-	// The reissued token must authorise Alice's opening move in the rematch.
-	_ = postMove(t, ts, d.RematchGameID, claim.Token, 0, 0, http.StatusOK)
+	// The issued token must authorise Alice's opening move in the rematch.
+	_ = postMove(t, ts, d.RematchGameID, resolved.Token, 0, 0, http.StatusOK)
 
 	// A user with no seat in the game is refused.
-	_ = postClaimSeatAs(t, ts, d.RematchGameID, "carol-uuid", http.StatusForbidden)
+	_ = postResolveSeatAs(t, ts, d.RematchGameID, "carol-uuid", http.StatusForbidden)
 }
 
-func postClaimSeatAs(t *testing.T, ts *httptest.Server, gameID, userID string, wantStatus int) joinResponse {
+func postResolveSeatAs(t *testing.T, ts *httptest.Server, gameID, userID string, wantStatus int) joinResponse {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+gameID+"/seat/claim", nil)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+gameID+"/seat/resolve", nil)
 	req.Header.Set("X-Test-User-ID", userID)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -291,7 +291,7 @@ func postClaimSeatAs(t *testing.T, ts *httptest.Server, gameID, userID string, w
 	defer resp.Body.Close()
 	if resp.StatusCode != wantStatus {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("claimSeat: status=%d (want %d) body=%s", resp.StatusCode, wantStatus, body)
+		t.Fatalf("resolveSeat: status=%d (want %d) body=%s", resp.StatusCode, wantStatus, body)
 	}
 	if wantStatus != http.StatusOK {
 		return joinResponse{}

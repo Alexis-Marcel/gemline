@@ -16,9 +16,8 @@ import { MatchmakingPage } from "./pages/MatchmakingPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import { PublicProfilePage } from "./pages/PublicProfilePage";
 
-// Key GamePage by game id so navigating between games (rematch, a new match)
-// remounts it — per-game state, sockets, and one-shot effect guards reset
-// cleanly instead of leaking across game ids on the shared /game/:id route.
+// Key by game id so navigating between games remounts GamePage instead of
+// leaking per-game state across the shared /game/:id route.
 function KeyedGamePage() {
   const { id } = useParams();
   return <GamePage key={id} />;

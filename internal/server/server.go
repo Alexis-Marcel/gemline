@@ -629,8 +629,7 @@ func statusForRemoveBotError(err error) int {
 // offerRematch adds the caller's seat to the acceptance set (bots pre-accept).
 // Once every human seat has accepted, a new pre-seated game is created and its id
 // is set on the original's RematchGameID. The broadcast state carries that id;
-// each client navigates to the new game and resolves its seat over HTTP. No seat
-// token is pushed — credentials live on a single pull channel (resolveSeat).
+// clients navigate to it and resolve their seat over HTTP — no token is pushed.
 func (s *Server) offerRematch(w http.ResponseWriter, r *http.Request) {
 	gameID := r.PathValue("id")
 	token := playerToken(r)
@@ -942,10 +941,8 @@ func (s *Server) joinGame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-// resolveSeat hands the authed caller the token for the seat they already own in
-// a game they were pre-seated into (matchmaking or rematch). The client pulls it
-// by JWT when it lands on the game without local creds — the single, reliable
-// path that replaces lossy lobby token pushes.
+// resolveSeat hands the authed caller the token for the seat they already own,
+// pulled by JWT when their client lands on a pre-seated game without local creds.
 func (s *Server) resolveSeat(w http.ResponseWriter, r *http.Request) {
 	u := requireUser(w, r)
 	if u == nil {

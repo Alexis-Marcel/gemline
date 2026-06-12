@@ -257,18 +257,14 @@ export function GamePage() {
   // reserved for in-progress/finished games. autoJoinAttempted is a ref
   // so the effect re-fires across state pushes without re-joining; a
   // failed attempt falls back to spectator silently.
-  // We "own" a seat in this game if an authed identity matches one. This drives
-  // which acquisition path runs: owners resolve their token, everyone else joins.
   const ownedSeatIndex =
     user && game
       ? (game.seats.find((s) => s.occupied && s.userId === user.id)?.index ??
         null)
       : null;
 
-  // Seat resolution: an authed user pre-seated into this game (matchmaking or
-  // rematch) but without a local token pulls it over HTTP by JWT. The single,
-  // reliable creds channel — no reliance on a lobby push. Ref-guarded; reset on
-  // a real failure so the next state push retries (transient network).
+  // A pre-seated authed user pulls their seat token by JWT — the single creds
+  // channel. Reset the guard on failure so the next state push retries.
   const resolveAttempted = useRef(false);
   useEffect(() => {
     if (creds || ownedSeatIndex === null) return;
@@ -283,15 +279,13 @@ export function GamePage() {
           name: res.seat.name,
         });
       } catch {
-        resolveAttempted.current = false; // allow a retry on the next update
+        resolveAttempted.current = false;
       }
     })();
   }, [creds, ownedSeatIndex, id]);
 
-  // Auto-join a still-waiting game for someone who does NOT already own a seat:
+  // Auto-join a still-waiting game for someone who doesn't already own a seat:
   // authed users join directly, anonymous users get a name modal first.
-  // Spectating is reserved for in-progress/finished games. Ref-guarded so the
-  // effect re-fires across state pushes without re-joining.
   const [nameModalOpen, setNameModalOpen] = useState(false);
   const autoJoinAttempted = useRef(false);
   useEffect(() => {

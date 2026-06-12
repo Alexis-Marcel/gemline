@@ -48,8 +48,7 @@ func rematchOfferComplete(rec *GameRecord) bool {
 // OfferRematch records the token's seat accepting a rematch, creating the offer
 // (bots pre-accepted) on the first call. When every human seat has accepted it
 // creates the new game and sets rec.RematchGameID. Idempotent for a seat that
-// already accepted. Players reach the new game by observing rematchGameId in the
-// broadcast state, then resolving their seat over HTTP — no token is pushed.
+// already accepted.
 func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRecord, error) {
 	rec, err := s.getOrNotFound(ctx, gameID)
 	if err != nil {
@@ -121,11 +120,9 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 	if err != nil {
 		return rec, err
 	}
-	// Stamp the link onto the exact record the handler reads for its state
-	// broadcast. Rematch mutates the cached game *it* fetched, which under a
-	// multi-pod cache invalidation can be a different pointer than `rec` — so
-	// without this the completion event could ship an empty rematchGameId and
-	// leave the other player stuck on "en attente" forever.
+	// Rematch may have mutated a different cached pointer than `rec` (multi-pod
+	// invalidation), so stamp the link onto the record the handler broadcasts —
+	// otherwise the completion event ships an empty rematchGameId.
 	rec.Lock()
 	if newRec != nil {
 		rec.RematchGameID = newRec.ID
@@ -167,11 +164,8 @@ func (s *Store) DeclineRematch(ctx context.Context, gameID, token string) (*Game
 // Rematch creates a fresh game mirroring originalID (player count, config,
 // visibility), pre-seats the original's bots + authed humans, and links the two
 // via rematch_game_id. Idempotent: a later caller is sent to the same game.
-//
-// Pre-seated authed humans get NO token here — they hold no secret yet. Their
-// client resolves it over HTTP (ResolveSeat, keyed by JWT) when it lands on the
-// rematch. Anonymous players aren't pre-seated and re-join via the normal path.
-// This keeps seat credentials on a single pull channel rather than a lossy push.
+// Authed seats are reserved by UserID with no token (resolved on arrival);
+// anonymous players aren't pre-seated and re-join via the normal path.
 func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, error) {
 	orig, ok, err := s.Get(ctx, originalID)
 	if err != nil {
@@ -211,10 +205,7 @@ func (s *Store) Rematch(ctx context.Context, originalID string) (*GameRecord, er
 	orig.Unlock()
 
 	// Build the new game inline (not via Create) so we can write the
-	// rematch_game_id link atomically. Mirror the original seating: bots carry a
-	// token (they never present it, but it marks the seat claimed); authed humans
-	// are reserved by UserID with no token (resolved on demand); anon humans are
-	// left empty. All-occupied starts in `playing`.
+	// rematch_game_id link atomically. All-occupied starts in `playing`.
 	colors := make([]game.Color, numPlayers)
 	seats := make([]Seat, numPlayers)
 	allOccupied := true

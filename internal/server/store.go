@@ -692,11 +692,8 @@ func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx i
 }
 
 // ResolveSeat issues a fresh token for the authed user's own occupied human
-// seat. This is the single, reliable way a pre-seated player (matchmaking or
-// rematch) obtains their seat credentials: the client pulls it by JWT instead of
-// relying on a lossy lobby push. Idempotent in effect — each call rotates the
-// token and returns the latest; works in any game status, and only ever hands a
-// seat back to the user who already owns it.
+// seat — the single pull path by which a pre-seated player (matchmaking or
+// rematch) obtains their credentials. Each call rotates the token.
 func (s *Store) ResolveSeat(ctx context.Context, gameID, userID string) (*Seat, string, error) {
 	if userID == "" {
 		return nil, "", ErrSeatNotForUser

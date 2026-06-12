@@ -37,10 +37,8 @@ export function InvitationsProvider({ children }: { children: ReactNode }) {
     if (!currUserId) setInvitations([]);
   }
 
-  // Wire the lobby socket: invite_received pushes, invite_cancelled removes.
-  // Rematch seat credentials are NOT delivered here — clients resolve them over
-  // HTTP (see GamePage's seat-resolution effect), so a missed push can't strand
-  // a player.
+  // Lobby socket: invite_received pushes, invite_cancelled removes. Seat
+  // credentials are never delivered here — clients pull them via resolveSeat.
   useEffect(() => {
     return userSocket.subscribe((ev) => {
       if (ev.type === "invite_received") {

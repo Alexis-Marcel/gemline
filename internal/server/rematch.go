@@ -117,11 +117,19 @@ func (s *Store) OfferRematch(ctx context.Context, gameID, token string) (*GameRe
 	}
 	// Unanimous — create the rematch game. Rematch() does its own locking and
 	// race handling, so call it without rec.Lock, then clear the moot offer.
-	_, authedSeats, err := s.Rematch(ctx, gameID)
+	newRec, authedSeats, err := s.Rematch(ctx, gameID)
 	if err != nil {
 		return rec, nil, err
 	}
+	// Stamp the link onto the exact record the handler reads for its state
+	// broadcast. Rematch mutates the cached game *it* fetched, which under a
+	// multi-pod cache invalidation can be a different pointer than `rec` — so
+	// without this the completion event could ship an empty rematchGameId and
+	// leave the other player stuck on "en attente" forever.
 	rec.Lock()
+	if newRec != nil {
+		rec.RematchGameID = newRec.ID
+	}
 	rec.RematchOffer = nil
 	rec.Unlock()
 	_ = s.repo.SaveRematchOffer(ctx, gameID, nil)

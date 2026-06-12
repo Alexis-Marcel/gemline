@@ -58,6 +58,7 @@ var (
 	ErrNoRematchOffer           = errors.New("no rematch offer pending")
 	ErrNotInvitee               = errors.New("only the invited user can act on this invitation")
 	ErrNotHost                  = errors.New("only the host can start this game")
+	ErrSeatNotForUser           = errors.New("no seat reserved for this user in the game")
 )
 
 // Seat is a play slot. Only the SHA-256 of the player token is kept; the
@@ -686,6 +687,44 @@ func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx i
 	// The active player on a fresh start may be a bot — kick its turn.
 	if startedPlaying {
 		go s.maybeScheduleBot(rec)
+	}
+	return &rec.Seats[idx], token, nil
+}
+
+// ClaimSeat reissues a fresh token for the authed user's own occupied human
+// seat. Pre-seated rematch players normally receive their token via the lobby
+// rematch_ready push; this pull path lets a player recover creds when that push
+// was missed (reconnecting socket, cross-pod timing), making the rematch flow
+// self-healing rather than dependent on a lossy fire-and-forget event. Works in
+// any game status — it only ever hands a seat back to the user who already owns it.
+func (s *Store) ClaimSeat(ctx context.Context, gameID, userID string) (*Seat, string, error) {
+	if userID == "" {
+		return nil, "", ErrSeatNotForUser
+	}
+	rec, err := s.getOrNotFound(ctx, gameID)
+	if err != nil {
+		return nil, "", err
+	}
+
+	rec.Lock()
+	defer rec.Unlock()
+
+	idx := -1
+	for i := range rec.Seats {
+		st := rec.Seats[i]
+		if st.Occupied && !st.IsBot && st.UserID == userID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, "", ErrSeatNotForUser
+	}
+
+	token := newToken()
+	rec.Seats[idx].TokenHash = hashToken(token)
+	if err := s.repo.UpdateSeat(ctx, gameID, &rec.Seats[idx], rec.Status); err != nil {
+		return nil, "", err
 	}
 	return &rec.Seats[idx], token, nil
 }

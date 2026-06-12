@@ -55,13 +55,19 @@ export function useMatchmake(): {
     }
   }, []);
 
+  const markMatched = useCallback((gameId: string) => {
+    setState((prev) =>
+      prev.status === "matched" ? prev : { status: "matched", match: { gameId } },
+    );
+  }, []);
+
   // Subscribe unconditionally so we don't miss the race where the matcher
-  // pairs us before `start()` returns.
+  // pairs us before `start()` returns. match_found is just a fast navigation
+  // hint; the poll below is the durable fallback if it's dropped.
   useEffect(() => {
     return userSocket.subscribe((ev) => {
       if (ev.type === "match_found") {
-        playNotificationSound();
-        setState({ status: "matched", match: ev.payload });
+        markMatched(ev.payload.gameId);
         return;
       }
       if (ev.type === "queue_update") {
@@ -79,7 +85,30 @@ export function useMatchmake(): {
         });
       }
     });
-  }, []);
+  }, [markMatched]);
+
+  // Durable fallback: while queued, poll for the game we were matched into in
+  // case the match_found push never landed.
+  useEffect(() => {
+    if (state.status !== "queued") return;
+    let cancelled = false;
+    const interval = window.setInterval(async () => {
+      try {
+        const { gameId } = await api.currentMatch();
+        if (!cancelled && gameId) markMatched(gameId);
+      } catch {
+        // transient — the next tick retries
+      }
+    }, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [state.status, markMatched]);
+
+  useEffect(() => {
+    if (state.status === "matched") playNotificationSound();
+  }, [state.status]);
 
   // Best-effort cancel on unmount mid-queue. Doesn't touch the socket
   // (owned by AuthProvider). Fire-and-forget — a dangling row is reaped

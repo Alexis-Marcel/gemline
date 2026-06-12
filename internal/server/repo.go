@@ -132,6 +132,11 @@ type Repository interface {
 	// without locking, for queue_update notifications after each tick.
 	MatchmakeQueueSnapshot(ctx context.Context, players int, mode string) ([]QueuedUser, error)
 
+	// CurrentMatchmadeGame returns the id of the newest non-finished public game
+	// the user holds an occupied seat in — the durable "you've been matched"
+	// signal the search page polls when the lobby push is missed. Empty if none.
+	CurrentMatchmadeGame(ctx context.Context, userID string) (string, error)
+
 	// SaveRematchOffer writes (JSON body) or clears (nil) rematch_offer. Used
 	// for the clear-on-decline / clear-after-rematch paths; the accept path
 	// must go through MergeRematchAcceptance to be race-safe across pods.
@@ -172,15 +177,12 @@ type QueuedUser struct {
 	DisplayName string
 }
 
-// MatchedSeat is the matcher's output for one matched user. Token lets the
-// client authenticate the seat without a separate join; Name is surfaced in the
-// match_found event before full state loads.
+// MatchedSeat is the matcher's output for one matched user: just the routing
+// pair. The match_found push carries only the game id (a navigation hint); the
+// client resolves its seat token over HTTP on arrival.
 type MatchedSeat struct {
-	UserID    string
-	GameID    string
-	SeatIndex int
-	Token     string
-	Name      string
+	UserID string
+	GameID string
 }
 
 // Profile is the user-controlled profile row.
@@ -404,6 +406,7 @@ func (noopRepo) MatchmakeTick(context.Context, int, string, func([]QueuedUser) [
 func (noopRepo) MatchmakeQueueSnapshot(context.Context, int, string) ([]QueuedUser, error) {
 	return nil, nil
 }
+func (noopRepo) CurrentMatchmadeGame(context.Context, string) (string, error) { return "", nil }
 func (noopRepo) SaveRematchOffer(context.Context, string, []byte) error { return nil }
 func (noopRepo) SaveDrawOffer(context.Context, string, int) error       { return nil }
 func (noopRepo) MergeRematchAcceptance(context.Context, string, int, []int) (*RematchOffer, error) {

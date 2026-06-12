@@ -167,6 +167,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("POST /api/matchmake/enqueue", s.enqueueMatchmake)
 	mux.HandleFunc("DELETE /api/matchmake/enqueue", s.cancelMatchmake)
+	mux.HandleFunc("GET /api/matchmake/current", s.currentMatchmade)
 
 	mux.HandleFunc("GET /api/auth/me", s.getMe)
 	mux.HandleFunc("PUT /api/profile", s.putProfile)

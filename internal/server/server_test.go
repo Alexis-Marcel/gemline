@@ -280,6 +280,44 @@ func TestResolveSeat_PreSeatedHumanPullsCreds(t *testing.T) {
 	_ = postResolveSeatAs(t, ts, d.RematchGameID, "carol-uuid", http.StatusForbidden)
 }
 
+// TestCurrentMatchmade_Contract: the durable match-poll endpoint requires auth
+// and reports no match as {"gameId":""} (the noop store has no queue).
+func TestCurrentMatchmade_Contract(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	// No JWT → 401.
+	resp, err := http.Get(ts.URL + "/api/matchmake/current")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated poll must be 401, got %d", resp.StatusCode)
+	}
+
+	// Authed, no match → 200 {"gameId":""}.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/matchmake/current", nil)
+	req.Header.Set("X-Test-User-ID", "alice-uuid")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authed poll must be 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		GameID string `json:"gameId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.GameID != "" {
+		t.Fatalf("no match expected, got gameId=%q", body.GameID)
+	}
+}
+
 func postResolveSeatAs(t *testing.T, ts *httptest.Server, gameID, userID string, wantStatus int) joinResponse {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/games/"+gameID+"/seat/resolve", nil)

@@ -691,13 +691,10 @@ func (s *Store) Join(ctx context.Context, gameID, name, userID string, seatIdx i
 	return &rec.Seats[idx], token, nil
 }
 
-// ClaimSeat reissues a fresh token for the authed user's own occupied human
-// seat. Pre-seated rematch players normally receive their token via the lobby
-// rematch_ready push; this pull path lets a player recover creds when that push
-// was missed (reconnecting socket, cross-pod timing), making the rematch flow
-// self-healing rather than dependent on a lossy fire-and-forget event. Works in
-// any game status — it only ever hands a seat back to the user who already owns it.
-func (s *Store) ClaimSeat(ctx context.Context, gameID, userID string) (*Seat, string, error) {
+// ResolveSeat issues a fresh token for the authed user's own occupied human
+// seat — the single pull path by which a pre-seated player (matchmaking or
+// rematch) obtains their credentials. Each call rotates the token.
+func (s *Store) ResolveSeat(ctx context.Context, gameID, userID string) (*Seat, string, error) {
 	if userID == "" {
 		return nil, "", ErrSeatNotForUser
 	}

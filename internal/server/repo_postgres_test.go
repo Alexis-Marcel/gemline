@@ -172,13 +172,13 @@ func TestPostgresRepo_RematchOffer_SurvivesCacheInvalidation(t *testing.T) {
 		t.Fatalf("Resign: %v", err)
 	}
 
-	if _, _, err := podA.OfferRematch(ctx, gameID, aliceTok); err != nil {
+	if _, err := podA.OfferRematch(ctx, gameID, aliceTok); err != nil {
 		t.Fatalf("Alice's OfferRematch on pod A: %v", err)
 	}
 
 	// A separate Store = pod B's process: same DB, its own cache, post-NOTIFY.
 	podB := NewStore(repo)
-	if _, _, err := podB.OfferRematch(ctx, gameID, bobTok); err != nil {
+	if _, err := podB.OfferRematch(ctx, gameID, bobTok); err != nil {
 		t.Fatalf("Bob's OfferRematch on pod B: %v", err)
 	}
 

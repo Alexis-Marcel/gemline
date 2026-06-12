@@ -82,8 +82,8 @@ export function GamePage() {
     [liveGame, optimisticGame],
   );
 
-  // Reactive to out-of-band writes — the lobby's rematch_ready event can
-  // save creds while we're already mounted on the new game id.
+  // Reactive to out-of-band writes (e.g. the seat-resolution effect below
+  // saving creds once they're pulled).
   const creds = useCredentials(id);
 
   // Push our seat token so the server marks us online and cancels any
@@ -257,11 +257,40 @@ export function GamePage() {
   // reserved for in-progress/finished games. autoJoinAttempted is a ref
   // so the effect re-fires across state pushes without re-joining; a
   // failed attempt falls back to spectator silently.
+  const ownedSeatIndex =
+    user && game
+      ? (game.seats.find((s) => s.occupied && s.userId === user.id)?.index ??
+        null)
+      : null;
+
+  // A pre-seated authed user pulls their seat token by JWT — the single creds
+  // channel. Reset the guard on failure so the next state push retries.
+  const resolveAttempted = useRef(false);
+  useEffect(() => {
+    if (creds || ownedSeatIndex === null) return;
+    if (resolveAttempted.current) return;
+    resolveAttempted.current = true;
+    void (async () => {
+      try {
+        const res = await api.resolveSeat(id);
+        saveCredentials(id, {
+          token: res.token,
+          seatIndex: res.seat.index,
+          name: res.seat.name,
+        });
+      } catch {
+        resolveAttempted.current = false;
+      }
+    })();
+  }, [creds, ownedSeatIndex, id]);
+
+  // Auto-join a still-waiting game for someone who doesn't already own a seat:
+  // authed users join directly, anonymous users get a name modal first.
   const [nameModalOpen, setNameModalOpen] = useState(false);
   const autoJoinAttempted = useRef(false);
   useEffect(() => {
     if (!game) return;
-    if (creds) return;
+    if (creds || ownedSeatIndex !== null) return;
     if (game.status !== "waiting") return;
     if (autoJoinAttempted.current) return;
     if (joining) return;
@@ -276,33 +305,7 @@ export function GamePage() {
     // handleJoin is recreated each render; listing it would re-fire the
     // effect every render. We only want auto-join once per mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [game, creds, user, joining, nameModalOpen]);
-
-  // Self-heal creds: an authed user pre-seated into this game (rematch) but
-  // missing the local token — e.g. the lobby rematch_ready push never landed —
-  // reclaims it over HTTP instead of being stranded as a spectator in their own
-  // seat. Ref-guarded so it runs at most once per mount; a failure (not our
-  // seat, race) falls back to spectator silently.
-  const claimAttempted = useRef(false);
-  useEffect(() => {
-    if (!game || creds || !user) return;
-    if (claimAttempted.current) return;
-    const mine = game.seats.some((s) => s.occupied && s.userId === user.id);
-    if (!mine) return;
-    claimAttempted.current = true;
-    void (async () => {
-      try {
-        const res = await api.claimSeat(id);
-        saveCredentials(id, {
-          token: res.token,
-          seatIndex: res.seat.index,
-          name: res.seat.name,
-        });
-      } catch {
-        // Not our seat / race — stay a spectator.
-      }
-    })();
-  }, [game, creds, user, id]);
+  }, [game, creds, ownedSeatIndex, user, joining, nameModalOpen]);
 
   // Vacate a seat in a still-waiting game and go home. Clear creds eagerly
   // so a stale WS state event doesn't re-seat us.

@@ -3,7 +3,7 @@ package server
 import (
 	"time"
 
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 type createGameRequest struct {
@@ -13,12 +13,6 @@ type createGameRequest struct {
 	// have their display name pulled from the profile server-side. Empty
 	// for anonymous = 400.
 	Name string `json:"name,omitempty"`
-}
-
-// matchmakeRequest is the body of POST /api/games/matchmake. The frontend uses
-// players=2 (1v1) or 4 (multi), but the API accepts any 2..6.
-type matchmakeRequest struct {
-	Players int `json:"players"`
 }
 
 type joinGameRequest struct {

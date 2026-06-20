@@ -11,10 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alexis/gemline/internal/backplane"
-	"github.com/alexis/gemline/internal/db"
-	"github.com/alexis/gemline/internal/server"
-	"github.com/alexis/gemline/internal/tracing"
+	"github.com/alexis-marcel/gemline/internal/backplane"
+	"github.com/alexis-marcel/gemline/internal/db"
+	"github.com/alexis-marcel/gemline/internal/server"
+	"github.com/alexis-marcel/gemline/internal/tracing"
 	"github.com/joho/godotenv"
 )
 

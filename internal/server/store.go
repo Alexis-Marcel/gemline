@@ -8,14 +8,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
-	"math"
-	"sort"
 	"sync"
 	"time"
 
-	"github.com/alexis/gemline/internal/ai"
-	"github.com/alexis/gemline/internal/elo"
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/ai"
+	"github.com/alexis-marcel/gemline/internal/elo"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 type Status string
@@ -537,43 +535,6 @@ type LobbyEntry struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-// scanLobbyCache returns public waiting games from the in-memory cache,
-// most-recent-first. Used by Matchmake under a noop repo (hermetic tests),
-// where the cache is authoritative.
-func (s *Store) scanLobbyCache(limit int) []LobbyEntry {
-	s.mu.Lock()
-	candidates := make([]*GameRecord, 0, len(s.games))
-	for _, rec := range s.games {
-		candidates = append(candidates, rec)
-	}
-	s.mu.Unlock()
-
-	out := make([]LobbyEntry, 0)
-	for _, rec := range candidates {
-		rec.Lock()
-		if rec.Status == StatusWaiting && rec.Visibility == VisibilityPublic {
-			seated := 0
-			for _, st := range rec.Seats {
-				if st.Occupied {
-					seated++
-				}
-			}
-			out = append(out, LobbyEntry{
-				GameID:    rec.ID,
-				Players:   len(rec.Seats),
-				Seated:    seated,
-				CreatedAt: rec.CreatedAt,
-			})
-		}
-		rec.Unlock()
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
-	return out
-}
-
 // getOrNotFound is Get with a not-found result turned into ErrGameNotFound.
 func (s *Store) getOrNotFound(ctx context.Context, id string) (*GameRecord, error) {
 	rec, ok, err := s.Get(ctx, id)
@@ -1054,142 +1015,6 @@ func (s *Store) DeclineSeatInvite(ctx context.Context, gameID string, seatIdx in
 	}
 	rec.Unlock()
 	return rec, nil
-}
-
-// Matchmake — TEST FIXTURE ONLY; production uses the async queue + matcher
-// tick. Returns a joinable public waiting game (excludeUserID not already
-// seated), scoring 1v1 by age-widened Elo proximity and multi by most-filled /
-// oldest-first; creates a fresh game if none match.
-func (s *Store) Matchmake(ctx context.Context, players int, excludeUserID string) (*GameRecord, error) {
-	candidates, err := s.repo.LobbyGames(ctx, 50)
-	if err != nil {
-		return nil, err
-	}
-	if candidates == nil {
-		candidates = s.scanLobbyCache(50)
-	}
-	ratingMode := RatingModeMulti
-	if players == 2 {
-		ratingMode = RatingMode1v1
-	}
-	callerRating := s.fetchCallerRating(ctx, excludeUserID, ratingMode)
-
-	type scored struct {
-		rec    *GameRecord
-		delta  float64
-		age    time.Duration
-		seated int
-	}
-	var picks []scored
-	now := time.Now()
-	for _, c := range candidates {
-		if c.Players != players || c.Seated >= c.Players {
-			continue
-		}
-		rec, ok, err := s.Get(ctx, c.GameID)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			continue
-		}
-		rec.Lock()
-		joinable := rec.Status == StatusWaiting && !rec.AllSeated()
-		if joinable && excludeUserID != "" {
-			for _, seat := range rec.Seats {
-				if seat.UserID == excludeUserID {
-					joinable = false
-					break
-				}
-			}
-		}
-		var occupantUserIDs []string
-		seated := 0
-		if joinable {
-			for _, seat := range rec.Seats {
-				if seat.Occupied {
-					seated++
-					if seat.UserID != "" {
-						occupantUserIDs = append(occupantUserIDs, seat.UserID)
-					}
-				}
-			}
-		}
-		rec.Unlock()
-		if !joinable {
-			continue
-		}
-
-		age := now.Sub(c.CreatedAt)
-		avg := s.averageRating(ctx, occupantUserIDs, ratingMode)
-		delta := math.Abs(float64(callerRating) - float64(avg))
-
-		if players == 2 && !withinBand(callerRating, avg, age) {
-			continue
-		}
-		picks = append(picks, scored{rec: rec, delta: delta, age: age, seated: seated})
-	}
-	if len(picks) > 0 {
-		var best scored
-		bestIdx := -1
-		for i, p := range picks {
-			if bestIdx == -1 {
-				best, bestIdx = p, i
-				continue
-			}
-			// 1v1: smallest rating delta. Multi: most-filled, age tiebreak.
-			better := false
-			if players == 2 {
-				better = p.delta < best.delta
-			} else {
-				if p.seated != best.seated {
-					better = p.seated > best.seated
-				} else {
-					better = p.age > best.age
-				}
-			}
-			if better {
-				best, bestIdx = p, i
-			}
-		}
-		_ = bestIdx
-		return best.rec, nil
-	}
-	return s.Create(ctx, players, VisibilityPublic)
-}
-
-// fetchCallerRating resolves a user's Elo for mode, defaulting when they have
-// no rated games (or no user).
-func (s *Store) fetchCallerRating(ctx context.Context, userID, mode string) int {
-	if userID == "" {
-		return elo.DefaultRating
-	}
-	r, err := s.repo.RatingFor(ctx, userID, mode)
-	if err != nil || r.Games == 0 {
-		return elo.DefaultRating
-	}
-	return r.Rating
-}
-
-// averageRating returns the mean Elo of users in mode, unrated taking the
-// default. Empty list returns the default.
-func (s *Store) averageRating(ctx context.Context, userIDs []string, mode string) int {
-	if len(userIDs) == 0 {
-		return elo.DefaultRating
-	}
-	ratings, err := s.repo.RatingsFor(ctx, userIDs, mode)
-	if err != nil {
-		return elo.DefaultRating
-	}
-	sum := 0
-	for _, r := range ratings {
-		if r.Games == 0 {
-			sum += elo.DefaultRating
-		} else {
-			sum += r.Rating
-		}
-	}
-	return sum / len(ratings)
 }
 
 // LeaveSeat frees the seat behind token, clearing it for reuse. Waiting games

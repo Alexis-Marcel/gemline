@@ -7,7 +7,7 @@ package ai
 import (
 	"math/rand"
 
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 // Engine is the public entry point. Its seeded PRNG makes move selection

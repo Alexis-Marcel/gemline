@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 // presenceTestStore uses a tiny disconnect-grace so the timeout path runs in

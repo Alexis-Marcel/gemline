@@ -1,7 +1,6 @@
 package server
 
 import (
-	"math"
 	"time"
 )
 
@@ -22,11 +21,4 @@ func scoreBandFor(age time.Duration) float64 {
 		return matchBandMax
 	}
 	return band
-}
-
-// withinBand reports whether two ratings are close enough for the given
-// candidate age.
-func withinBand(callerRating, candidateRating int, age time.Duration) bool {
-	delta := math.Abs(float64(callerRating) - float64(candidateRating))
-	return delta <= scoreBandFor(age)
 }

@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alexis/gemline/internal/backplane"
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/backplane"
+	"github.com/alexis-marcel/gemline/internal/game"
 	"github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
@@ -141,13 +141,20 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) (*
 	return srv, nil
 }
 
+// testRoutes, when non-nil, registers extra fixture endpoints on the mux. It is
+// wired only by test builds (matchmake_fixture_test.go) and stays nil in the
+// production binary, so test-only routes are never mounted on a shipped server.
+var testRoutes func(*http.ServeMux, *Server)
+
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 
 	mux.HandleFunc("POST /api/games", s.limited("create", rate.Every(2*time.Second), 5, s.createGame))
-	mux.HandleFunc("POST /api/games/matchmake", s.matchmakeGame)
+	if testRoutes != nil {
+		testRoutes(mux, s)
+	}
 	mux.HandleFunc("GET /api/games/{id}", s.getGame)
 	mux.HandleFunc("POST /api/games/{id}/join", s.joinGame)
 	mux.HandleFunc("POST /api/games/{id}/moves", s.postMove)
@@ -324,42 +331,6 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 	rec.Unlock()
 	s.events.Publish(rec.ID, eventState(dto))
 	writeJSON(w, http.StatusCreated, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
-}
-
-// matchmakeGame — TEST FIXTURE ONLY. Production matchmaking is the async queue
-// (POST /api/matchmake/enqueue + /ws/lobby); this synchronous endpoint just
-// lets server tests seat two users without the queue + matcher + Postgres.
-func (s *Server) matchmakeGame(w http.ResponseWriter, r *http.Request) {
-	u := requireUser(w, r)
-	if u == nil {
-		return
-	}
-	var req matchmakeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid body")
-		return
-	}
-	if req.Players < 2 || req.Players > game.MaxPlayers {
-		writeError(w, http.StatusBadRequest, "players must be in [2, 6]")
-		return
-	}
-	rec, err := s.store.Matchmake(r.Context(), req.Players, u.ID)
-	if err != nil {
-		s.log.Error("matchmake", "err", err)
-		writeError(w, http.StatusInternalServerError, "could not matchmake")
-		return
-	}
-	name := s.displayNameFor(r.Context(), u)
-	seat, token, err := s.store.Join(r.Context(), rec.ID, name, u.ID, -1)
-	if err != nil {
-		writeError(w, statusForJoinError(err), err.Error())
-		return
-	}
-	rec.Lock()
-	dto := toGameDTO(rec)
-	rec.Unlock()
-	s.events.Publish(rec.ID, eventState(dto))
-	writeJSON(w, http.StatusOK, joinResponse{Game: dto, Seat: toSeatDTO(seat), Token: token})
 }
 
 // displayNameFor resolves a display name by priority: profiles.display_name,

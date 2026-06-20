@@ -6,8 +6,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/alexis/gemline/internal/db"
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/db"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 // Integration tests for the Postgres repository. Skipped unless

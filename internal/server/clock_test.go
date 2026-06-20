@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 // withTestStore returns a Store whose state listener captures the forfeit

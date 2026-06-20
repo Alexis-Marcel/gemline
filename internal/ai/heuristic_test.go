@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 // TestBestMove_TakesObviousWin: with a 5-line and a cell that completes a
@@ -91,8 +91,10 @@ func TestBestMove_PerformanceBudget(t *testing.T) {
 	if !ok {
 		t.Fatal("BestMove returned !ok")
 	}
-	// 3s ceiling (not 500ms) because -race in CI slows the search ~5×.
-	if d := time.Since(start); d > 3*time.Second {
-		t.Fatalf("BestMove took %v, expected <3s under -race", d)
+	// Generous ceiling: -race slows the search ~5× and CI runners are noisy, so
+	// this guards against a hang or gross regression rather than asserting a
+	// precise perf budget (off-race the search is well under a second).
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("BestMove took %v, expected well under 10s", d)
 	}
 }

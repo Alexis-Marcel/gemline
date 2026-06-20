@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 // getReplay re-runs every move of a game through a fresh engine to surface

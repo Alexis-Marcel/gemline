@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 // TestBestMove_TakesObviousWin: with a 5-line and a cell that completes a

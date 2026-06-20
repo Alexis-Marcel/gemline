@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 func botName(seatIndex int) string {

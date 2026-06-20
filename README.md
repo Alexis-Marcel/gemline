@@ -31,8 +31,7 @@ The full vertical slice works end-to-end: a React frontend in `web/` lets browse
 - **Bots** — heuristic AI opponents (`internal/ai`) that can fill seats in private games.
 - **Accounts** — Supabase email/password auth, public profiles, per-user history and aggregate stats.
 - **Persistence & scale** — every move stored in Postgres with full state replay on load; multi-replica backend via the Postgres backplane (cross-pod event fan-out + cache invalidation).
-
-**Not yet:** rate limiting.
+- **Hardening** — bounded request bodies (32 KiB), per-caller token-bucket rate limiting on the abuse-prone endpoints (game create, chat, matchmake enqueue, profile search) returning `429` on flood, SHA-256-hashed seat tokens, and origin-locked CORS + WebSocket checks.
 
 ## Getting started
 
@@ -98,6 +97,7 @@ Two parallel auth tokens travel on requests:
 | GET    | `/api/games/{id}`                            |               | Snapshot of the game state                    |
 | POST   | `/api/games/{id}/join`                       | optional JWT  | Claim a seat (linked to user if signed in)    |
 | POST   | `/api/games/{id}/leave`                      | seat token    | Vacate a seat in a waiting game               |
+| POST   | `/api/games/{id}/seat/resolve`               | JWT required  | Pull the seat token for a seat you were pre-seated into |
 | POST   | `/api/games/{id}/start`                      | seat token    | Start a private game (fills empties with bots)|
 | POST   | `/api/games/{id}/moves`                      | seat token    | Play a stone                                  |
 | POST   | `/api/games/{id}/resign`                     | seat token    | Resign                                        |
@@ -127,6 +127,7 @@ Two parallel auth tokens travel on requests:
 | ------ | --------------------------- | ------------ | ---------------------------------------- |
 | POST   | `/api/matchmake/enqueue`    | JWT required | Join the matchmaking queue (1v1 or 3–6)  |
 | DELETE | `/api/matchmake/enqueue`    | JWT required | Leave the queue                          |
+| GET    | `/api/matchmake/current`    | JWT required | Poll the game you were matched into (navigation fallback) |
 
 **Users, profiles & ops**
 

@@ -1,4 +1,4 @@
-module github.com/alexis/gemline
+module github.com/alexis-marcel/gemline
 
 go 1.25.7
 

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/alexis/gemline/internal/elo"
+	"github.com/alexis-marcel/gemline/internal/elo"
 	"github.com/coder/websocket"
 )
 

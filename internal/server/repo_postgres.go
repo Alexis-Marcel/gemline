@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 // PostgresRepo persists games to Postgres; schema in internal/db/migrations.

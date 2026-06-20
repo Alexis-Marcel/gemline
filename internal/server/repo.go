@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/alexis/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/game"
 )
 
 // Repository persists game and user state (PostgresRepo, or a test no-op).
@@ -407,8 +407,8 @@ func (noopRepo) MatchmakeQueueSnapshot(context.Context, int, string) ([]QueuedUs
 	return nil, nil
 }
 func (noopRepo) CurrentMatchmadeGame(context.Context, string) (string, error) { return "", nil }
-func (noopRepo) SaveRematchOffer(context.Context, string, []byte) error { return nil }
-func (noopRepo) SaveDrawOffer(context.Context, string, int) error       { return nil }
+func (noopRepo) SaveRematchOffer(context.Context, string, []byte) error       { return nil }
+func (noopRepo) SaveDrawOffer(context.Context, string, int) error             { return nil }
 func (noopRepo) MergeRematchAcceptance(context.Context, string, int, []int) (*RematchOffer, error) {
 	return nil, nil
 }

@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/alexis/gemline/internal/backplane"
+	"github.com/alexis-marcel/gemline/internal/backplane"
 )
 
 // EventPublisher is the single fan-out path for WS events. Publish persists the

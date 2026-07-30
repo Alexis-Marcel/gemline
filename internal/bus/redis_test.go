@@ -66,12 +66,15 @@ func TestPerGameRouting(t *testing.T) {
 	watcher.Start(ctx)
 	bystander.Start(ctx)
 
+	// Publish inside the poll: SUBSCRIBE confirmation is asynchronous, so an
+	// immediate publish can legitimately be lost (pub/sub is fire-and-forget).
 	publisher, _, _ := newTestBus(t, mr.Addr())
-	if err := publisher.PublishGame(ctx, "g1", []byte("ev-g1")); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-
-	waitFor(t, func() bool { return len(watcherGames.snapshot()) == 1 })
+	waitFor(t, func() bool {
+		if err := publisher.PublishGame(ctx, "g1", []byte("ev-g1")); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		return len(watcherGames.snapshot()) >= 1
+	})
 	if got := watcherGames.snapshot()[0]; got != "ev-g1" {
 		t.Fatalf("watcher got %q", got)
 	}
@@ -92,10 +95,14 @@ func TestLobbyIsBroadcast(t *testing.T) {
 	a.Start(ctx)
 	b.Start(ctx)
 
-	if err := a.PublishLobby(ctx, []byte("match")); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	waitFor(t, func() bool { return len(aLobby.snapshot()) == 1 && len(bLobby.snapshot()) == 1 })
+	// Republished until both sides have it: the initial SUBSCRIBE may still
+	// be in flight when the first publish lands.
+	waitFor(t, func() bool {
+		if err := a.PublishLobby(ctx, []byte("match")); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		return len(aLobby.snapshot()) >= 1 && len(bLobby.snapshot()) >= 1
+	})
 }
 
 func TestWatchBeforeStartAndDynamicWatch(t *testing.T) {

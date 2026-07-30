@@ -33,6 +33,23 @@ func main() {
 	internalAddr := getenv("INTERNAL_ADDR", ":8090")
 	dsn := os.Getenv("DATABASE_URL")
 
+	// One image, three roles (the Loki/Mimir "target" pattern):
+	//   all     — everything in one process (dev default, single-binary).
+	//   gateway — public HTTP + WS termination; never owns a game, proxies
+	//             commands to the owning gamesvc (or the pool for new games).
+	//   gamesvc — game logic only: leases, timers, bots, matchmaker; serves
+	//             just the internal listener.
+	role := getenv("ROLE", "all")
+	if role != "all" && role != "gateway" && role != "gamesvc" {
+		log.Error("invalid ROLE", "role", role, "want", "all|gateway|gamesvc")
+		os.Exit(1)
+	}
+	if role != "all" && dsn == "" {
+		log.Error("split roles need DATABASE_URL; in-memory mode is single-process only", "role", role)
+		os.Exit(1)
+	}
+	log.Info("starting", "role", role, "version", version)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -55,6 +72,7 @@ func main() {
 		repo     server.Repository
 		eventBus server.Bus
 		leases   *lease.Manager
+		resolver *lease.Resolver
 	)
 	if dsn != "" {
 		pool, err := db.Open(ctx, dsn)
@@ -79,8 +97,13 @@ func main() {
 			os.Exit(1)
 		}
 		eventBus = rb
-		leases = lease.NewManager(pool, lease.NewOwnerID(), log).
-			WithAddr(advertiseAddr(os.Getenv("ADVERTISE_ADDR"), internalAddr))
+		if role == "gateway" {
+			// A gateway reads the lease table but never writes it.
+			resolver = lease.NewResolver(pool)
+		} else {
+			leases = lease.NewManager(pool, lease.NewOwnerID(), log).
+				WithAddr(advertiseAddr(os.Getenv("ADVERTISE_ADDR"), internalAddr))
+		}
 	} else {
 		log.Info("persistence disabled — running with in-memory store only")
 	}
@@ -89,10 +112,20 @@ func main() {
 		SupabaseURL:    os.Getenv("SUPABASE_URL"),
 		AllowedOrigins: parseOrigins(os.Getenv("ALLOWED_ORIGINS")),
 	}
+	if role == "gateway" {
+		cfg.ForwardTo = os.Getenv("GAMESVC_ADDR")
+		if cfg.ForwardTo == "" {
+			log.Error("ROLE=gateway needs GAMESVC_ADDR (the gamesvc pool address, e.g. gemline-gamesvc:8090)")
+			os.Exit(1)
+		}
+		cfg.Resolver = resolver
+	}
 
 	store := server.NewStore(repo)
-	store.StartStaleGameCleaner(log)
 	defer store.Close()
+	if role != "gateway" {
+		store.StartStaleGameCleaner(log)
+	}
 	if leases != nil {
 		// Wire the store first: the lease-lost callback must exist before the
 		// first heartbeat can detect a takeover.
@@ -117,27 +150,33 @@ func main() {
 		defer eventBus.Close()
 	}
 	// Start after the bus is live so match notifications reach lobby
-	// subscribers on other pods.
-	apiServer.StartMatcher(ctx)
-
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      apiServer.Routes(),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	// subscribers on other pods. Gateways don't match — the matcher creates
+	// and owns games.
+	if role != "gateway" {
+		apiServer.StartMatcher(ctx)
 	}
 
-	go func() {
-		log.Info("server listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("server error", "err", err)
-			os.Exit(1)
+	// Public listener: everything but gamesvc, whose only surface is internal.
+	var srv *http.Server
+	if role != "gamesvc" {
+		srv = &http.Server{
+			Addr:         addr,
+			Handler:      apiServer.Routes(),
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  60 * time.Second,
 		}
-	}()
+		go func() {
+			log.Info("server listening", "addr", addr)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("server error", "err", err)
+				os.Exit(1)
+			}
+		}()
+	}
 
-	// Pod-to-pod command forwarding: only meaningful when leases are on, and
-	// deliberately absent from the public Service/ingress.
+	// Pod-to-pod command listener: only pods that can own games mount it, and
+	// it stays deliberately absent from the public Service/ingress.
 	var internalSrv *http.Server
 	if leases != nil {
 		internalSrv = &http.Server{
@@ -163,8 +202,10 @@ func main() {
 	log.Info("shutting down")
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown error", "err", err)
+	if srv != nil {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Error("shutdown error", "err", err)
+		}
 	}
 	if internalSrv != nil {
 		if err := internalSrv.Shutdown(shutdownCtx); err != nil {

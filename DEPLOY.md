@@ -294,7 +294,7 @@ to the web SPA, all on one hostname.
 kube-prometheus-stack runs Prometheus (15-day persistent retention),
 Grafana, and Alertmanager. The app exposes Prometheus metrics at
 `/metrics` (top-level, outside the CORS/auth/log middleware); the
-`gemline-server` `ServiceMonitor` wires it up for scraping. Grafana's
+`gemline-gateway` and `gemline-gamesvc` `ServiceMonitor`s wire them up for scraping. Grafana's
 admin credentials come from AWS Secrets Manager via ESO (the
 `gemline/grafana-admin` secret).
 
@@ -351,7 +351,8 @@ git commit -am "rollback to <sha>" && git push
 
 ```sh
 kubectl -n gemline get pods
-kubectl -n gemline logs deployment/gemline-server --tail=100 -f
+kubectl -n gemline logs deployment/gemline-gateway --tail=100 -f
+kubectl -n gemline logs deployment/gemline-gamesvc --tail=100 -f
 kubectl -n gemline get certificate
 kubectl -n argocd get applications
 kubectl -n argocd port-forward svc/argocd-server 8443:443   # ArgoCD UI

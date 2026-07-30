@@ -168,7 +168,14 @@ type Store struct {
 	// one Watch, so cross-pod events keep reaching us for invalidation even
 	// with no local WS spectator. Nil when there is no bus.
 	bus Bus
+
+	// forwardOnly marks a gateway store: it never owns games, so owner-side
+	// duties (timers, bots) stay off even without a lease manager.
+	forwardOnly bool
 }
+
+// SetForwardOnly puts the store in gateway mode. Call before serving.
+func (s *Store) SetForwardOnly() { s.forwardOnly = true }
 
 // SetBus wires the fan-out bus for cache-driven interest. Call before serving.
 func (s *Store) SetBus(b Bus) { s.bus = b }
@@ -461,9 +468,12 @@ func (s *Store) startInternal(rec *GameRecord) error {
 }
 
 // ownsGame reports whether this pod may run owner-side duties (timers, bots)
-// for gameID. Without a lease manager there is a single process: it owns
-// everything.
+// for gameID. A gateway never owns; without a lease manager there is a single
+// process: it owns everything.
 func (s *Store) ownsGame(gameID string) bool {
+	if s.forwardOnly {
+		return false
+	}
 	if s.leases == nil {
 		return true
 	}

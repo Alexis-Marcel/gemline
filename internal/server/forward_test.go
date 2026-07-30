@@ -85,6 +85,78 @@ func newTestPodBus(t *testing.T, pool *sql.DB, name, redisAddr string) *testPod 
 	return &testPod{public: public, internal: internal, leases: lm, store: store}
 }
 
+// newTestGateway builds a gateway pod: forward-only store, read-only lease
+// resolver, public listener only — no lease manager, no internal listener.
+func newTestGateway(t *testing.T, pool *sql.DB, gamesvcAddr string) *testPod {
+	t.Helper()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := NewStore(NewPostgresRepo(pool))
+	t.Cleanup(store.Close)
+	srv, err := New(log, store, nil, Config{
+		ForwardTo: gamesvcAddr,
+		Resolver:  lease.NewResolver(pool),
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	public := httptest.NewServer(srv.Routes())
+	t.Cleanup(public.Close)
+	return &testPod{public: public, store: store}
+}
+
+func TestGatewayRoutesToGamesvc(t *testing.T) {
+	pool := forwardTestPool(t)
+	gamesvc := newTestPod(t, pool, "gamesvc-1")
+	gw := newTestGateway(t, pool, strings.TrimPrefix(gamesvc.internal.URL, "http://"))
+
+	// Create through the gateway: proxied to the pool, so the gamesvc claims
+	// the lease and the gateway never runs game logic.
+	gameID, tokenAlice := createGameOn(t, pool, gw)
+	if _, held := gamesvc.leases.Held(gameID); !held {
+		t.Fatal("gamesvc did not claim the created game")
+	}
+
+	// Join via the gateway: resolver finds the owner, command lands there —
+	// the clock must run on the gamesvc, never on the gateway.
+	if status, _ := postJSON(t, gw.public.URL+"/api/games/"+gameID+"/join",
+		map[string]any{"name": "Bob"}, nil); status != http.StatusCreated {
+		t.Fatalf("join via gateway: status %d", status)
+	}
+	if !hasClockTimer(gamesvc.store, gameID) {
+		t.Fatal("gamesvc has no clock timer after start")
+	}
+	if hasClockTimer(gw.store, gameID) {
+		t.Fatal("gateway armed a clock timer — forward-only mode is broken")
+	}
+
+	if status, _ := postJSON(t, gw.public.URL+"/api/games/"+gameID+"/moves",
+		map[string]any{"q": 0, "r": 0}, map[string]string{"X-Player-Token": tokenAlice}); status != http.StatusOK {
+		t.Fatalf("move via gateway: status %d", status)
+	}
+}
+
+func TestGatewayHandlesLocallyWhenPoolUnreachable(t *testing.T) {
+	pool := forwardTestPool(t)
+	gamesvc := newTestPod(t, pool, "gamesvc-1")
+	gw := newTestGateway(t, pool, strings.TrimPrefix(gamesvc.internal.URL, "http://"))
+
+	gameID, _ := createGameOn(t, pool, gw)
+
+	// The whole gamesvc tier dies (owner and pool are the same listener
+	// here). The degradation chain owner → pool → local must still serve
+	// the player.
+	gamesvc.internal.Close()
+	status, body := postJSON(t, gw.public.URL+"/api/games/"+gameID+"/join",
+		map[string]any{"name": "Bob"}, nil)
+	if status != http.StatusCreated {
+		t.Fatalf("join with dead gamesvc tier: status %d", status)
+	}
+	var token string
+	if err := json.Unmarshal(body["token"], &token); err != nil || token == "" {
+		t.Fatalf("join with dead gamesvc tier: no token (err=%v)", err)
+	}
+}
+
 func postJSON(t *testing.T, url string, body any, headers map[string]string) (int, map[string]json.RawMessage) {
 	t.Helper()
 	var buf bytes.Buffer

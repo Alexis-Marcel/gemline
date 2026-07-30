@@ -1,60 +1,52 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: gemline-server
+  name: gemline-gamesvc
   namespace: gemline
   labels:
-    app: gemline-server
+    app: gemline-gamesvc
 spec:
-  # Horizontally scalable: each live game is owned by one pod (Postgres
-  # leases + fencing, commands forwarded to the owner), events and cache
-  # invalidation fan out through per-game Redis channels, and matchmaking
-  # uses SKIP LOCKED so each pod matches independently.
+  # Game logic tier: each live game is owned by exactly one of these pods
+  # (Postgres leases + fencing) which runs its clock, bots and outcome
+  # writes. No public listener — the only surface is the internal port,
+  # reached by gateways (owner-addressed or via the gemline-gamesvc
+  # Service) and by sibling gamesvc pods. Matchmaker and orphan sweeper
+  # run here on every replica.
   replicas: 2
   strategy:
-    # maxUnavailable: 0 keeps >=2 healthy pods during a roll so HTTP sees
-    # no gap and WS clients reconnect to the surviving pod.
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
       maxUnavailable: 0
   selector:
     matchLabels:
-      app: gemline-server
+      app: gemline-gamesvc
   template:
     metadata:
       labels:
-        app: gemline-server
+        app: gemline-gamesvc
     spec:
-      # Headroom over the Go server's 10s graceful Shutdown plus the preStop sleep.
       terminationGracePeriodSeconds: 30
-      # Spread replicas across nodes; ScheduleAnyway so a node drain doesn't block the roll.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
-              app: gemline-server
+              app: gemline-gamesvc
       containers:
-        - name: server
+        - name: gamesvc
           image: ghcr.io/alexis-marcel/gemline-server:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - name: http
-              containerPort: 8080
-            # Pod-to-pod game-command forwarding. Deliberately absent from the
-            # Service: pods dial each other's IP directly (owner_addr in
-            # game_leases), and unreachability from the ingress is what makes
-            # the forwarded tag trustworthy.
             - name: internal
               containerPort: 8090
           envFrom:
             - secretRef:
                 name: gemline-env
           env:
-            - name: ADDR
-              value: ":8080"
+            - name: ROLE
+              value: "gamesvc"
             - name: INTERNAL_ADDR
               value: ":8090"
             - name: POD_IP
@@ -63,17 +55,12 @@ spec:
                   fieldPath: status.podIP
             - name: ADVERTISE_ADDR
               value: "$(POD_IP):8090"
-            # Per-game event fan-out (required).
             - name: REDIS_URL
               value: "redis://gemline-redis:6379"
-            # OTLP traces go to Alloy (cross-namespace, hence the FQDN). The
-            # SDK appends /v1/traces. Empty endpoint = tracing disabled.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://alloy.monitoring.svc.cluster.local:4318"
             - name: OTEL_SERVICE_NAME
-              value: "gemline-server"
-            # Tag traces with the pod name + namespace so Tempo can group
-            # spans per instance and Grafana's serviceMap works.
+              value: "gemline-gamesvc"
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -90,18 +77,17 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: internal
             initialDelaySeconds: 5
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: http
+              port: internal
             initialDelaySeconds: 2
             periodSeconds: 5
-          # preStop sleep lets Traefik's endpoint controller pull this pod
-          # from the pool before the process stops accepting connections,
-          # avoiding requests racing onto a dying pod.
+          # Give in-flight forwarded commands time to drain; the lease
+          # release in the shutdown path hands games over immediately.
           lifecycle:
             preStop:
               exec:

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/alexis-marcel/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/lease"
 	"github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
@@ -33,6 +34,11 @@ type Server struct {
 	limiter  *rateLimiter
 	// nil/empty = dev-permissive (CORS `*`, WS skips origin).
 	allowedOrigins []string
+
+	// Gateway mode (both set): game commands are proxied — to the live owner
+	// per resolver, else to forwardTo, the gamesvc pool address.
+	forwardTo string
+	resolver  *lease.Resolver
 }
 
 // Config holds optional dependencies. Empty SupabaseURL disables auth (every
@@ -41,6 +47,12 @@ type Server struct {
 type Config struct {
 	SupabaseURL    string
 	AllowedOrigins []string
+
+	// ForwardTo enables gateway mode: this process runs no game logic and
+	// proxies commands to the gamesvc pool at this address (owner-specific
+	// routing via Resolver). Empty = run game logic in-process.
+	ForwardTo string
+	Resolver  *lease.Resolver
 }
 
 // New returns a Server. b is the cross-pod fan-out bus; nil (tests, no
@@ -59,6 +71,11 @@ func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 		log:            log,
 		limiter:        newRateLimiter(),
 		allowedOrigins: cfg.AllowedOrigins,
+		forwardTo:      cfg.ForwardTo,
+		resolver:       cfg.Resolver,
+	}
+	if cfg.ForwardTo != "" {
+		store.SetForwardOnly()
 	}
 	// Register bus handlers so events from any pod (including ours) fan out
 	// to local WS subscribers: game events + lobby match notifications. The
@@ -158,7 +175,7 @@ func (s *Server) apiHandler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 
-	mux.HandleFunc("POST /api/games", s.limited("create", rate.Every(2*time.Second), 5, s.createGame))
+	mux.HandleFunc("POST /api/games", s.limited("create", rate.Every(2*time.Second), 5, s.forwardAll(s.createGame)))
 	if testRoutes != nil {
 		testRoutes(mux, s)
 	}
@@ -209,8 +226,12 @@ func (s *Server) apiHandler() http.Handler {
 // the same API surface, tagged so owned() handles everything locally. It must
 // never be exposed through the ingress or a public Service — unreachability
 // from outside is precisely what makes the forwarded tag trustworthy.
+// /metrics rides along for gamesvc pods, whose only listener is this one.
 func (s *Server) InternalRoutes() http.Handler {
-	return markForwarded(s.apiHandler())
+	top := http.NewServeMux()
+	top.Handle("GET /metrics", metricsHandler())
+	top.Handle("/", markForwarded(s.apiHandler()))
+	return top
 }
 
 func (s *Server) Routes() http.Handler {

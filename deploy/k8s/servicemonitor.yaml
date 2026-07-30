@@ -1,21 +1,40 @@
-# ServiceMonitor CRD comes from kube-prometheus-stack. The SkipDryRun
-# annotation below avoids a fresh-sync failure when the CRD isn't
-# registered yet.
+# ServiceMonitor CRDs come from kube-prometheus-stack. The SkipDryRun
+# annotation avoids a fresh-sync failure when the CRD isn't registered yet.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: gemline-server
+  name: gemline-gateway
   namespace: gemline
   labels:
-    app: gemline-server
+    app: gemline-gateway
   annotations:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   selector:
     matchLabels:
-      app: gemline-server
+      app: gemline-gateway
   endpoints:
     - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+---
+# gamesvc has no public listener; /metrics rides on the internal port.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gemline-gamesvc
+  namespace: gemline
+  labels:
+    app: gemline-gamesvc
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  selector:
+    matchLabels:
+      app: gemline-gamesvc
+  endpoints:
+    - port: internal
       path: /metrics
       interval: 30s
       scrapeTimeout: 10s

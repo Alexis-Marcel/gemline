@@ -195,6 +195,21 @@ func NewStore(repo Repository) *Store {
 // SetLeaseManager wires per-game ownership leases (Postgres-backed runs only).
 func (s *Store) SetLeaseManager(m *lease.Manager) { s.leases = m }
 
+// LeaseEpoch returns the epoch this pod holds for gameID, or 0 — meaning the
+// write goes unfenced. The deliberate 0 cases (leases off, command handled
+// locally without ownership) keep the pre-affinity DB-serialized behavior;
+// fencing only guards writes made *as owner*, which is where split-brain lives.
+func (s *Store) LeaseEpoch(gameID string) int64 {
+	if s.leases == nil {
+		return 0
+	}
+	epoch, ok := s.leases.Held(gameID)
+	if !ok {
+		return 0
+	}
+	return epoch
+}
+
 // ensureLease claims ownership of a game entering this pod's cache. Failure to
 // acquire (held elsewhere, DB error) must never block serving the game.
 func (s *Store) ensureLease(ctx context.Context, gameID string) {

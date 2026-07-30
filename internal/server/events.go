@@ -22,9 +22,10 @@ type EventPublisher struct {
 	log        *slog.Logger
 	podID      string
 	invalidate func(gameID string) // nil disables cross-pod cache invalidation
+	epochFor   func(gameID string) int64
 }
 
-func NewEventPublisher(repo Repository, hub *Hub, bp *backplane.Backplane, log *slog.Logger, podID string, invalidate func(string)) *EventPublisher {
+func NewEventPublisher(repo Repository, hub *Hub, bp *backplane.Backplane, log *slog.Logger, podID string, invalidate func(string), epochFor func(string) int64) *EventPublisher {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -35,6 +36,7 @@ func NewEventPublisher(repo Repository, hub *Hub, bp *backplane.Backplane, log *
 		log:        log,
 		podID:      podID,
 		invalidate: invalidate,
+		epochFor:   epochFor,
 	}
 }
 
@@ -63,10 +65,24 @@ func (p *EventPublisher) Publish(gameID string, ev Event) {
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
 
-	seq, err := p.repo.AppendEvent(ctx, gameID, ev.Type, payload)
+	var epoch int64
+	if p.epochFor != nil {
+		epoch = p.epochFor(gameID)
+	}
+	seq, err := p.repo.AppendEvent(ctx, gameID, ev.Type, payload, epoch)
 	if err != nil {
 		if errors.Is(err, ErrGameNotFound) {
 			return // game deleted under us
+		}
+		if errors.Is(err, ErrStaleLease) {
+			// We are the zombie: another pod owns this game now. Do NOT
+			// deliver locally — our state is the past and the rightful owner
+			// broadcasts the truth. Drop the poisoned cache instead.
+			p.log.Warn("publish fenced off: lease lost", "game", gameID, "type", ev.Type, "epoch", epoch)
+			if p.invalidate != nil {
+				p.invalidate(gameID)
+			}
+			return
 		}
 		p.log.Error("publish: append event", "game", gameID, "type", ev.Type, "err", err)
 		p.hub.Deliver(gameID, ev) // local delivery beats a silent miss

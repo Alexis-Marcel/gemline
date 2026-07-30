@@ -99,8 +99,10 @@ type Repository interface {
 
 	// AppendEvent atomically bumps games.event_seq and inserts the row,
 	// returning the seq. Concurrent inserts for one gameID are serialized by
-	// the row-level lock on games.id.
-	AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage) (int, error)
+	// the row-level lock on games.id. epoch is the writer's lease epoch: a
+	// non-zero epoch that no longer matches the current lease is rejected
+	// with ErrStaleLease (fencing); 0 writes unfenced.
+	AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage, epoch int64) (int, error)
 
 	// LoadEvent returns one row by (gameID, seq), fetched after a NOTIFY.
 	LoadEvent(ctx context.Context, gameID string, seq int) (EventRow, error)
@@ -259,6 +261,11 @@ type ProfileSearchEntry struct {
 // ErrProfileNotFound is translated to a 404 by the handler.
 var ErrProfileNotFound = errors.New("profile not found")
 
+// ErrStaleLease means the write carried a lease epoch that is no longer the
+// current one: another pod took ownership. The writer must stop acting on this
+// game — its in-memory view is the past.
+var ErrStaleLease = errors.New("stale lease epoch")
+
 // RatingUpdate is what ApplyRatedGame persists per user. OldRating is recorded
 // in rating_history alongside the delta so the UI can show "+12 / -8" without
 // client-side subtraction.
@@ -387,7 +394,7 @@ func (noopRepo) SearchProfiles(context.Context, string, int) ([]ProfileSearchEnt
 
 // With no event log, AppendEvent returns seq 0 so the EventPublisher won't wake
 // the bus; runs without DATABASE_URL use the in-process Hub.Deliver path.
-func (noopRepo) AppendEvent(context.Context, string, string, json.RawMessage) (int, error) {
+func (noopRepo) AppendEvent(context.Context, string, string, json.RawMessage, int64) (int, error) {
 	return 0, nil
 }
 func (noopRepo) LoadEvent(context.Context, string, int) (EventRow, error) { return EventRow{}, nil }

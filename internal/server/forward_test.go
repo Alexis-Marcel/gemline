@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alexis-marcel/gemline/internal/db"
 	"github.com/alexis-marcel/gemline/internal/lease"
@@ -21,9 +23,10 @@ import (
 // GEMLINE_TEST_DATABASE_URL is set so plain `go test ./...` stays hermetic.
 
 type testPod struct {
-	public *httptest.Server
-	leases *lease.Manager
-	store  *Store
+	public   *httptest.Server
+	internal *httptest.Server
+	leases   *lease.Manager
+	store    *Store
 }
 
 func forwardTestPool(t *testing.T) *sql.DB {
@@ -56,7 +59,7 @@ func newTestPod(t *testing.T, pool *sql.DB, name string) *testPod {
 	store.SetLeaseManager(lm)
 	public := httptest.NewServer(srv.Routes())
 	t.Cleanup(public.Close)
-	return &testPod{public: public, leases: lm, store: store}
+	return &testPod{public: public, internal: internal, leases: lm, store: store}
 }
 
 func postJSON(t *testing.T, url string, body any, headers map[string]string) (int, map[string]json.RawMessage) {
@@ -151,6 +154,74 @@ func TestCommandForwardedToOwner(t *testing.T) {
 		map[string]any{"q": 0, "r": 0}, map[string]string{"X-Player-Token": tokenAlice})
 	if status != http.StatusOK {
 		t.Fatalf("move via B: status %d", status)
+	}
+}
+
+func TestForwardFallsBackToLocalWhenOwnerUnreachable(t *testing.T) {
+	pool := forwardTestPool(t)
+	podA := newTestPod(t, pool, "pod-a")
+	podB := newTestPod(t, pool, "pod-b")
+
+	gameID, _ := createGameOn(t, pool, podA)
+
+	// A holds a live lease but its internal listener is gone (crashed pod,
+	// TTL not yet expired). B's forward must fail at dial time and replay
+	// the command locally — the player sees a success, not a 502.
+	podA.internal.Close()
+
+	status, body := postJSON(t, podB.public.URL+"/api/games/"+gameID+"/join",
+		map[string]any{"name": "Bob"}, nil)
+	if status != http.StatusCreated {
+		t.Fatalf("join via B with dead owner: status %d", status)
+	}
+	var token string
+	if err := json.Unmarshal(body["token"], &token); err != nil || token == "" {
+		t.Fatalf("join via B with dead owner: no token (err=%v)", err)
+	}
+}
+
+// TestStaleEpochWriteFencedOff is the split-brain scenario end to end: a pod
+// that lost its lease (GC pause past the TTL) must have its journal writes
+// rejected once a new owner has taken over.
+func TestStaleEpochWriteFencedOff(t *testing.T) {
+	pool := forwardTestPool(t)
+	repo := NewPostgresRepo(pool)
+	ctx := context.Background()
+
+	store := NewStore(repo)
+	t.Cleanup(store.Close)
+	rec, err := store.Create(ctx, 2, VisibilityPrivate)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(`DELETE FROM games WHERE id = $1`, rec.ID) })
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	zombie := lease.NewManager(pool, "pod-zombie", log).WithTTL(100 * time.Millisecond)
+	successor := lease.NewManager(pool, "pod-successor", log)
+	t.Cleanup(successor.Close)
+
+	epoch1, acquired, err := zombie.TryAcquire(ctx, rec.ID)
+	if err != nil || !acquired || epoch1 != 1 {
+		t.Fatalf("zombie acquire: epoch=%d acquired=%v err=%v", epoch1, acquired, err)
+	}
+	// Zombie freezes (no heartbeat); its lease expires and a new pod takes over.
+	time.Sleep(250 * time.Millisecond)
+	epoch2, acquired, err := successor.TryAcquire(ctx, rec.ID)
+	if err != nil || !acquired || epoch2 != 2 {
+		t.Fatalf("successor takeover: epoch=%d acquired=%v err=%v", epoch2, acquired, err)
+	}
+
+	// The zombie wakes up and writes with the epoch it still believes in.
+	if _, err := repo.AppendEvent(ctx, rec.ID, "state", []byte(`{}`), epoch1); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("zombie write: err=%v, want ErrStaleLease", err)
+	}
+	// The rightful owner writes fine, and unfenced writes (epoch 0) still work.
+	if _, err := repo.AppendEvent(ctx, rec.ID, "state", []byte(`{}`), epoch2); err != nil {
+		t.Fatalf("successor write: %v", err)
+	}
+	if _, err := repo.AppendEvent(ctx, rec.ID, "state", []byte(`{}`), 0); err != nil {
+		t.Fatalf("unfenced write: %v", err)
 	}
 }
 

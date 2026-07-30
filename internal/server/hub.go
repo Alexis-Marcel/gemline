@@ -53,6 +53,18 @@ type Hub struct {
 	subs map[string]map[*subscriber]struct{}
 	log  *slog.Logger
 	kind string // tags the wsConnections gauge ("game" or "lobby")
+
+	// onFirst/onLast fire on a key's 0→1 / 1→0 subscriber transitions —
+	// the bus interest hooks for per-game channel routing. Nil = no hooks.
+	onFirst func(key string)
+	onLast  func(key string)
+}
+
+// SetInterestHooks registers the transition callbacks. Call before serving;
+// hooks run outside the hub lock and must be safe for concurrent use.
+func (h *Hub) SetInterestHooks(onFirst, onLast func(key string)) {
+	h.onFirst = onFirst
+	h.onLast = onLast
 }
 
 func NewHub(log *slog.Logger, kind string) *Hub {
@@ -73,7 +85,11 @@ func (h *Hub) Subscribe(gameID string) *subscriber {
 		h.subs[gameID] = make(map[*subscriber]struct{})
 	}
 	h.subs[gameID][sub] = struct{}{}
+	first := len(h.subs[gameID]) == 1
 	h.mu.Unlock()
+	if first && h.onFirst != nil {
+		h.onFirst(gameID)
+	}
 	if h.kind != "" {
 		wsConnections.WithLabelValues(h.kind).Inc()
 	}
@@ -81,15 +97,20 @@ func (h *Hub) Subscribe(gameID string) *subscriber {
 }
 
 func (h *Hub) Unsubscribe(gameID string, sub *subscriber) {
+	last := false
 	h.mu.Lock()
 	if set, ok := h.subs[gameID]; ok {
 		delete(set, sub)
 		if len(set) == 0 {
 			delete(h.subs, gameID)
+			last = true
 		}
 	}
 	h.mu.Unlock()
 	close(sub.ch)
+	if last && h.onLast != nil {
+		h.onLast(gameID)
+	}
 	if h.kind != "" {
 		wsConnections.WithLabelValues(h.kind).Dec()
 	}

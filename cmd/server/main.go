@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alexis-marcel/gemline/internal/backplane"
+	"github.com/alexis-marcel/gemline/internal/bus"
 	"github.com/alexis-marcel/gemline/internal/db"
 	"github.com/alexis-marcel/gemline/internal/lease"
 	"github.com/alexis-marcel/gemline/internal/server"
@@ -52,9 +53,9 @@ func main() {
 	}()
 
 	var (
-		repo   server.Repository
-		bp     *backplane.Backplane
-		leases *lease.Manager
+		repo     server.Repository
+		eventBus server.Bus
+		leases   *lease.Manager
 	)
 	if dsn != "" {
 		pool, err := db.Open(ctx, dsn)
@@ -65,7 +66,22 @@ func main() {
 		defer pool.Close()
 		repo = server.NewPostgresRepo(pool)
 		log.Info("persistence enabled", "driver", "postgres")
-		bp = backplane.New(dsn, pool, log)
+		// Fan-out: Redis routes events per game (pods receive only games they
+		// serve); without REDIS_URL the LISTEN/NOTIFY backplane broadcasts
+		// globally. Leases stay in Postgres either way — the fencing check
+		// must be atomic with the fenced write, in the same database.
+		if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
+			rb, err := bus.NewRedis(redisURL, log)
+			if err != nil {
+				log.Error("redis bus init failed", "err", err)
+				os.Exit(1)
+			}
+			eventBus = rb
+			log.Info("bus enabled", "driver", "redis")
+		} else {
+			eventBus = server.NewPostgresBus(backplane.New(dsn, pool, log))
+			log.Info("bus enabled", "driver", "postgres listen/notify")
+		}
 		leases = lease.NewManager(pool, lease.NewOwnerID(), log).
 			WithAddr(advertiseAddr(os.Getenv("ADVERTISE_ADDR"), internalAddr))
 	} else {
@@ -92,16 +108,16 @@ func main() {
 		log.Info("lease manager started", "owner", leases.Owner())
 	}
 
-	// server.New registers the backplane handlers; Start the listener only
-	// afterwards so the first LISTEN session subscribes to the right channels.
-	apiServer, err := server.New(log, store, bp, cfg)
+	// server.New registers the bus handlers; Start the listener only
+	// afterwards so the first session subscribes to the right channels.
+	apiServer, err := server.New(log, store, eventBus, cfg)
 	if err != nil {
 		log.Error("server init failed", "err", err)
 		os.Exit(1)
 	}
-	if bp != nil {
-		bp.Start(ctx)
-		defer bp.Close()
+	if eventBus != nil {
+		eventBus.Start(ctx)
+		defer eventBus.Close()
 	}
 	// Start after the backplane is live so match notifications reach lobby
 	// subscribers on other pods.

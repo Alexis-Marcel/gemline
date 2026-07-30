@@ -62,6 +62,10 @@ spec:
                   fieldPath: status.podIP
             - name: ADVERTISE_ADDR
               value: "$(POD_IP):8090"
+            # Per-game event fan-out; unset falls back to Postgres
+            # LISTEN/NOTIFY (global broadcast).
+            - name: REDIS_URL
+              value: "redis://gemline-redis:6379"
             # OTLP traces go to Alloy (cross-namespace, hence the FQDN). The
             # SDK appends /v1/traces. Empty endpoint = tracing disabled.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT

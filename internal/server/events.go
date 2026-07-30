@@ -6,8 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"time"
-
-	"github.com/alexis-marcel/gemline/internal/backplane"
 )
 
 // EventPublisher is the single fan-out path for WS events. Publish persists the
@@ -18,21 +16,21 @@ import (
 type EventPublisher struct {
 	repo       Repository
 	hub        *Hub
-	backplane  *backplane.Backplane
+	bus        Bus
 	log        *slog.Logger
 	podID      string
 	invalidate func(gameID string) // nil disables cross-pod cache invalidation
 	epochFor   func(gameID string) int64
 }
 
-func NewEventPublisher(repo Repository, hub *Hub, bp *backplane.Backplane, log *slog.Logger, podID string, invalidate func(string), epochFor func(string) int64) *EventPublisher {
+func NewEventPublisher(repo Repository, hub *Hub, b Bus, log *slog.Logger, podID string, invalidate func(string), epochFor func(string) int64) *EventPublisher {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &EventPublisher{
 		repo:       repo,
 		hub:        hub,
-		backplane:  bp,
+		bus:        b,
 		log:        log,
 		podID:      podID,
 		invalidate: invalidate,
@@ -90,14 +88,14 @@ func (p *EventPublisher) Publish(gameID string, ev Event) {
 	}
 
 	// noopRepo path (no DATABASE_URL): deliver in-process.
-	if seq == 0 || p.backplane == nil {
+	if seq == 0 || p.bus == nil {
 		ev.Seq = seq
 		p.hub.Deliver(gameID, ev)
 		return
 	}
 
 	env, _ := json.Marshal(notifyEnvelope{GameID: gameID, Seq: seq, PodID: p.podID})
-	if err := p.backplane.Publish(ctx, ChannelGameEvents, env); err != nil {
+	if err := p.bus.PublishGame(ctx, gameID, env); err != nil {
 		p.log.Error("publish: notify", "game", gameID, "seq", seq, "err", err)
 		// Bus down: deliver locally; other pods resync via /events?since=N.
 		ev.Seq = seq

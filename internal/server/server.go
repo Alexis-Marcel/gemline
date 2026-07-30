@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alexis-marcel/gemline/internal/backplane"
 	"github.com/alexis-marcel/gemline/internal/game"
 	"github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -24,14 +23,14 @@ import (
 )
 
 type Server struct {
-	store     *Store
-	hub       *Hub
-	lobby     *Hub // keyed by userID; same Hub type, different routing key semantics
-	events    *EventPublisher
-	backplane *backplane.Backplane
-	log       *slog.Logger
-	verifier  jwt.Keyfunc
-	limiter   *rateLimiter
+	store  *Store
+	hub    *Hub
+	lobby  *Hub // keyed by userID; same Hub type, different routing key semantics
+	events *EventPublisher
+	bus    Bus
+	log    *slog.Logger
+	verifier jwt.Keyfunc
+	limiter  *rateLimiter
 	// nil/empty = dev-permissive (CORS `*`, WS skips origin).
 	allowedOrigins []string
 }
@@ -44,9 +43,9 @@ type Config struct {
 	AllowedOrigins []string
 }
 
-// New returns a Server. bp is the Postgres backplane for cross-pod event
-// fan-out; nil (tests, no DATABASE_URL) falls back to direct local delivery.
-func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) (*Server, error) {
+// New returns a Server. b is the cross-pod fan-out bus (Postgres backplane or
+// Redis); nil (tests, no DATABASE_URL) falls back to direct local delivery.
+func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 	hub := NewHub(log, "game")
 	lobby := NewHub(log, "lobby")
 	podID := newPodID()
@@ -55,17 +54,22 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) (*
 		store:          store,
 		hub:            hub,
 		lobby:          lobby,
-		events:         NewEventPublisher(store.Repo(), hub, bp, log, podID, store.Invalidate, store.LeaseEpoch),
-		backplane:      bp,
+		events:         NewEventPublisher(store.Repo(), hub, b, log, podID, store.Invalidate, store.LeaseEpoch),
+		bus:            b,
 		log:            log,
 		limiter:        newRateLimiter(),
 		allowedOrigins: cfg.AllowedOrigins,
 	}
-	// Register listener handlers so NOTIFYs from any pod (including ours) fan
-	// out to local WS subscribers: game events + lobby match notifications.
-	if bp != nil {
-		bp.Subscribe(ChannelGameEvents, srv.events.HandleGameEventNotif)
-		bp.Subscribe(ChannelLobby, srv.handleLobbyNotif)
+	// Register bus handlers so events from any pod (including ours) fan out
+	// to local WS subscribers: game events + lobby match notifications. The
+	// interest hooks drive per-game routing: the game hub's first/last WS
+	// spectator and the store's cache fill/evict subscribe and unsubscribe
+	// this pod from that game's channel (no-ops on the global backplane).
+	if b != nil {
+		b.OnGameEvent(srv.events.HandleGameEventNotif)
+		b.OnLobby(srv.handleLobbyNotif)
+		hub.SetInterestHooks(b.WatchGame, b.UnwatchGame)
+		store.SetBus(b)
 	}
 	if len(cfg.AllowedOrigins) == 0 {
 		log.Warn("CORS + WS origin checks disabled — set AllowedOrigins for production")

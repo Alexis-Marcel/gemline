@@ -1,4 +1,5 @@
-# Application-layer alerts for gemline-server. Infrastructure/Kubernetes
+# Application-layer alerts for the gemline backend (gateway + gamesvc).
+# Infrastructure/Kubernetes
 # alerts (pod crashloop, deployment unavailable, node not ready, etc.) are
 # already shipped by kube-prometheus-stack — no need to redefine them here.
 #
@@ -28,11 +29,11 @@ spec:
           for: 5m
           labels:
             severity: warning
-            service: gemline-server
+            service: gemline
           annotations:
-            summary: "gemline-server: 5xx rate above 1%"
+            summary: "gemline: 5xx rate above 1%"
             description: |
-              The gemline-server is returning 5xx on more than 1% of requests
+              The gemline backend is returning 5xx on more than 1% of requests
               over the last 5 minutes. Current rate: {{ $value | humanizePercentage }}.
             runbook_url: "https://github.com/Alexis-Marcel/gemline/blob/main/DEPLOY.md#troubleshooting"
 
@@ -44,9 +45,9 @@ spec:
           for: 10m
           labels:
             severity: warning
-            service: gemline-server
+            service: gemline
           annotations:
-            summary: "gemline-server: HTTP p99 latency above 500 ms"
+            summary: "gemline: HTTP p99 latency above 500 ms"
             description: |
               p99 HTTP latency has been above 500 ms for the past 10 minutes
               (current: {{ $value | humanizeDuration }}). Likely suspects: a
@@ -62,9 +63,9 @@ spec:
           for: 5m
           labels:
             severity: warning
-            service: gemline-server
+            service: gemline
           annotations:
-            summary: "gemline-server: persistence errors on {{ $labels.op }}"
+            summary: "gemline: persistence errors on {{ $labels.op }}"
             description: |
               The Store is swallowing persistence errors on operation
               "{{ $labels.op }}" (in-memory state still wins, so users

@@ -94,6 +94,24 @@ func (m *Manager) Held(gameID string) (int64, bool) {
 	return epoch, ok
 }
 
+// Resolver is the read-only view of the lease table, for pods that never own
+// games (gateways): who owns a game and where to reach it, nothing else.
+type Resolver struct{ pool *sql.DB }
+
+func NewResolver(pool *sql.DB) *Resolver { return &Resolver{pool: pool} }
+
+// Owner returns the pod holding a live lease on gameID and its internal
+// address, or ("", "") when the lease is free or expired.
+func (r *Resolver) Owner(ctx context.Context, gameID string) (owner, addr string, err error) {
+	err = r.pool.QueryRowContext(ctx,
+		`SELECT owner_id, owner_addr FROM game_leases WHERE game_id = $1 AND expires_at >= NOW()`, gameID,
+	).Scan(&owner, &addr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	return owner, addr, err
+}
+
 // Grant is the outcome of an acquisition attempt: either we hold the lease at
 // Epoch, or Owner/Addr identify who does.
 type Grant struct {

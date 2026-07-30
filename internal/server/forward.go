@@ -47,9 +47,45 @@ var forwardTransport = &http.Transport{
 // serialization as before affinity existed.
 func (s *Server) owned(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		lm := s.store.leases
 		gameID := r.PathValue("id")
-		if lm == nil || gameID == "" || isForwarded(r) {
+		if gameID == "" || isForwarded(r) {
+			next(w, r)
+			return
+		}
+		// Gateway mode: never claim, always route — to the live owner when
+		// one exists, else to the gamesvc pool (whoever the Service picks
+		// will claim). Degradation chain: owner → pool → handle locally.
+		if s.forwardTo != "" {
+			owner, addr := "", ""
+			if s.resolver != nil {
+				var err error
+				owner, addr, err = s.resolver.Owner(r.Context(), gameID)
+				if err != nil {
+					s.log.Warn("owner resolve failed", "game", gameID, "err", err)
+				}
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid body")
+				return
+			}
+			rewind := func() { r.Body = io.NopCloser(bytes.NewReader(body)) }
+			rewind()
+			local := func() { rewind(); next(w, r) }
+			toPool := func() {
+				rewind()
+				s.proxyTo(w, r, gameID, "gamesvc-pool", s.forwardTo, local)
+			}
+			if addr == "" || addr == s.forwardTo {
+				toPool()
+				return
+			}
+			s.proxyTo(w, r, gameID, owner, addr, toPool)
+			return
+		}
+
+		lm := s.store.leases
+		if lm == nil {
 			next(w, r)
 			return
 		}
@@ -82,6 +118,27 @@ func (s *Server) owned(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		s.proxyTo(w, r, gameID, grant.Owner, grant.Addr, func() {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			next(w, r)
+		})
+	}
+}
+
+// forwardAll unconditionally proxies to the gamesvc pool in gateway mode; for
+// commands not tied to an existing game yet (create). No-op otherwise.
+func (s *Server) forwardAll(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.forwardTo == "" || isForwarded(r) {
+			next(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		s.proxyTo(w, r, "", "gamesvc-pool", s.forwardTo, func() {
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			next(w, r)
 		})

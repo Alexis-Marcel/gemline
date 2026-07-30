@@ -11,9 +11,13 @@ import "context"
 type Bus interface {
 	PublishGame(ctx context.Context, gameID string, payload []byte) error
 	PublishLobby(ctx context.Context, payload []byte) error
+	// PublishMatchmake rings the matchmaker's doorbell after an enqueue, so
+	// the elected matcher ticks immediately instead of on its next interval.
+	PublishMatchmake(ctx context.Context) error
 	// Handler registration; call before Start.
 	OnGameEvent(fn func(payload []byte))
 	OnLobby(fn func(payload []byte))
+	OnMatchmake(fn func())
 	// WatchGame/UnwatchGame declare local interest (refcounted): a cached
 	// record and a first WS spectator each count as one.
 	WatchGame(gameID string)

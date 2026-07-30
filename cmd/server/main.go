@@ -73,6 +73,7 @@ func main() {
 		eventBus server.Bus
 		leases   *lease.Manager
 		resolver *lease.Resolver
+		elector  *lease.Elector
 	)
 	if dsn != "" {
 		pool, err := db.Open(ctx, dsn)
@@ -103,6 +104,9 @@ func main() {
 		} else {
 			leases = lease.NewManager(pool, lease.NewOwnerID(), log).
 				WithAddr(advertiseAddr(os.Getenv("ADVERTISE_ADDR"), internalAddr))
+			// One elected matchmaker across the fleet: every game-logic pod
+			// campaigns, exactly one runs the matcher at a time.
+			elector = lease.NewElector(pool, "matchmaker", lease.NewOwnerID(), log)
 		}
 	} else {
 		log.Info("persistence disabled — running with in-memory store only")
@@ -151,9 +155,17 @@ func main() {
 	}
 	// Start after the bus is live so match notifications reach lobby
 	// subscribers on other pods. Gateways don't match — the matcher creates
-	// and owns games.
-	if role != "gateway" {
-		apiServer.StartMatcher(ctx)
+	// games. With a DB, the matcher runs on the elected leader only, and the
+	// leadership context stops it the moment the election is lost.
+	switch {
+	case elector != nil:
+		elector.OnElected(func(leadCtx context.Context) {
+			apiServer.StartMatcher(leadCtx)
+		})
+		elector.Start(ctx)
+		defer elector.Close()
+	case role != "gateway":
+		apiServer.StartMatcher(ctx) // in-memory single process: no election needed
 	}
 
 	// Public listener: everything but gamesvc, whose only surface is internal.

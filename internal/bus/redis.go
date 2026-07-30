@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	lobbyChannel    = "lobby"
-	gameChannelPfx  = "game:"
-	connectTimeout  = 5 * time.Second
-	publishTimeout  = 5 * time.Second
+	lobbyChannel     = "lobby"
+	matchmakeChannel = "matchmake"
+	gameChannelPfx   = "game:"
+	connectTimeout   = 5 * time.Second
+	publishTimeout   = 5 * time.Second
 )
 
 func gameChannel(gameID string) string { return gameChannelPfx + gameID }
@@ -35,8 +36,9 @@ type Redis struct {
 	client *redis.Client
 	log    *slog.Logger
 
-	onGame  func(payload []byte)
-	onLobby func(payload []byte)
+	onGame      func(payload []byte)
+	onLobby     func(payload []byte)
+	onMatchmake func()
 
 	mu     sync.Mutex
 	refs   map[string]int // gameID → local interest count
@@ -72,12 +74,20 @@ func (r *Redis) OnGameEvent(fn func(payload []byte)) { r.onGame = fn }
 // OnLobby registers the handler for the lobby broadcast channel.
 func (r *Redis) OnLobby(fn func(payload []byte)) { r.onLobby = fn }
 
+// OnMatchmake registers the enqueue wake-up handler (no payload — the queue
+// itself lives in Postgres, this is just a doorbell).
+func (r *Redis) OnMatchmake(fn func()) { r.onMatchmake = fn }
+
 func (r *Redis) PublishGame(ctx context.Context, gameID string, payload []byte) error {
 	return r.client.Publish(ctx, gameChannel(gameID), payload).Err()
 }
 
 func (r *Redis) PublishLobby(ctx context.Context, payload []byte) error {
 	return r.client.Publish(ctx, lobbyChannel, payload).Err()
+}
+
+func (r *Redis) PublishMatchmake(ctx context.Context) error {
+	return r.client.Publish(ctx, matchmakeChannel, "1").Err()
 }
 
 // WatchGame declares local interest in gameID: the 0→1 transition subscribes
@@ -128,7 +138,7 @@ func (r *Redis) Start(ctx context.Context) {
 	r.done = make(chan struct{})
 
 	r.mu.Lock()
-	channels := []string{lobbyChannel}
+	channels := []string{lobbyChannel, matchmakeChannel}
 	for id := range r.refs {
 		channels = append(channels, gameChannel(id))
 	}
@@ -161,6 +171,10 @@ func (r *Redis) dispatch(channel string, payload []byte) {
 	case channel == lobbyChannel:
 		if r.onLobby != nil {
 			r.onLobby(payload)
+		}
+	case channel == matchmakeChannel:
+		if r.onMatchmake != nil {
+			r.onMatchmake()
 		}
 	case strings.HasPrefix(channel, gameChannelPfx):
 		if r.onGame != nil {

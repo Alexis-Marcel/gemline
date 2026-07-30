@@ -85,6 +85,7 @@ func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 	if b != nil {
 		b.OnGameEvent(srv.events.HandleGameEventNotif)
 		b.OnLobby(srv.handleLobbyNotif)
+		b.OnMatchmake(store.WakeMatcher)
 		hub.SetInterestHooks(b.WatchGame, b.UnwatchGame)
 		store.SetBus(b)
 	}
@@ -277,16 +278,15 @@ func patternSpanNamer(next http.Handler) http.Handler {
 	})
 }
 
-// StartMatcher kicks off the background matchmaker ticker on this pod.
-// Every matcherTickInterval each supported player count is processed
-// via SELECT FOR UPDATE SKIP LOCKED, so multiple pods can run their
-// own matcher in parallel without coordination. Match results are
-// fanned out via the lobby channel so each user's lobby WS (which may
-// live on a different pod) receives their match_found event.
+// StartMatcher kicks off the background matchmaker on this pod: pass ctx from
+// the leader election so exactly one pod matches at a time and losing the
+// election stops it. Ticks fire on enqueue wake-ups and on the fallback
+// interval; SKIP LOCKED keeps a takeover's brief overlap safe. Match results
+// fan out via the lobby channel so each user's lobby WS (which may live on
+// any gateway) receives their match_found event.
 //
-// Cancel via ctx. Safe to call without a bus (single-process /
-// no-DB mode): the matcher still runs but onMatched falls back to the
-// local LobbyHub.Deliver instead of NOTIFYing.
+// Safe to call without a bus (single-process / no-DB mode): the matcher still
+// runs but onMatched falls back to the local LobbyHub.Deliver.
 func (s *Server) StartMatcher(ctx context.Context) {
 	s.store.StartMatcher(ctx, s.log, s.fanMatched, s.fanQueueUpdate)
 }

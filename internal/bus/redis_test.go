@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,6 +125,24 @@ func TestWatchBeforeStartAndDynamicWatch(t *testing.T) {
 			seen[m] = true
 		}
 		return seen["e"] && seen["l"]
+	})
+}
+
+func TestMatchmakeDoorbell(t *testing.T) {
+	mr := miniredis.RunT(t)
+	ctx := context.Background()
+
+	var rings atomic.Int64
+	sub, _, _ := newTestBus(t, mr.Addr())
+	sub.OnMatchmake(func() { rings.Add(1) })
+	sub.Start(ctx)
+
+	pub, _, _ := newTestBus(t, mr.Addr())
+	waitFor(t, func() bool {
+		if err := pub.PublishMatchmake(ctx); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		return rings.Load() >= 1
 	})
 }
 

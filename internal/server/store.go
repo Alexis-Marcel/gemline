@@ -172,6 +172,10 @@ type Store struct {
 	// forwardOnly marks a gateway store: it never owns games, so owner-side
 	// duties (timers, bots) stay off even without a lease manager.
 	forwardOnly bool
+
+	// matchWake nudges the matcher loop out of its tick interval; fed by the
+	// bus doorbell after enqueues. 1-slot buffer coalesces bursts.
+	matchWake chan struct{}
 }
 
 // SetForwardOnly puts the store in gateway mode. Call before serving.
@@ -229,6 +233,7 @@ func NewStore(repo Repository) *Store {
 		botEngine:       ai.NewEngine(time.Now().UnixNano()),
 		botDelay:        600 * time.Millisecond,
 		disconnectGrace: DisconnectGracePeriod,
+		matchWake:       make(chan struct{}, 1),
 	}
 }
 

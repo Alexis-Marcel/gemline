@@ -229,13 +229,58 @@ func (r *PostgresRepo) UpdateSeat(ctx context.Context, gameID string, seat *Seat
 	return tx.Commit()
 }
 
-func (r *PostgresRepo) UpdateOutcome(ctx context.Context, gameID string, status Status, winner game.Color, winKind game.WinKind) error {
-	_, err := r.pool.ExecContext(ctx, `
+// Same fencing shape as AppendEvent: check-and-write in one statement under
+// the games row lock. Outcomes are exactly what duplicate timers race on
+// (double forfeit), so this is the write that matters most.
+func (r *PostgresRepo) UpdateOutcome(ctx context.Context, gameID string, status Status, winner game.Color, winKind game.WinKind, epoch int64) error {
+	res, err := r.pool.ExecContext(ctx, `
 		UPDATE games
 		SET status = $1, winner_color = $2, win_kind = $3, updated_at = NOW()
 		WHERE id = $4
-	`, status, int(winner), int(winKind), gameID)
-	return err
+		  AND ($5 = 0 OR EXISTS (
+		        SELECT 1 FROM game_leases l
+		         WHERE l.game_id = $4 AND l.epoch = $5))
+	`, status, int(winner), int(winKind), gameID, epoch)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 && epoch != 0 {
+		var exists bool
+		if e := r.pool.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM games WHERE id = $1)`, gameID,
+		).Scan(&exists); e == nil && exists {
+			return ErrStaleLease
+		}
+	}
+	return nil
+}
+
+// OrphanPlayingGames lists live games with no valid lease — their owner died
+// without handover, so their timers exist nowhere. Backs the sweeper that
+// adopts them; freshest first so active games revive before stale ones.
+func (r *PostgresRepo) OrphanPlayingGames(ctx context.Context, limit int) ([]string, error) {
+	rows, err := r.pool.QueryContext(ctx, `
+		SELECT g.id FROM games g
+		WHERE g.status = 'playing'
+		  AND NOT EXISTS (
+		        SELECT 1 FROM game_leases l
+		         WHERE l.game_id = g.id AND l.expires_at >= NOW())
+		ORDER BY g.updated_at DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("orphan games: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (r *PostgresRepo) AppendMove(ctx context.Context, gameID string, ordinal int, m game.Move, winner game.Color, winKind game.WinKind, status Status) error {

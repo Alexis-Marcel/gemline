@@ -174,6 +174,14 @@ func (s *Store) Invalidate(gameID string) {
 	s.mu.Lock()
 	delete(s.games, gameID)
 	s.mu.Unlock()
+	// Dropping the cache defuses our armed timers (their handlers no-op on a
+	// cache miss). If we own this game, another pod just wrote to it (the
+	// unreachable-owner fallback) and we must re-arm from fresh state, or the
+	// clock would silently stop until the next request. Async: Invalidate runs
+	// on the backplane listener goroutine, which must not block on a DB load.
+	if s.ownsGame(gameID) {
+		go s.AdoptGame(context.Background(), gameID)
+	}
 }
 
 func NewStore(repo Repository) *Store {
@@ -193,7 +201,60 @@ func NewStore(repo Repository) *Store {
 }
 
 // SetLeaseManager wires per-game ownership leases (Postgres-backed runs only).
-func (s *Store) SetLeaseManager(m *lease.Manager) { s.leases = m }
+// Must be called before m.Start so the lease-lost callback is in place for the
+// first heartbeat.
+func (s *Store) SetLeaseManager(m *lease.Manager) {
+	s.leases = m
+	m.SetOnLost(func(gameID string) {
+		// Ownership moved while we were frozen or partitioned: stand down.
+		// Cancel our timers, drop the cache — the new owner runs this game
+		// now, and fencing rejects anything already in flight from us.
+		s.clocks.Cancel(gameID)
+		s.presence.CancelGame(gameID)
+		s.mu.Lock()
+		delete(s.games, gameID)
+		s.mu.Unlock()
+	})
+}
+
+const (
+	orphanSweepInterval = 10 * time.Second
+	orphanSweepBatch    = 20
+)
+
+// StartOrphanSweeper ticks a scan for playing games whose lease is dead —
+// their owner crashed without handover, so their clocks are running nowhere.
+// Every pod sweeps; Acquire (inside AdoptGame's Get) picks exactly one winner
+// per game. This is the active half of takeover: traffic adopts games on
+// demand, the sweeper adopts the ones nobody is touching.
+func (s *Store) StartOrphanSweeper(ctx context.Context, log *slog.Logger) {
+	if s.leases == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(orphanSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweepCtx, cancel := context.WithTimeout(ctx, orphanSweepInterval)
+				ids, err := s.repo.OrphanPlayingGames(sweepCtx, orphanSweepBatch)
+				if err != nil {
+					log.Error("orphan sweeper", "err", err)
+				}
+				for _, id := range ids {
+					s.AdoptGame(sweepCtx, id)
+				}
+				cancel()
+				if len(ids) > 0 {
+					log.Info("orphan games swept", "count", len(ids))
+				}
+			}
+		}
+	}()
+}
 
 // LeaseEpoch returns the epoch this pod holds for gameID, or 0 — meaning the
 // write goes unfenced. The deliberate 0 cases (leases off, command handled
@@ -370,9 +431,26 @@ func (s *Store) startInternal(rec *GameRecord) error {
 	return nil
 }
 
+// ownsGame reports whether this pod may run owner-side duties (timers, bots)
+// for gameID. Without a lease manager there is a single process: it owns
+// everything.
+func (s *Store) ownsGame(gameID string) bool {
+	if s.leases == nil {
+		return true
+	}
+	_, held := s.leases.Held(gameID)
+	return held
+}
+
 // armClock schedules (or cancels) the active player's timeout. Caller must
-// hold rec.Lock.
+// hold rec.Lock. Owner-only: every pod caching a game used to arm its own
+// flag timer, so N pods raced to forfeit the same player; gating here covers
+// every call site at once.
 func (s *Store) armClock(rec *GameRecord) {
+	if !s.ownsGame(rec.ID) {
+		s.clocks.Cancel(rec.ID)
+		return
+	}
 	if !rec.State.ClockEnabled() || rec.Status != StatusPlaying || rec.State.IsOver() {
 		s.clocks.Cancel(rec.ID)
 		return
@@ -480,7 +558,15 @@ func (s *Store) handleDisconnectTimeout(gameID string, seatIndex int) {
 	rec.Unlock()
 
 	s.gameEnded(gameID)
-	_ = s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind)
+	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind, s.LeaseEpoch(gameID)); err != nil {
+		if errors.Is(err, ErrStaleLease) {
+			// Fenced: we lost the game while this timer was in flight. Our
+			// forfeit never happened — drop the poisoned cache and stay quiet.
+			s.Invalidate(gameID)
+			return
+		}
+		noteSwallowedErr("disconnect_outcome_persist", err)
+	}
 	s.maybeApplyRating(rec)
 	if s.onState != nil {
 		s.onState(gameID)
@@ -516,7 +602,11 @@ func (s *Store) handleFlag(gameID string) {
 	rec.Unlock()
 
 	s.gameEnded(gameID)
-	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
+	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind, s.LeaseEpoch(gameID)); err != nil {
+		if errors.Is(err, ErrStaleLease) {
+			s.Invalidate(gameID)
+			return
+		}
 		// In-memory state is the truth; no retry.
 	}
 	s.maybeApplyRating(rec)
@@ -610,12 +700,29 @@ func (s *Store) Get(ctx context.Context, id string) (*GameRecord, bool, error) {
 	s.mu.Unlock()
 
 	if freshlyCached {
+		// Claim before arming: armClock/maybeScheduleBot are owner-gated, so
+		// the lease attempt must come first.
+		s.ensureLease(ctx, id)
 		loaded.Lock()
 		s.armClock(loaded)
 		loaded.Unlock()
-		s.ensureLease(ctx, id)
+		s.maybeScheduleBot(loaded)
 	}
 	return loaded, true, nil
+}
+
+// AdoptGame arms the owner-side duties for a game this pod just took (or may
+// take) ownership of: load, claim, arm clock, kick a pending bot turn. Safe
+// to call redundantly — arming is idempotent and everything is owner-gated.
+func (s *Store) AdoptGame(ctx context.Context, gameID string) {
+	rec, ok, err := s.Get(ctx, gameID)
+	if err != nil || !ok {
+		return
+	}
+	rec.Lock()
+	s.armClock(rec)
+	rec.Unlock()
+	s.maybeScheduleBot(rec)
 }
 
 // Join claims a seat (negative seatIdx auto-picks). userID is "" for a guest.
@@ -1108,7 +1215,7 @@ func (s *Store) Resign(ctx context.Context, gameID, token string) (*GameRecord, 
 	rec.Unlock()
 
 	s.gameEnded(gameID)
-	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
+	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind, s.LeaseEpoch(gameID)); err != nil {
 		noteSwallowedErr("resign_outcome_persist", err)
 	}
 	if hadOffer {

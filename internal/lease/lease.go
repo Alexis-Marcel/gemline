@@ -33,9 +33,17 @@ type Manager struct {
 	mu   sync.Mutex
 	held map[string]int64 // gameID → epoch this pod holds
 
+	// onLost fires (from the heartbeat goroutine) for each lease found taken
+	// over during renewal — the owner's cue to stand down its timers.
+	onLost func(gameID string)
+
 	cancel context.CancelFunc
 	done   chan struct{}
 }
+
+// SetOnLost registers the lease-lost callback. Must be called before Start;
+// the callback must not block (it runs on the heartbeat goroutine).
+func (m *Manager) SetOnLost(fn func(gameID string)) { m.onLost = fn }
 
 func NewManager(pool *sql.DB, owner string, log *slog.Logger) *Manager {
 	return &Manager{
@@ -237,14 +245,22 @@ func (m *Manager) renew(ctx context.Context) {
 		return
 	}
 
+	var lost []string
 	m.mu.Lock()
 	for id := range m.held {
 		if _, ok := renewed[id]; !ok {
 			delete(m.held, id)
-			m.log.Warn("lease lost", "game", id)
+			lost = append(lost, id)
 		}
 	}
 	m.mu.Unlock()
+	// Invoke outside the lock: the callback may call back into Held.
+	for _, id := range lost {
+		m.log.Warn("lease lost", "game", id)
+		if m.onLost != nil {
+			m.onLost(id)
+		}
+	}
 }
 
 // Close stops the heartbeat and releases every lease this pod holds, so a

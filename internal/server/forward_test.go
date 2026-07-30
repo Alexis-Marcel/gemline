@@ -180,6 +180,91 @@ func TestForwardFallsBackToLocalWhenOwnerUnreachable(t *testing.T) {
 	}
 }
 
+// hasClockTimer peeks at the unexported clock map — same-package test only.
+func hasClockTimer(s *Store, gameID string) bool {
+	s.clocks.mu.Lock()
+	defer s.clocks.mu.Unlock()
+	_, ok := s.clocks.cancels[gameID]
+	return ok
+}
+
+func TestClockArmedOnlyOnOwner(t *testing.T) {
+	pool := forwardTestPool(t)
+	podA := newTestPod(t, pool, "pod-a")
+	podB := newTestPod(t, pool, "pod-b")
+
+	gameID, _ := createGameOn(t, pool, podA)
+	// Join through A directly so the game starts (2 seats → playing) with A
+	// as owner; the default config runs a 10-minute chess clock.
+	if status, _ := postJSON(t, podA.public.URL+"/api/games/"+gameID+"/join",
+		map[string]any{"name": "Bob"}, nil); status != http.StatusCreated {
+		t.Fatalf("join: status %d", status)
+	}
+	if !hasClockTimer(podA.store, gameID) {
+		t.Fatal("owner has no clock timer after start")
+	}
+
+	// A read on B caches the game there; before 1d this armed a duplicate
+	// flag timer — the original bug.
+	resp, err := http.Get(podB.public.URL + "/api/games/" + gameID)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("get via B: %v/%d", err, resp.StatusCode)
+	}
+	resp.Body.Close()
+	if hasClockTimer(podB.store, gameID) {
+		t.Fatal("non-owner armed a clock timer (duplicate-timer bug)")
+	}
+}
+
+func TestOrphanSweeperAdoptsGame(t *testing.T) {
+	pool := forwardTestPool(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Pod A owns a playing game, then dies without handover: no heartbeat, no
+	// release — only its 150ms TTL runs out.
+	podA := newTestPod(t, pool, "pod-a")
+	podA.leases.WithTTL(150 * time.Millisecond)
+	gameID, _ := createGameOn(t, pool, podA)
+	if status, _ := postJSON(t, podA.public.URL+"/api/games/"+gameID+"/join",
+		map[string]any{"name": "Bob"}, nil); status != http.StatusCreated {
+		t.Fatalf("join: status %d", status)
+	}
+	// Re-acquire so the short TTL applies, then "crash" A.
+	if _, acquired, err := podA.leases.TryAcquire(context.Background(), gameID); err != nil || !acquired {
+		t.Fatalf("short-ttl reacquire: %v/%v", acquired, err)
+	}
+
+	// Pod B never saw this game. Its sweeper alone must adopt it.
+	storeB := NewStore(NewPostgresRepo(pool))
+	t.Cleanup(storeB.Close)
+	lmB := lease.NewManager(pool, "pod-b-sweeper", log)
+	t.Cleanup(lmB.Close)
+	storeB.SetLeaseManager(lmB)
+
+	time.Sleep(300 * time.Millisecond) // let A's lease expire
+	ids, err := storeB.repo.OrphanPlayingGames(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("orphan query: %v", err)
+	}
+	found := false
+	for _, id := range ids {
+		if id == gameID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("orphan query missed the game (got %v)", ids)
+	}
+
+	storeB.AdoptGame(context.Background(), gameID)
+	if epoch, held := lmB.Held(gameID); !held || epoch != 2 {
+		t.Fatalf("B after adopt: held=%v epoch=%d, want true/2", held, epoch)
+	}
+	if !hasClockTimer(storeB, gameID) {
+		t.Fatal("adopted game has no clock timer — the takeover didn't re-arm")
+	}
+}
+
 // TestStaleEpochWriteFencedOff is the split-brain scenario end to end: a pod
 // that lost its lease (GC pause past the TTL) must have its journal writes
 // rejected once a new owner has taken over.

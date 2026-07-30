@@ -24,8 +24,10 @@ func botName(seatIndex int) string {
 	}
 }
 
+// Owner-only, like armClock: without the gate every pod caching a bot game
+// would schedule the same bot turn.
 func (s *Store) maybeScheduleBot(rec *GameRecord) {
-	if rec == nil {
+	if rec == nil || !s.ownsGame(rec.ID) {
 		return
 	}
 	go func() {

@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemline-gateway
+  namespace: gemline
+  labels:
+    app: gemline-gateway
+spec:
+  # Gateways terminate WebSockets and public HTTP; they never own a game.
+  # Game commands are proxied to the owning gamesvc (owner_addr in the lease
+  # table) or to the gemline-gamesvc Service for games with no owner yet.
+  # Deploying game logic therefore never drops a client connection.
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: gemline-gateway
+  template:
+    metadata:
+      labels:
+        app: gemline-gateway
+    spec:
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: gemline-gateway
+      containers:
+        - name: gateway
+          image: ghcr.io/alexis-marcel/gemline-server:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: gemline-env
+          env:
+            - name: ROLE
+              value: "gateway"
+            - name: ADDR
+              value: ":8080"
+            - name: GAMESVC_ADDR
+              value: "gemline-gamesvc:8090"
+            - name: REDIS_URL
+              value: "redis://gemline-redis:6379"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://alloy.monitoring.svc.cluster.local:4318"
+            - name: OTEL_SERVICE_NAME
+              value: "gemline-gateway"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=gemline,k8s.pod.name=$(POD_NAME)"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          # preStop sleep lets Traefik's endpoint controller pull this pod
+          # from the pool before the process stops accepting connections.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop: ["ALL"]

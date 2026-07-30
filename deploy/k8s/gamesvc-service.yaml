@@ -1,0 +1,20 @@
+# Internal-only Service: the default target for game commands whose game has
+# no live owner yet (the receiving pod claims the lease). Owner-addressed
+# forwards bypass it and dial the pod IP from the lease table directly.
+# Never exposed through the ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemline-gamesvc
+  namespace: gemline
+  labels:
+    # servicemonitor.yaml selects on this label — keep them in sync.
+    app: gemline-gamesvc
+spec:
+  type: ClusterIP
+  selector:
+    app: gemline-gamesvc
+  ports:
+    - name: internal
+      port: 8090
+      targetPort: internal

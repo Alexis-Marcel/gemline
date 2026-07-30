@@ -12,11 +12,31 @@ const matcherTickInterval = 1500 * time.Millisecond
 // matcherPlayerCounts enumerates the room sizes the matcher supports.
 var matcherPlayerCounts = []int{2, 3, 4, 5, 6}
 
-// Enqueue inserts (or refreshes) the caller's matchmaking ticket. ON CONFLICT
-// DO UPDATE makes re-clicking idempotent and bumps the user to the back of the
-// queue rather than stacking duplicate rows.
+// Enqueue inserts (or refreshes) the caller's matchmaking ticket, then rings
+// the matchmaker's doorbell so the elected matcher ticks now instead of on its
+// next interval. ON CONFLICT DO UPDATE makes re-clicking idempotent and bumps
+// the user to the back of the queue rather than stacking duplicate rows.
 func (s *Store) Enqueue(ctx context.Context, userID string, players int, mode string, rating int) error {
-	return s.repo.EnqueueMatchmake(ctx, userID, players, mode, rating)
+	if err := s.repo.EnqueueMatchmake(ctx, userID, players, mode, rating); err != nil {
+		return err
+	}
+	if s.bus != nil {
+		// Best-effort: a lost wake just means matching waits for the ticker.
+		if err := s.bus.PublishMatchmake(ctx); err != nil {
+			slog.Default().Warn("matchmake wake publish failed", "err", err)
+		}
+	}
+	return nil
+}
+
+// WakeMatcher nudges the local matcher loop (if one is running) to tick
+// immediately. Non-blocking: the 1-slot buffer coalesces bursts, and a pod
+// that isn't the elected matcher simply never drains it.
+func (s *Store) WakeMatcher() {
+	select {
+	case s.matchWake <- struct{}{}:
+	default:
+	}
 }
 
 // CancelMatchmake removes the caller's ticket. Safe to call when no ticket
@@ -43,9 +63,12 @@ type QueueUpdate struct {
 	ETASeconds *int
 }
 
-// StartMatcher runs one matcher pass every matcherTickInterval until ctx is
-// cancelled. Every pod calls this independently: SKIP LOCKED on the queue rows
-// means concurrent ticks pick disjoint batches with no coordination.
+// StartMatcher runs matcher passes until ctx is cancelled: on every enqueue
+// wake-up (latency path) and every matcherTickInterval (the fallback for lost
+// wakes and time-based rules like ETA auto-start). Runs on the elected leader
+// only; ctx is the leadership context, so losing the election stops it. SKIP
+// LOCKED plus the transactional tick keep the brief two-leaders overlap of a
+// takeover safe — the two ticks pick disjoint rows.
 func (s *Store) StartMatcher(ctx context.Context, log *slog.Logger, onMatched func([]MatchedSeat), onQueueUpdate func([]QueueUpdate)) {
 	if log == nil {
 		log = slog.Default()
@@ -57,6 +80,8 @@ func (s *Store) StartMatcher(ctx context.Context, log *slog.Logger, onMatched fu
 			select {
 			case <-ctx.Done():
 				return
+			case <-s.matchWake:
+				s.matcherTick(ctx, log, onMatched, onQueueUpdate)
 			case <-ticker.C:
 				s.matcherTick(ctx, log, onMatched, onQueueUpdate)
 			}

@@ -19,8 +19,13 @@ type Repository interface {
 	AppendMove(ctx context.Context, gameID string, ordinal int, m game.Move, winner game.Color, winKind game.WinKind, status Status) error
 
 	// UpdateOutcome persists a state change that did NOT come from a move —
-	// e.g. a clock-driven forfeit. The move log stays untouched.
-	UpdateOutcome(ctx context.Context, gameID string, status Status, winner game.Color, winKind game.WinKind) error
+	// e.g. a clock-driven forfeit. The move log stays untouched. epoch fences
+	// like AppendEvent: non-zero and stale → ErrStaleLease, 0 → unfenced.
+	UpdateOutcome(ctx context.Context, gameID string, status Status, winner game.Color, winKind game.WinKind, epoch int64) error
+
+	// OrphanPlayingGames returns ids of playing games with no live lease,
+	// freshest first, capped at limit. Feeds the orphan sweeper.
+	OrphanPlayingGames(ctx context.Context, limit int) ([]string, error)
 
 	// Profile returns the profile row for userID, or (nil, nil) if there
 	// isn't one yet.
@@ -99,8 +104,10 @@ type Repository interface {
 
 	// AppendEvent atomically bumps games.event_seq and inserts the row,
 	// returning the seq. Concurrent inserts for one gameID are serialized by
-	// the row-level lock on games.id.
-	AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage) (int, error)
+	// the row-level lock on games.id. epoch is the writer's lease epoch: a
+	// non-zero epoch that no longer matches the current lease is rejected
+	// with ErrStaleLease (fencing); 0 writes unfenced.
+	AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage, epoch int64) (int, error)
 
 	// LoadEvent returns one row by (gameID, seq), fetched after a NOTIFY.
 	LoadEvent(ctx context.Context, gameID string, seq int) (EventRow, error)
@@ -259,6 +266,11 @@ type ProfileSearchEntry struct {
 // ErrProfileNotFound is translated to a 404 by the handler.
 var ErrProfileNotFound = errors.New("profile not found")
 
+// ErrStaleLease means the write carried a lease epoch that is no longer the
+// current one: another pod took ownership. The writer must stop acting on this
+// game — its in-memory view is the past.
+var ErrStaleLease = errors.New("stale lease epoch")
+
 // RatingUpdate is what ApplyRatedGame persists per user. OldRating is recorded
 // in rating_history alongside the delta so the UI can show "+12 / -8" without
 // client-side subtraction.
@@ -325,9 +337,10 @@ func (noopRepo) UpdateSeat(context.Context, string, *Seat, Status) error { retur
 func (noopRepo) AppendMove(context.Context, string, int, game.Move, game.Color, game.WinKind, Status) error {
 	return nil
 }
-func (noopRepo) UpdateOutcome(context.Context, string, Status, game.Color, game.WinKind) error {
+func (noopRepo) UpdateOutcome(context.Context, string, Status, game.Color, game.WinKind, int64) error {
 	return nil
 }
+func (noopRepo) OrphanPlayingGames(context.Context, int) ([]string, error) { return nil, nil }
 func (noopRepo) Profile(context.Context, string) (*Profile, error)   { return nil, nil }
 func (noopRepo) UpsertProfile(context.Context, string, string) error { return nil }
 func (noopRepo) EnsureProfile(context.Context, string, string) error { return nil }
@@ -387,7 +400,7 @@ func (noopRepo) SearchProfiles(context.Context, string, int) ([]ProfileSearchEnt
 
 // With no event log, AppendEvent returns seq 0 so the EventPublisher won't wake
 // the bus; runs without DATABASE_URL use the in-process Hub.Deliver path.
-func (noopRepo) AppendEvent(context.Context, string, string, json.RawMessage) (int, error) {
+func (noopRepo) AppendEvent(context.Context, string, string, json.RawMessage, int64) (int, error) {
 	return 0, nil
 }
 func (noopRepo) LoadEvent(context.Context, string, int) (EventRow, error) { return EventRow{}, nil }

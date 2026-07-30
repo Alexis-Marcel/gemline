@@ -146,7 +146,10 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) (*
 // production binary, so test-only routes are never mounted on a shipped server.
 var testRoutes func(*http.ServeMux, *Server)
 
-func (s *Server) Routes() http.Handler {
+// apiHandler builds the route table wrapped in the shared middleware chain.
+// Game commands (mutations on /api/games/{id}/...) go through owned(), which
+// routes them to the pod holding the game's lease; reads stay local.
+func (s *Server) apiHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
@@ -156,27 +159,29 @@ func (s *Server) Routes() http.Handler {
 		testRoutes(mux, s)
 	}
 	mux.HandleFunc("GET /api/games/{id}", s.getGame)
-	mux.HandleFunc("POST /api/games/{id}/join", s.joinGame)
-	mux.HandleFunc("POST /api/games/{id}/moves", s.postMove)
-	mux.HandleFunc("POST /api/games/{id}/resign", s.resignGame)
-	mux.HandleFunc("POST /api/games/{id}/draw/offer", s.offerDraw)
-	mux.HandleFunc("POST /api/games/{id}/draw/accept", s.acceptDraw)
-	mux.HandleFunc("POST /api/games/{id}/draw/decline", s.declineDraw)
-	mux.HandleFunc("POST /api/games/{id}/rematch/offer", s.offerRematch)
-	mux.HandleFunc("POST /api/games/{id}/rematch/decline", s.declineRematch)
-	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/bot", s.addBot)
-	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/bot", s.removeBot)
-	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite", s.inviteSeat)
-	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/invite", s.cancelSeatInvite)
-	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite/decline", s.declineInvite)
-	mux.HandleFunc("POST /api/games/{id}/seat/resolve", s.resolveSeat)
-	mux.HandleFunc("POST /api/games/{id}/leave", s.leaveSeat)
-	mux.HandleFunc("POST /api/games/{id}/start", s.startGame)
+	mux.HandleFunc("POST /api/games/{id}/join", s.owned(s.joinGame))
+	mux.HandleFunc("POST /api/games/{id}/moves", s.owned(s.postMove))
+	mux.HandleFunc("POST /api/games/{id}/resign", s.owned(s.resignGame))
+	mux.HandleFunc("POST /api/games/{id}/draw/offer", s.owned(s.offerDraw))
+	mux.HandleFunc("POST /api/games/{id}/draw/accept", s.owned(s.acceptDraw))
+	mux.HandleFunc("POST /api/games/{id}/draw/decline", s.owned(s.declineDraw))
+	mux.HandleFunc("POST /api/games/{id}/rematch/offer", s.owned(s.offerRematch))
+	mux.HandleFunc("POST /api/games/{id}/rematch/decline", s.owned(s.declineRematch))
+	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/bot", s.owned(s.addBot))
+	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/bot", s.owned(s.removeBot))
+	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite", s.owned(s.inviteSeat))
+	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/invite", s.owned(s.cancelSeatInvite))
+	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite/decline", s.owned(s.declineInvite))
+	mux.HandleFunc("POST /api/games/{id}/seat/resolve", s.owned(s.resolveSeat))
+	mux.HandleFunc("POST /api/games/{id}/leave", s.owned(s.leaveSeat))
+	mux.HandleFunc("POST /api/games/{id}/start", s.owned(s.startGame))
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
 	mux.HandleFunc("GET /api/games/{id}/events", s.getGameEvents)
 	mux.HandleFunc("GET /api/games/{id}/ratings", s.getGameRatings)
 	mux.HandleFunc("GET /api/games/{id}/messages", s.getChat)
-	mux.HandleFunc("POST /api/games/{id}/messages", s.limited("chat", rate.Every(time.Second), 5, s.postChat))
+	// Rate limit at the edge pod (real caller context), then route: a
+	// forwarded command re-enters this chain on the owner but skips owned().
+	mux.HandleFunc("POST /api/games/{id}/messages", s.limited("chat", rate.Every(time.Second), 5, s.owned(s.postChat)))
 	mux.HandleFunc("GET /ws/games/{id}", s.wsGame)
 	mux.HandleFunc("GET /ws/lobby", s.wsLobby)
 
@@ -193,7 +198,19 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/users/{userId}", s.getPublicProfile)
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
-	inner := loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, maxBytesMiddleware(jwtMiddleware(s.verifier, s.log, mux)))))
+	return loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, maxBytesMiddleware(jwtMiddleware(s.verifier, s.log, mux)))))
+}
+
+// InternalRoutes is the pod-to-pod listener serving forwarded game commands:
+// the same API surface, tagged so owned() handles everything locally. It must
+// never be exposed through the ingress or a public Service — unreachability
+// from outside is precisely what makes the forwarded tag trustworthy.
+func (s *Server) InternalRoutes() http.Handler {
+	return markForwarded(s.apiHandler())
+}
+
+func (s *Server) Routes() http.Handler {
+	inner := s.apiHandler()
 
 	// otelhttp wraps the entire app handler so every request starts a server
 	// span. Skip the health probes — kubelet hits them every 5–20 s and the

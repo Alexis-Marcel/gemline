@@ -76,7 +76,7 @@ func TestContentionWhileLive(t *testing.T) {
 	pool := testPool(t)
 	gameID := createGame(t, pool)
 	ctx := context.Background()
-	a := testManager(pool, "pod-a")
+	a := testManager(pool, "pod-a").WithAddr("addr-a")
 	b := testManager(pool, "pod-b")
 
 	if _, acquired, err := a.TryAcquire(ctx, gameID); err != nil || !acquired {
@@ -89,9 +89,9 @@ func TestContentionWhileLive(t *testing.T) {
 	if acquired {
 		t.Fatalf("b stole a live lease (epoch %d)", epoch)
 	}
-	owner, err := b.CurrentOwner(ctx, gameID)
-	if err != nil || owner != "pod-a" {
-		t.Fatalf("CurrentOwner: %q/%v, want pod-a", owner, err)
+	owner, addr, err := b.CurrentOwner(ctx, gameID)
+	if err != nil || owner != "pod-a" || addr != "addr-a" {
+		t.Fatalf("CurrentOwner: %q/%q/%v, want pod-a/addr-a", owner, addr, err)
 	}
 }
 

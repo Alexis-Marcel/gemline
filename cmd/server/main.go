@@ -30,6 +30,7 @@ func main() {
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	addr := getenv("ADDR", ":8080")
+	internalAddr := getenv("INTERNAL_ADDR", ":8090")
 	dsn := os.Getenv("DATABASE_URL")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -65,7 +66,8 @@ func main() {
 		repo = server.NewPostgresRepo(pool)
 		log.Info("persistence enabled", "driver", "postgres")
 		bp = backplane.New(dsn, pool, log)
-		leases = lease.NewManager(pool, lease.NewOwnerID(), log)
+		leases = lease.NewManager(pool, lease.NewOwnerID(), log).
+			WithAddr(advertiseAddr(os.Getenv("ADVERTISE_ADDR"), internalAddr))
 	} else {
 		log.Info("persistence disabled — running with in-memory store only")
 	}
@@ -118,6 +120,26 @@ func main() {
 		}
 	}()
 
+	// Pod-to-pod command forwarding: only meaningful when leases are on, and
+	// deliberately absent from the public Service/ingress.
+	var internalSrv *http.Server
+	if leases != nil {
+		internalSrv = &http.Server{
+			Addr:         internalAddr,
+			Handler:      apiServer.InternalRoutes(),
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		}
+		go func() {
+			log.Info("internal listener up", "addr", internalAddr, "advertise", leases.Addr())
+			if err := internalSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("internal listener error", "err", err)
+				os.Exit(1)
+			}
+		}()
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
@@ -128,6 +150,24 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown error", "err", err)
 	}
+	if internalSrv != nil {
+		if err := internalSrv.Shutdown(shutdownCtx); err != nil {
+			log.Error("internal shutdown error", "err", err)
+		}
+	}
+}
+
+// advertiseAddr resolves what sibling pods should dial to reach this pod's
+// internal listener: ADVERTISE_ADDR when set (k8s: "$(POD_IP):8090"), else
+// loopback + the internal port — right for multi-process local runs.
+func advertiseAddr(advertise, listen string) string {
+	if advertise != "" {
+		return advertise
+	}
+	if strings.HasPrefix(listen, ":") {
+		return "127.0.0.1" + listen
+	}
+	return listen
 }
 
 func getenv(key, fallback string) string {

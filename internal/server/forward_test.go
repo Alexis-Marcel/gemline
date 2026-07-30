@@ -1,0 +1,176 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/alexis-marcel/gemline/internal/db"
+	"github.com/alexis-marcel/gemline/internal/lease"
+)
+
+// Live two-pod integration tests over one shared Postgres, skipped unless
+// GEMLINE_TEST_DATABASE_URL is set so plain `go test ./...` stays hermetic.
+
+type testPod struct {
+	public *httptest.Server
+	leases *lease.Manager
+	store  *Store
+}
+
+func forwardTestPool(t *testing.T) *sql.DB {
+	t.Helper()
+	dsn := os.Getenv("GEMLINE_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("GEMLINE_TEST_DATABASE_URL not set; skipping integration test")
+	}
+	pool, err := db.Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { pool.Close() })
+	return pool
+}
+
+func newTestPod(t *testing.T, pool *sql.DB, name string) *testPod {
+	t.Helper()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := NewStore(NewPostgresRepo(pool))
+	t.Cleanup(store.Close)
+	srv, err := New(log, store, nil, Config{})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	internal := httptest.NewServer(srv.InternalRoutes())
+	t.Cleanup(internal.Close)
+	lm := lease.NewManager(pool, name, log).WithAddr(strings.TrimPrefix(internal.URL, "http://"))
+	t.Cleanup(lm.Close)
+	store.SetLeaseManager(lm)
+	public := httptest.NewServer(srv.Routes())
+	t.Cleanup(public.Close)
+	return &testPod{public: public, leases: lm, store: store}
+}
+
+func postJSON(t *testing.T, url string, body any, headers map[string]string) (int, map[string]json.RawMessage) {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}
+	req, err := http.NewRequest(http.MethodPost, url, &buf)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	var out map[string]json.RawMessage
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
+
+func createGameOn(t *testing.T, pool *sql.DB, pod *testPod) (gameID, token string) {
+	t.Helper()
+	status, body := postJSON(t, pod.public.URL+"/api/games", map[string]any{"players": 2, "name": "Alice"}, nil)
+	if status != http.StatusCreated {
+		t.Fatalf("create game: status %d", status)
+	}
+	var game struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body["game"], &game); err != nil {
+		t.Fatalf("decode game: %v", err)
+	}
+	if err := json.Unmarshal(body["token"], &token); err != nil {
+		t.Fatalf("decode token: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(`DELETE FROM games WHERE id = $1`, game.ID) })
+	return game.ID, token
+}
+
+func TestCommandForwardedToOwner(t *testing.T) {
+	pool := forwardTestPool(t)
+	podA := newTestPod(t, pool, "pod-a")
+	podB := newTestPod(t, pool, "pod-b")
+
+	gameID, tokenAlice := createGameOn(t, pool, podA)
+	if _, held := podA.leases.Held(gameID); !held {
+		t.Fatal("creator pod does not hold the lease")
+	}
+
+	// Bob joins through pod B: B must forward to A, not claim or handle.
+	status, body := postJSON(t, podB.public.URL+"/api/games/"+gameID+"/join",
+		map[string]any{"name": "Bob"}, nil)
+	if status != http.StatusCreated {
+		t.Fatalf("join via B: status %d", status)
+	}
+	var tokenBob string
+	if err := json.Unmarshal(body["token"], &tokenBob); err != nil || tokenBob == "" {
+		t.Fatalf("join via B: no token (err=%v)", err)
+	}
+	if _, held := podB.leases.Held(gameID); held {
+		t.Fatal("B claimed the lease instead of forwarding")
+	}
+
+	// The join was executed on A: its in-memory record must already show Bob
+	// without any reload (a local execution on B could not update A's cache).
+	rec, ok, err := podA.store.Get(context.Background(), gameID)
+	if err != nil || !ok {
+		t.Fatalf("A store get: ok=%v err=%v", ok, err)
+	}
+	rec.Lock()
+	occupied := 0
+	for _, s := range rec.Seats {
+		if s.Occupied {
+			occupied++
+		}
+	}
+	rec.Unlock()
+	if occupied != 2 {
+		t.Fatalf("A's record shows %d occupied seats, want 2", occupied)
+	}
+
+	// Alice plays through B as well; the move must land on A the same way.
+	status, _ = postJSON(t, podB.public.URL+"/api/games/"+gameID+"/moves",
+		map[string]any{"q": 0, "r": 0}, map[string]string{"X-Player-Token": tokenAlice})
+	if status != http.StatusOK {
+		t.Fatalf("move via B: status %d", status)
+	}
+}
+
+func TestCommandClaimsFreeLease(t *testing.T) {
+	pool := forwardTestPool(t)
+	podA := newTestPod(t, pool, "pod-a")
+	podB := newTestPod(t, pool, "pod-b")
+
+	gameID, _ := createGameOn(t, pool, podA)
+
+	// A releases (clean-shutdown situation): the next command through B must
+	// claim ownership locally instead of forwarding into the void.
+	podA.leases.Release(context.Background(), gameID)
+
+	status, body := postJSON(t, podB.public.URL+"/api/games/"+gameID+"/join",
+		map[string]any{"name": "Bob"}, nil)
+	if status != http.StatusCreated {
+		t.Fatalf("join via B: status %d (body %v)", status, body)
+	}
+	if _, held := podB.leases.Held(gameID); !held {
+		t.Fatal("B did not claim the free lease")
+	}
+}

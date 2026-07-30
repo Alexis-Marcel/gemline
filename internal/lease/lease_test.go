@@ -82,16 +82,15 @@ func TestContentionWhileLive(t *testing.T) {
 	if _, acquired, err := a.TryAcquire(ctx, gameID); err != nil || !acquired {
 		t.Fatalf("a acquire: %v/%v", acquired, err)
 	}
-	epoch, acquired, err := b.TryAcquire(ctx, gameID)
+	g, err := b.Acquire(ctx, gameID)
 	if err != nil {
 		t.Fatalf("b acquire: %v", err)
 	}
-	if acquired {
-		t.Fatalf("b stole a live lease (epoch %d)", epoch)
+	if g.Acquired {
+		t.Fatalf("b stole a live lease (epoch %d)", g.Epoch)
 	}
-	owner, addr, err := b.CurrentOwner(ctx, gameID)
-	if err != nil || owner != "pod-a" || addr != "addr-a" {
-		t.Fatalf("CurrentOwner: %q/%q/%v, want pod-a/addr-a", owner, addr, err)
+	if g.Owner != "pod-a" || g.Addr != "addr-a" || g.Epoch != 1 {
+		t.Fatalf("Grant: %+v, want owner pod-a addr addr-a epoch 1", g)
 	}
 }
 

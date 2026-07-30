@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -39,8 +41,10 @@ var forwardTransport = &http.Transport{
 // owned routes a game command to the game's owner: handled locally when this
 // pod holds (or can claim) the lease, proxied to the live owner's internal
 // listener otherwise. Every fallback (no manager, DB error, ownerless lease,
-// addr-less owner) is "handle locally" — affinity is an optimization layer,
-// never a reason to fail a command.
+// addr-less or unreachable owner) is "handle locally" — affinity is an
+// optimization layer, never a reason to fail a command. Local handling without
+// the lease is safe: it writes with epoch 0 (unfenced) under the same DB
+// serialization as before affinity existed.
 func (s *Server) owned(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lm := s.store.leases
@@ -53,22 +57,34 @@ func (s *Server) owned(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		// Not ours: claim it if free or expired; a live lease elsewhere makes
-		// TryAcquire return acquired=false and we forward instead.
-		if _, acquired, err := lm.TryAcquire(r.Context(), gameID); acquired || err != nil {
+		// One round-trip: claim the lease if free or expired, or learn who
+		// holds it.
+		grant, err := lm.Acquire(r.Context(), gameID)
+		if err != nil || grant.Acquired || grant.Addr == "" || grant.Addr == lm.Addr() {
 			next(w, r)
 			return
 		}
-		owner, addr, err := lm.CurrentOwner(r.Context(), gameID)
-		if err != nil || addr == "" || addr == lm.Addr() {
-			next(w, r)
+
+		// Buffer the body (capped upstream at 32 KiB) so an unreachable owner
+		// lets us replay the request locally instead of failing the command.
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
-		s.proxyTo(w, r, gameID, owner, addr)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		s.proxyTo(w, r, gameID, grant.Owner, grant.Addr, func() {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			next(w, r)
+		})
 	}
 }
 
-func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, gameID, owner, addr string) {
+// proxyTo relays the command to the owner's internal listener. retryLocal runs
+// on transport-level failure (dial refused, header timeout) — errors raised
+// before any response bytes were written, so replaying locally is safe. A
+// failure mid-response aborts instead (the command may have executed).
+func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, gameID, owner, addr string, retryLocal func()) {
 	target := &url.URL{Scheme: "http", Host: addr}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -79,9 +95,9 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, gameID, owner, 
 			pr.SetXForwarded()
 		},
 		Transport: forwardTransport,
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			s.log.Warn("command forward failed", "game", gameID, "owner", owner, "err", err)
-			writeError(w, http.StatusBadGateway, "le pod propriétaire de la partie est injoignable")
+		ErrorHandler: func(_ http.ResponseWriter, _ *http.Request, err error) {
+			s.log.Warn("forward failed, handling locally", "game", gameID, "owner", owner, "err", err)
+			retryLocal()
 		},
 	}
 	s.log.Info("command forwarded", "game", gameID, "owner", owner, "path", r.URL.Path)

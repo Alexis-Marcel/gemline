@@ -86,50 +86,70 @@ func (m *Manager) Held(gameID string) (int64, bool) {
 	return epoch, ok
 }
 
-// The WHERE clause makes the upsert succeed in exactly three cases: the lease
-// is free (plain insert), already ours (renewal, epoch unchanged), or expired
-// (takeover, epoch+1). A valid lease held by someone else matches nothing and
-// returns no row. Concurrent calls serialize on the row lock, so exactly one
-// contender wins a takeover.
-const acquireSQL = `
-INSERT INTO game_leases (game_id, owner_id, owner_addr, epoch, expires_at)
-VALUES ($1, $2, $3, 1, NOW() + make_interval(secs => $4))
-ON CONFLICT (game_id) DO UPDATE
-   SET owner_id   = EXCLUDED.owner_id,
-       owner_addr = EXCLUDED.owner_addr,
-       epoch      = game_leases.epoch
-                    + CASE WHEN game_leases.owner_id = EXCLUDED.owner_id THEN 0 ELSE 1 END,
-       expires_at = EXCLUDED.expires_at
- WHERE game_leases.owner_id = EXCLUDED.owner_id
-    OR game_leases.expires_at < NOW()
-RETURNING epoch`
-
-// TryAcquire attempts to take (or renew) the lease on gameID. Returns
-// acquired=false without error when a live lease is held by another pod.
-func (m *Manager) TryAcquire(ctx context.Context, gameID string) (epoch int64, acquired bool, err error) {
-	err = m.pool.QueryRowContext(ctx, acquireSQL, gameID, m.owner, m.addr, m.ttl.Seconds()).Scan(&epoch)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, err
-	}
-	m.mu.Lock()
-	m.held[gameID] = epoch
-	m.mu.Unlock()
-	return epoch, true, nil
+// Grant is the outcome of an acquisition attempt: either we hold the lease at
+// Epoch, or Owner/Addr identify who does.
+type Grant struct {
+	Epoch    int64
+	Acquired bool
+	Owner    string // set when not acquired
+	Addr     string
 }
 
-// CurrentOwner returns the pod holding a live lease on gameID and its internal
-// address, or ("", "") if the lease is free or expired.
-func (m *Manager) CurrentOwner(ctx context.Context, gameID string) (owner, addr string, err error) {
-	err = m.pool.QueryRowContext(ctx,
-		`SELECT owner_id, owner_addr FROM game_leases WHERE game_id = $1 AND expires_at >= NOW()`, gameID,
-	).Scan(&owner, &addr)
+// The upsert's WHERE clause makes it succeed in exactly three cases: the lease
+// is free (plain insert), already ours (renewal, epoch unchanged), or expired
+// (takeover, epoch+1). A valid lease held by someone else matches nothing —
+// then the second branch reports the current holder, all in one round-trip.
+// Concurrent calls serialize on the row lock, so exactly one contender wins a
+// takeover.
+const acquireSQL = `
+WITH attempt AS (
+    INSERT INTO game_leases (game_id, owner_id, owner_addr, epoch, expires_at)
+    VALUES ($1, $2, $3, 1, NOW() + make_interval(secs => $4))
+    ON CONFLICT (game_id) DO UPDATE
+       SET owner_id   = EXCLUDED.owner_id,
+           owner_addr = EXCLUDED.owner_addr,
+           epoch      = game_leases.epoch
+                        + CASE WHEN game_leases.owner_id = EXCLUDED.owner_id THEN 0 ELSE 1 END,
+           expires_at = EXCLUDED.expires_at
+     WHERE game_leases.owner_id = EXCLUDED.owner_id
+        OR game_leases.expires_at < NOW()
+    RETURNING epoch
+)
+SELECT epoch, TRUE, '', '' FROM attempt
+UNION ALL
+SELECT l.epoch, FALSE, l.owner_id, l.owner_addr
+  FROM game_leases l
+ WHERE l.game_id = $1 AND NOT EXISTS (SELECT 1 FROM attempt)`
+
+// Acquire attempts to take (or renew) the lease on gameID; when a live lease
+// is held by another pod it returns that holder instead, without error.
+//
+// Rare edge: two pods inserting the very first lease row simultaneously — the
+// loser sees neither its attempt nor the winner's row (statement snapshot
+// predates it) and gets a zero Grant. Callers treat "not acquired, no owner"
+// as handle-locally, which is the safe degradation.
+func (m *Manager) Acquire(ctx context.Context, gameID string) (Grant, error) {
+	var g Grant
+	err := m.pool.QueryRowContext(ctx, acquireSQL, gameID, m.owner, m.addr, m.ttl.Seconds()).
+		Scan(&g.Epoch, &g.Acquired, &g.Owner, &g.Addr)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", nil
+		return Grant{}, nil
 	}
-	return owner, addr, err
+	if err != nil {
+		return Grant{}, err
+	}
+	if g.Acquired {
+		m.mu.Lock()
+		m.held[gameID] = g.Epoch
+		m.mu.Unlock()
+	}
+	return g, nil
+}
+
+// TryAcquire is Acquire without the holder details.
+func (m *Manager) TryAcquire(ctx context.Context, gameID string) (epoch int64, acquired bool, err error) {
+	g, err := m.Acquire(ctx, gameID)
+	return g.Epoch, g.Acquired, err
 }
 
 // EnsureHeld acquires the lease on gameID unless this pod already holds it,
@@ -139,20 +159,16 @@ func (m *Manager) EnsureHeld(ctx context.Context, gameID string) {
 	if _, ok := m.Held(gameID); ok {
 		return
 	}
-	epoch, acquired, err := m.TryAcquire(ctx, gameID)
+	g, err := m.Acquire(ctx, gameID)
 	if err != nil {
 		m.log.Warn("lease acquire failed", "game", gameID, "err", err)
 		return
 	}
-	if acquired {
-		m.log.Info("lease acquired", "game", gameID, "epoch", epoch, "owner", m.owner)
+	if g.Acquired {
+		m.log.Info("lease acquired", "game", gameID, "epoch", g.Epoch, "owner", m.owner)
 		return
 	}
-	other, _, err := m.CurrentOwner(ctx, gameID)
-	if err != nil {
-		other = "unknown"
-	}
-	m.log.Info("lease held elsewhere", "game", gameID, "owner", other)
+	m.log.Info("lease held elsewhere", "game", gameID, "owner", g.Owner)
 }
 
 // Release drops the lease so another pod can take it immediately instead of

@@ -55,7 +55,7 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) (*
 		store:          store,
 		hub:            hub,
 		lobby:          lobby,
-		events:         NewEventPublisher(store.Repo(), hub, bp, log, podID, store.Invalidate),
+		events:         NewEventPublisher(store.Repo(), hub, bp, log, podID, store.Invalidate, store.LeaseEpoch),
 		backplane:      bp,
 		log:            log,
 		limiter:        newRateLimiter(),

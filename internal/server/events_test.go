@@ -19,7 +19,7 @@ func newTestPublisher(t *testing.T, podID string, invalidate func(string)) (*Eve
 	hub := NewHub(log, "")
 	repo := noopRepo{}
 	// nil backplane = single-process fallback path.
-	p := NewEventPublisher(repo, hub, nil, log, podID, invalidate)
+	p := NewEventPublisher(repo, hub, nil, log, podID, invalidate, nil)
 	return p, hub, repo
 }
 

@@ -807,19 +807,36 @@ func deriveOutcome(status Status, mine, winner game.Color) string {
 // bumps games.event_seq and feeds it to the INSERT in one statement; the
 // row-level lock on games.id serializes concurrent writers. A missing gameID
 // matches zero rows and surfaces as ErrGameNotFound.
-func (r *PostgresRepo) AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage) (int, error) {
+// The fencing check sits inside the same statement that takes the games row
+// lock: matching the epoch and appending are atomic, so a takeover committing
+// between "check" and "write" is impossible — it would have blocked on the
+// same row lock.
+func (r *PostgresRepo) AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage, epoch int64) (int, error) {
 	row := r.pool.QueryRowContext(ctx, `
 		WITH s AS (
 			UPDATE games SET event_seq = event_seq + 1
-			WHERE id = $1 RETURNING event_seq
+			WHERE id = $1
+			  AND ($4 = 0 OR EXISTS (
+			        SELECT 1 FROM game_leases l
+			         WHERE l.game_id = $1 AND l.epoch = $4))
+			RETURNING event_seq
 		)
-		INSERT INTO game_events (game_id, seq, type, payload)
-		SELECT $1, s.event_seq, $2, $3 FROM s
+		INSERT INTO game_events (game_id, seq, type, payload, epoch)
+		SELECT $1, s.event_seq, $2, $3, $4 FROM s
 		RETURNING seq
-	`, gameID, eventType, []byte(payload))
+	`, gameID, eventType, []byte(payload), epoch)
 	var seq int
 	if err := row.Scan(&seq); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			if epoch != 0 {
+				// Disambiguate: no row can mean deleted game or fenced write.
+				var exists bool
+				if e := r.pool.QueryRowContext(ctx,
+					`SELECT EXISTS (SELECT 1 FROM games WHERE id = $1)`, gameID,
+				).Scan(&exists); e == nil && exists {
+					return 0, ErrStaleLease
+				}
+			}
 			return 0, ErrGameNotFound
 		}
 		return 0, fmt.Errorf("append event: %w", err)

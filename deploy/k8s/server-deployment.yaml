@@ -42,12 +42,26 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            # Pod-to-pod game-command forwarding. Deliberately absent from the
+            # Service: pods dial each other's IP directly (owner_addr in
+            # game_leases), and unreachability from the ingress is what makes
+            # the forwarded tag trustworthy.
+            - name: internal
+              containerPort: 8090
           envFrom:
             - secretRef:
                 name: gemline-env
           env:
             - name: ADDR
               value: ":8080"
+            - name: INTERNAL_ADDR
+              value: ":8090"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: ADVERTISE_ADDR
+              value: "$(POD_IP):8090"
             # OTLP traces go to Alloy (cross-namespace, hence the FQDN). The
             # SDK appends /v1/traces. Empty endpoint = tracing disabled.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT

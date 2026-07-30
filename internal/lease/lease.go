@@ -26,6 +26,7 @@ const DefaultTTL = 15 * time.Second
 type Manager struct {
 	pool  *sql.DB
 	owner string
+	addr  string
 	ttl   time.Duration
 	log   *slog.Logger
 
@@ -51,6 +52,15 @@ func (m *Manager) WithTTL(d time.Duration) *Manager {
 	m.ttl = d
 	return m
 }
+
+// WithAddr sets the internal address advertised in this pod's leases, where
+// sibling pods forward game commands. Empty disables forwarding to this pod.
+func (m *Manager) WithAddr(addr string) *Manager {
+	m.addr = addr
+	return m
+}
+
+func (m *Manager) Addr() string { return m.addr }
 
 // NewOwnerID returns "<hostname>-<hex>": the hostname maps a lease to a pod in
 // k8s, the random suffix disambiguates local processes sharing one hostname.
@@ -82,10 +92,11 @@ func (m *Manager) Held(gameID string) (int64, bool) {
 // returns no row. Concurrent calls serialize on the row lock, so exactly one
 // contender wins a takeover.
 const acquireSQL = `
-INSERT INTO game_leases (game_id, owner_id, epoch, expires_at)
-VALUES ($1, $2, 1, NOW() + make_interval(secs => $3))
+INSERT INTO game_leases (game_id, owner_id, owner_addr, epoch, expires_at)
+VALUES ($1, $2, $3, 1, NOW() + make_interval(secs => $4))
 ON CONFLICT (game_id) DO UPDATE
    SET owner_id   = EXCLUDED.owner_id,
+       owner_addr = EXCLUDED.owner_addr,
        epoch      = game_leases.epoch
                     + CASE WHEN game_leases.owner_id = EXCLUDED.owner_id THEN 0 ELSE 1 END,
        expires_at = EXCLUDED.expires_at
@@ -96,7 +107,7 @@ RETURNING epoch`
 // TryAcquire attempts to take (or renew) the lease on gameID. Returns
 // acquired=false without error when a live lease is held by another pod.
 func (m *Manager) TryAcquire(ctx context.Context, gameID string) (epoch int64, acquired bool, err error) {
-	err = m.pool.QueryRowContext(ctx, acquireSQL, gameID, m.owner, m.ttl.Seconds()).Scan(&epoch)
+	err = m.pool.QueryRowContext(ctx, acquireSQL, gameID, m.owner, m.addr, m.ttl.Seconds()).Scan(&epoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -109,17 +120,16 @@ func (m *Manager) TryAcquire(ctx context.Context, gameID string) (epoch int64, a
 	return epoch, true, nil
 }
 
-// CurrentOwner returns the pod holding a live lease on gameID, or "" if the
-// lease is free or expired.
-func (m *Manager) CurrentOwner(ctx context.Context, gameID string) (string, error) {
-	var owner string
-	err := m.pool.QueryRowContext(ctx,
-		`SELECT owner_id FROM game_leases WHERE game_id = $1 AND expires_at >= NOW()`, gameID,
-	).Scan(&owner)
+// CurrentOwner returns the pod holding a live lease on gameID and its internal
+// address, or ("", "") if the lease is free or expired.
+func (m *Manager) CurrentOwner(ctx context.Context, gameID string) (owner, addr string, err error) {
+	err = m.pool.QueryRowContext(ctx,
+		`SELECT owner_id, owner_addr FROM game_leases WHERE game_id = $1 AND expires_at >= NOW()`, gameID,
+	).Scan(&owner, &addr)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+		return "", "", nil
 	}
-	return owner, err
+	return owner, addr, err
 }
 
 // EnsureHeld acquires the lease on gameID unless this pod already holds it,
@@ -138,7 +148,7 @@ func (m *Manager) EnsureHeld(ctx context.Context, gameID string) {
 		m.log.Info("lease acquired", "game", gameID, "epoch", epoch, "owner", m.owner)
 		return
 	}
-	other, err := m.CurrentOwner(ctx, gameID)
+	other, _, err := m.CurrentOwner(ctx, gameID)
 	if err != nil {
 		other = "unknown"
 	}

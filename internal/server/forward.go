@@ -60,7 +60,15 @@ func (s *Server) owned(next http.HandlerFunc) http.HandlerFunc {
 		// One round-trip: claim the lease if free or expired, or learn who
 		// holds it.
 		grant, err := lm.Acquire(r.Context(), gameID)
-		if err != nil || grant.Acquired || grant.Addr == "" || grant.Addr == lm.Addr() {
+		if grant.Acquired {
+			// Takeover by traffic: this command adopted an ownerless game, so
+			// its clock/bot duties must restart here — the handler alone only
+			// re-arms on some paths (a chat message wouldn't).
+			go s.store.AdoptGame(context.WithoutCancel(r.Context()), gameID)
+			next(w, r)
+			return
+		}
+		if err != nil || grant.Addr == "" || grant.Addr == lm.Addr() {
 			next(w, r)
 			return
 		}

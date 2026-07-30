@@ -81,11 +81,14 @@ func main() {
 	store.StartStaleGameCleaner(log)
 	defer store.Close()
 	if leases != nil {
+		// Wire the store first: the lease-lost callback must exist before the
+		// first heartbeat can detect a takeover.
+		store.SetLeaseManager(leases)
 		leases.Start(ctx)
 		// Deferred before pool.Close (LIFO), so the release-all DELETE still
 		// has a live pool; a clean shutdown hands games over immediately.
 		defer leases.Close()
-		store.SetLeaseManager(leases)
+		store.StartOrphanSweeper(ctx, log)
 		log.Info("lease manager started", "owner", leases.Owner())
 	}
 

@@ -19,8 +19,13 @@ type Repository interface {
 	AppendMove(ctx context.Context, gameID string, ordinal int, m game.Move, winner game.Color, winKind game.WinKind, status Status) error
 
 	// UpdateOutcome persists a state change that did NOT come from a move —
-	// e.g. a clock-driven forfeit. The move log stays untouched.
-	UpdateOutcome(ctx context.Context, gameID string, status Status, winner game.Color, winKind game.WinKind) error
+	// e.g. a clock-driven forfeit. The move log stays untouched. epoch fences
+	// like AppendEvent: non-zero and stale → ErrStaleLease, 0 → unfenced.
+	UpdateOutcome(ctx context.Context, gameID string, status Status, winner game.Color, winKind game.WinKind, epoch int64) error
+
+	// OrphanPlayingGames returns ids of playing games with no live lease,
+	// freshest first, capped at limit. Feeds the orphan sweeper.
+	OrphanPlayingGames(ctx context.Context, limit int) ([]string, error)
 
 	// Profile returns the profile row for userID, or (nil, nil) if there
 	// isn't one yet.
@@ -332,9 +337,10 @@ func (noopRepo) UpdateSeat(context.Context, string, *Seat, Status) error { retur
 func (noopRepo) AppendMove(context.Context, string, int, game.Move, game.Color, game.WinKind, Status) error {
 	return nil
 }
-func (noopRepo) UpdateOutcome(context.Context, string, Status, game.Color, game.WinKind) error {
+func (noopRepo) UpdateOutcome(context.Context, string, Status, game.Color, game.WinKind, int64) error {
 	return nil
 }
+func (noopRepo) OrphanPlayingGames(context.Context, int) ([]string, error) { return nil, nil }
 func (noopRepo) Profile(context.Context, string) (*Profile, error)   { return nil, nil }
 func (noopRepo) UpsertProfile(context.Context, string, string) error { return nil }
 func (noopRepo) EnsureProfile(context.Context, string, string) error { return nil }

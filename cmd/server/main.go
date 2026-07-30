@@ -13,6 +13,7 @@ import (
 
 	"github.com/alexis-marcel/gemline/internal/backplane"
 	"github.com/alexis-marcel/gemline/internal/db"
+	"github.com/alexis-marcel/gemline/internal/lease"
 	"github.com/alexis-marcel/gemline/internal/server"
 	"github.com/alexis-marcel/gemline/internal/tracing"
 	"github.com/joho/godotenv"
@@ -50,8 +51,9 @@ func main() {
 	}()
 
 	var (
-		repo server.Repository
-		bp   *backplane.Backplane
+		repo   server.Repository
+		bp     *backplane.Backplane
+		leases *lease.Manager
 	)
 	if dsn != "" {
 		pool, err := db.Open(ctx, dsn)
@@ -63,6 +65,7 @@ func main() {
 		repo = server.NewPostgresRepo(pool)
 		log.Info("persistence enabled", "driver", "postgres")
 		bp = backplane.New(dsn, pool, log)
+		leases = lease.NewManager(pool, lease.NewOwnerID(), log)
 	} else {
 		log.Info("persistence disabled — running with in-memory store only")
 	}
@@ -75,6 +78,14 @@ func main() {
 	store := server.NewStore(repo)
 	store.StartStaleGameCleaner(log)
 	defer store.Close()
+	if leases != nil {
+		leases.Start(ctx)
+		// Deferred before pool.Close (LIFO), so the release-all DELETE still
+		// has a live pool; a clean shutdown hands games over immediately.
+		defer leases.Close()
+		store.SetLeaseManager(leases)
+		log.Info("lease manager started", "owner", leases.Owner())
+	}
 
 	// server.New registers the backplane handlers; Start the listener only
 	// afterwards so the first LISTEN session subscribes to the right channels.

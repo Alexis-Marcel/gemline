@@ -14,6 +14,7 @@ import (
 	"github.com/alexis-marcel/gemline/internal/ai"
 	"github.com/alexis-marcel/gemline/internal/elo"
 	"github.com/alexis-marcel/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/lease"
 )
 
 type Status string
@@ -157,6 +158,10 @@ type Store struct {
 
 	// cleanerStop halts the stale-game cleaner; nil until it's started.
 	cleanerStop chan struct{}
+
+	// leases claims per-game ownership; nil in in-memory mode. Step 1a:
+	// ownership is observed and logged, nothing routes on it yet.
+	leases *lease.Manager
 }
 
 func (s *Store) Repo() Repository { return s.repo }
@@ -185,6 +190,18 @@ func NewStore(repo Repository) *Store {
 		botDelay:        600 * time.Millisecond,
 		disconnectGrace: DisconnectGracePeriod,
 	}
+}
+
+// SetLeaseManager wires per-game ownership leases (Postgres-backed runs only).
+func (s *Store) SetLeaseManager(m *lease.Manager) { s.leases = m }
+
+// ensureLease claims ownership of a game entering this pod's cache. Failure to
+// acquire (held elsewhere, DB error) must never block serving the game.
+func (s *Store) ensureLease(ctx context.Context, gameID string) {
+	if s.leases == nil {
+		return
+	}
+	s.leases.EnsureHeld(ctx, gameID)
 }
 
 // WithDisconnectGrace overrides the disconnect-grace timeout (for tests).
@@ -525,6 +542,7 @@ func (s *Store) Create(ctx context.Context, numPlayers int, vis Visibility) (*Ga
 	s.mu.Lock()
 	s.games[rec.ID] = rec
 	s.mu.Unlock()
+	s.ensureLease(ctx, rec.ID)
 	return rec, nil
 }
 
@@ -580,6 +598,7 @@ func (s *Store) Get(ctx context.Context, id string) (*GameRecord, bool, error) {
 		loaded.Lock()
 		s.armClock(loaded)
 		loaded.Unlock()
+		s.ensureLease(ctx, id)
 	}
 	return loaded, true, nil
 }

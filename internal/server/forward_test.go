@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+
+	"github.com/alexis-marcel/gemline/internal/bus"
 	"github.com/alexis-marcel/gemline/internal/db"
 	"github.com/alexis-marcel/gemline/internal/lease"
 )
@@ -44,13 +47,33 @@ func forwardTestPool(t *testing.T) *sql.DB {
 }
 
 func newTestPod(t *testing.T, pool *sql.DB, name string) *testPod {
+	return newTestPodBus(t, pool, name, "")
+}
+
+// newTestPodBus builds a full pod (store, server, lease manager, public +
+// internal listeners) — with a Redis bus when redisAddr is non-empty.
+func newTestPodBus(t *testing.T, pool *sql.DB, name, redisAddr string) *testPod {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := NewStore(NewPostgresRepo(pool))
 	t.Cleanup(store.Close)
-	srv, err := New(log, store, nil, Config{})
+	var b Bus
+	if redisAddr != "" {
+		rb, err := bus.NewRedis("redis://"+redisAddr, log)
+		if err != nil {
+			t.Fatalf("bus.NewRedis: %v", err)
+		}
+		t.Cleanup(func() { _ = rb.Close() })
+		b = rb
+	}
+	srv, err := New(log, store, b, Config{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
+	}
+	if b != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		b.Start(ctx)
 	}
 	internal := httptest.NewServer(srv.InternalRoutes())
 	t.Cleanup(internal.Close)
@@ -177,6 +200,54 @@ func TestForwardFallsBackToLocalWhenOwnerUnreachable(t *testing.T) {
 	var token string
 	if err := json.Unmarshal(body["token"], &token); err != nil || token == "" {
 		t.Fatalf("join via B with dead owner: no token (err=%v)", err)
+	}
+}
+
+func hasCached(s *Store, gameID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.games[gameID]
+	return ok
+}
+
+// TestRedisBusInvalidatesRemoteCache is the step-2 flow end to end: pod B
+// caches a game it doesn't own (watching its Redis channel), a write lands on
+// owner A, and A's publish must reach B and drop its now-stale cache.
+func TestRedisBusInvalidatesRemoteCache(t *testing.T) {
+	pool := forwardTestPool(t)
+	mr := miniredis.RunT(t)
+	podA := newTestPodBus(t, pool, "pod-a", mr.Addr())
+	podB := newTestPodBus(t, pool, "pod-b", mr.Addr())
+
+	gameID, tokenAlice := createGameOn(t, pool, podA)
+	if status, _ := postJSON(t, podA.public.URL+"/api/games/"+gameID+"/join",
+		map[string]any{"name": "Bob"}, nil); status != http.StatusCreated {
+		t.Fatalf("join: status %d", status)
+	}
+
+	// A read via B fills B's cache — and, through the bus interest hook,
+	// subscribes B to this game's channel.
+	resp, err := http.Get(podB.public.URL + "/api/games/" + gameID)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("get via B: %v/%d", err, resp.StatusCode)
+	}
+	resp.Body.Close()
+	if !hasCached(podB.store, gameID) {
+		t.Fatal("B did not cache the game")
+	}
+
+	// Alice plays through B: the command forwards to owner A, A appends and
+	// publishes on game:{id}; B is watching and must invalidate its cache.
+	if status, _ := postJSON(t, podB.public.URL+"/api/games/"+gameID+"/moves",
+		map[string]any{"q": 0, "r": 0}, map[string]string{"X-Player-Token": tokenAlice}); status != http.StatusOK {
+		t.Fatalf("move via B: status %d", status)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && hasCached(podB.store, gameID) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if hasCached(podB.store, gameID) {
+		t.Fatal("B's stale cache survived the owner's publish — invalidation not routed")
 	}
 }
 

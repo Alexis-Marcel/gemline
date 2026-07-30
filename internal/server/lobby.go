@@ -92,7 +92,7 @@ func (s *Server) publishLobby(userID, eventType string, payload any) {
 		s.log.Error("lobby publish: marshal payload", "type", eventType, "err", err)
 		return
 	}
-	if s.backplane == nil {
+	if s.bus == nil {
 		// Single-process: skip the wire format and go straight to the hub.
 		s.lobby.Deliver(userID, Event{Type: eventType, Payload: json.RawMessage(body)})
 		return
@@ -108,7 +108,7 @@ func (s *Server) publishLobby(userID, eventType string, payload any) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
-	if err := s.backplane.Publish(ctx, ChannelLobby, env); err != nil {
+	if err := s.bus.PublishLobby(ctx, env); err != nil {
 		s.log.Error("lobby publish: notify", "user", userID, "type", eventType, "err", err)
 	}
 }

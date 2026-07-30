@@ -162,6 +162,26 @@ type Store struct {
 	// leases claims per-game ownership; nil in in-memory mode. Step 1a:
 	// ownership is observed and logged, nothing routes on it yet.
 	leases *lease.Manager
+
+	// bus receives this pod's per-game interest: a cached record counts as
+	// one Watch, so cross-pod events keep reaching us for invalidation even
+	// with no local WS spectator. Nil when there is no bus.
+	bus Bus
+}
+
+// SetBus wires the fan-out bus for cache-driven interest. Call before serving.
+func (s *Store) SetBus(b Bus) { s.bus = b }
+
+func (s *Store) watchGame(gameID string) {
+	if s.bus != nil {
+		s.bus.WatchGame(gameID)
+	}
+}
+
+func (s *Store) unwatchGame(gameID string) {
+	if s.bus != nil {
+		s.bus.UnwatchGame(gameID)
+	}
 }
 
 func (s *Store) Repo() Repository { return s.repo }
@@ -172,8 +192,12 @@ func (s *Store) Repo() Repository { return s.repo }
 // rec pointer keep using it (and see stale data) until they call Get again.
 func (s *Store) Invalidate(gameID string) {
 	s.mu.Lock()
+	_, existed := s.games[gameID]
 	delete(s.games, gameID)
 	s.mu.Unlock()
+	if existed {
+		s.unwatchGame(gameID)
+	}
 	// Dropping the cache defuses our armed timers (their handlers no-op on a
 	// cache miss). If we own this game, another pod just wrote to it (the
 	// unreachable-owner fallback) and we must re-arm from fresh state, or the
@@ -212,8 +236,12 @@ func (s *Store) SetLeaseManager(m *lease.Manager) {
 		s.clocks.Cancel(gameID)
 		s.presence.CancelGame(gameID)
 		s.mu.Lock()
+		_, existed := s.games[gameID]
 		delete(s.games, gameID)
 		s.mu.Unlock()
+		if existed {
+			s.unwatchGame(gameID)
+		}
 	})
 }
 
@@ -647,6 +675,7 @@ func (s *Store) Create(ctx context.Context, numPlayers int, vis Visibility) (*Ga
 	s.mu.Lock()
 	s.games[rec.ID] = rec
 	s.mu.Unlock()
+	s.watchGame(rec.ID)
 	s.ensureLease(ctx, rec.ID)
 	return rec, nil
 }
@@ -700,6 +729,7 @@ func (s *Store) Get(ctx context.Context, id string) (*GameRecord, bool, error) {
 	s.mu.Unlock()
 
 	if freshlyCached {
+		s.watchGame(id)
 		// Claim before arming: armClock/maybeScheduleBot are owner-gated, so
 		// the lease attempt must come first.
 		s.ensureLease(ctx, id)

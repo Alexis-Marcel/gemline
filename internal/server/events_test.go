@@ -10,7 +10,7 @@ import (
 
 // The Backplane needs a real Postgres, so these tests pin the wiring around it:
 // the noop-repo fallback (Publish becomes a local Deliver) and the
-// cache-invalidation rule (self-originated NOTIFYs skip invalidate, cross-pod
+// cache-invalidation rule (self-originated envelopes skip invalidate, cross-pod
 // ones don't).
 
 func newTestPublisher(t *testing.T, podID string, invalidate func(string)) (*EventPublisher, *Hub, Repository) {
@@ -18,8 +18,8 @@ func newTestPublisher(t *testing.T, podID string, invalidate func(string)) (*Eve
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hub := NewHub(log, "")
 	repo := noopRepo{}
-	// nil backplane = single-process fallback path.
-	p := NewEventPublisher(repo, hub, nil, log, podID, invalidate)
+	// nil bus = single-process fallback path.
+	p := NewEventPublisher(repo, hub, nil, log, podID, invalidate, nil)
 	return p, hub, repo
 }
 
@@ -45,7 +45,7 @@ func TestPublish_NoopFallsBackToLocalDeliver(t *testing.T) {
 }
 
 func TestPublish_NoopWithNoSubscribersIsHarmless(t *testing.T) {
-	// No subs, no DB, no backplane: Publish must not block or panic.
+	// No subs, no DB, no bus: Publish must not block or panic.
 	pub, _, _ := newTestPublisher(t, "pod-a", nil)
 	pub.Publish("game-1", Event{Type: "state", Payload: nil})
 }
@@ -65,7 +65,7 @@ func TestHandleGameEventNotif_SelfPodSkipsInvalidate(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(invalidated) != 0 {
-		t.Fatalf("self-originated NOTIFY must skip invalidate, got %v", invalidated)
+		t.Fatalf("self-originated envelope must skip invalidate, got %v", invalidated)
 	}
 }
 
@@ -84,7 +84,7 @@ func TestHandleGameEventNotif_OtherPodInvalidates(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(invalidated) != 1 || invalidated[0] != "game-1" {
-		t.Fatalf("cross-pod NOTIFY must invalidate the affected game; got %v", invalidated)
+		t.Fatalf("cross-pod envelope must invalidate the affected game; got %v", invalidated)
 	}
 }
 

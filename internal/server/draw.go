@@ -91,7 +91,7 @@ func (s *Store) AcceptDraw(ctx context.Context, gameID, token string) (*GameReco
 	rec.Unlock()
 
 	s.gameEnded(gameID)
-	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind); err != nil {
+	if err := s.repo.UpdateOutcome(ctx, gameID, StatusFinished, winner, winKind, s.LeaseEpoch(gameID)); err != nil {
 		noteSwallowedErr("accept_draw_outcome_persist", err)
 	}
 	if err := s.publishDrawOffer(ctx, gameID, -1); err != nil {

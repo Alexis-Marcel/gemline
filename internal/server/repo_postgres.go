@@ -229,13 +229,58 @@ func (r *PostgresRepo) UpdateSeat(ctx context.Context, gameID string, seat *Seat
 	return tx.Commit()
 }
 
-func (r *PostgresRepo) UpdateOutcome(ctx context.Context, gameID string, status Status, winner game.Color, winKind game.WinKind) error {
-	_, err := r.pool.ExecContext(ctx, `
+// Same fencing shape as AppendEvent: check-and-write in one statement under
+// the games row lock. Outcomes are exactly what duplicate timers race on
+// (double forfeit), so this is the write that matters most.
+func (r *PostgresRepo) UpdateOutcome(ctx context.Context, gameID string, status Status, winner game.Color, winKind game.WinKind, epoch int64) error {
+	res, err := r.pool.ExecContext(ctx, `
 		UPDATE games
 		SET status = $1, winner_color = $2, win_kind = $3, updated_at = NOW()
 		WHERE id = $4
-	`, status, int(winner), int(winKind), gameID)
-	return err
+		  AND ($5 = 0 OR EXISTS (
+		        SELECT 1 FROM game_leases l
+		         WHERE l.game_id = $4 AND l.epoch = $5))
+	`, status, int(winner), int(winKind), gameID, epoch)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 && epoch != 0 {
+		var exists bool
+		if e := r.pool.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM games WHERE id = $1)`, gameID,
+		).Scan(&exists); e == nil && exists {
+			return ErrStaleLease
+		}
+	}
+	return nil
+}
+
+// OrphanPlayingGames lists live games with no valid lease — their owner died
+// without handover, so their timers exist nowhere. Backs the sweeper that
+// adopts them; freshest first so active games revive before stale ones.
+func (r *PostgresRepo) OrphanPlayingGames(ctx context.Context, limit int) ([]string, error) {
+	rows, err := r.pool.QueryContext(ctx, `
+		SELECT g.id FROM games g
+		WHERE g.status = 'playing'
+		  AND NOT EXISTS (
+		        SELECT 1 FROM game_leases l
+		         WHERE l.game_id = g.id AND l.expires_at >= NOW())
+		ORDER BY g.updated_at DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("orphan games: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (r *PostgresRepo) AppendMove(ctx context.Context, gameID string, ordinal int, m game.Move, winner game.Color, winKind game.WinKind, status Status) error {
@@ -807,19 +852,36 @@ func deriveOutcome(status Status, mine, winner game.Color) string {
 // bumps games.event_seq and feeds it to the INSERT in one statement; the
 // row-level lock on games.id serializes concurrent writers. A missing gameID
 // matches zero rows and surfaces as ErrGameNotFound.
-func (r *PostgresRepo) AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage) (int, error) {
+// The fencing check sits inside the same statement that takes the games row
+// lock: matching the epoch and appending are atomic, so a takeover committing
+// between "check" and "write" is impossible — it would have blocked on the
+// same row lock.
+func (r *PostgresRepo) AppendEvent(ctx context.Context, gameID, eventType string, payload json.RawMessage, epoch int64) (int, error) {
 	row := r.pool.QueryRowContext(ctx, `
 		WITH s AS (
 			UPDATE games SET event_seq = event_seq + 1
-			WHERE id = $1 RETURNING event_seq
+			WHERE id = $1
+			  AND ($4 = 0 OR EXISTS (
+			        SELECT 1 FROM game_leases l
+			         WHERE l.game_id = $1 AND l.epoch = $4))
+			RETURNING event_seq
 		)
-		INSERT INTO game_events (game_id, seq, type, payload)
-		SELECT $1, s.event_seq, $2, $3 FROM s
+		INSERT INTO game_events (game_id, seq, type, payload, epoch)
+		SELECT $1, s.event_seq, $2, $3, $4 FROM s
 		RETURNING seq
-	`, gameID, eventType, []byte(payload))
+	`, gameID, eventType, []byte(payload), epoch)
 	var seq int
 	if err := row.Scan(&seq); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			if epoch != 0 {
+				// Disambiguate: no row can mean deleted game or fenced write.
+				var exists bool
+				if e := r.pool.QueryRowContext(ctx,
+					`SELECT EXISTS (SELECT 1 FROM games WHERE id = $1)`, gameID,
+				).Scan(&exists); e == nil && exists {
+					return 0, ErrStaleLease
+				}
+			}
 			return 0, ErrGameNotFound
 		}
 		return 0, fmt.Errorf("append event: %w", err)

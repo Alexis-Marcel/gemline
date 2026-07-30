@@ -11,8 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alexis-marcel/gemline/internal/backplane"
+	"github.com/alexis-marcel/gemline/internal/bus"
 	"github.com/alexis-marcel/gemline/internal/db"
+	"github.com/alexis-marcel/gemline/internal/lease"
 	"github.com/alexis-marcel/gemline/internal/server"
 	"github.com/alexis-marcel/gemline/internal/tracing"
 	"github.com/joho/godotenv"
@@ -29,7 +30,25 @@ func main() {
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	addr := getenv("ADDR", ":8080")
+	internalAddr := getenv("INTERNAL_ADDR", ":8090")
 	dsn := os.Getenv("DATABASE_URL")
+
+	// One image, three roles (the Loki/Mimir "target" pattern):
+	//   all     — everything in one process (dev default, single-binary).
+	//   gateway — public HTTP + WS termination; never owns a game, proxies
+	//             commands to the owning gamesvc (or the pool for new games).
+	//   gamesvc — game logic only: leases, timers, bots, matchmaker; serves
+	//             just the internal listener.
+	role := getenv("ROLE", "all")
+	if role != "all" && role != "gateway" && role != "gamesvc" {
+		log.Error("invalid ROLE", "role", role, "want", "all|gateway|gamesvc")
+		os.Exit(1)
+	}
+	if role != "all" && dsn == "" {
+		log.Error("split roles need DATABASE_URL; in-memory mode is single-process only", "role", role)
+		os.Exit(1)
+	}
+	log.Info("starting", "role", role, "version", version)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -50,8 +69,11 @@ func main() {
 	}()
 
 	var (
-		repo server.Repository
-		bp   *backplane.Backplane
+		repo     server.Repository
+		eventBus server.Bus
+		leases   *lease.Manager
+		resolver *lease.Resolver
+		elector  *lease.Elector
 	)
 	if dsn != "" {
 		pool, err := db.Open(ctx, dsn)
@@ -62,7 +84,30 @@ func main() {
 		defer pool.Close()
 		repo = server.NewPostgresRepo(pool)
 		log.Info("persistence enabled", "driver", "postgres")
-		bp = backplane.New(dsn, pool, log)
+		// Fan-out: Redis routes events per game, so pods receive only the
+		// games they serve. Leases stay in Postgres — the fencing check must
+		// be atomic with the fenced write, in the same database.
+		redisURL := os.Getenv("REDIS_URL")
+		if redisURL == "" {
+			log.Error("REDIS_URL is required with DATABASE_URL (docker compose up -d starts one locally)")
+			os.Exit(1)
+		}
+		rb, err := bus.NewRedis(redisURL, log)
+		if err != nil {
+			log.Error("redis bus init failed", "err", err)
+			os.Exit(1)
+		}
+		eventBus = rb
+		if role == "gateway" {
+			// A gateway reads the lease table but never writes it.
+			resolver = lease.NewResolver(pool)
+		} else {
+			leases = lease.NewManager(pool, lease.NewOwnerID(), log).
+				WithAddr(advertiseAddr(os.Getenv("ADVERTISE_ADDR"), internalAddr))
+			// One elected matchmaker across the fleet: every game-logic pod
+			// campaigns, exactly one runs the matcher at a time.
+			elector = lease.NewElector(pool, "matchmaker", lease.NewOwnerID(), log)
+		}
 	} else {
 		log.Info("persistence disabled — running with in-memory store only")
 	}
@@ -71,41 +116,96 @@ func main() {
 		SupabaseURL:    os.Getenv("SUPABASE_URL"),
 		AllowedOrigins: parseOrigins(os.Getenv("ALLOWED_ORIGINS")),
 	}
+	if role == "gateway" {
+		cfg.ForwardTo = os.Getenv("GAMESVC_ADDR")
+		if cfg.ForwardTo == "" {
+			log.Error("ROLE=gateway needs GAMESVC_ADDR (the gamesvc pool address, e.g. gemline-gamesvc:8090)")
+			os.Exit(1)
+		}
+		cfg.Resolver = resolver
+	}
 
 	store := server.NewStore(repo)
-	store.StartStaleGameCleaner(log)
 	defer store.Close()
+	if role != "gateway" {
+		store.StartStaleGameCleaner(log)
+	}
+	if leases != nil {
+		// Wire the store first: the lease-lost callback must exist before the
+		// first heartbeat can detect a takeover.
+		store.SetLeaseManager(leases)
+		leases.Start(ctx)
+		// Deferred before pool.Close (LIFO), so the release-all DELETE still
+		// has a live pool; a clean shutdown hands games over immediately.
+		defer leases.Close()
+		store.StartOrphanSweeper(ctx, log)
+		log.Info("lease manager started", "owner", leases.Owner())
+	}
 
-	// server.New registers the backplane handlers; Start the listener only
-	// afterwards so the first LISTEN session subscribes to the right channels.
-	apiServer, err := server.New(log, store, bp, cfg)
+	// server.New registers the bus handlers; Start the listener only
+	// afterwards so the first session subscribes to the right channels.
+	apiServer, err := server.New(log, store, eventBus, cfg)
 	if err != nil {
 		log.Error("server init failed", "err", err)
 		os.Exit(1)
 	}
-	if bp != nil {
-		bp.Start(ctx)
-		defer bp.Close()
+	if eventBus != nil {
+		eventBus.Start(ctx)
+		defer eventBus.Close()
 	}
-	// Start after the backplane is live so match notifications reach lobby
-	// subscribers on other pods.
-	apiServer.StartMatcher(ctx)
-
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      apiServer.Routes(),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	// Start after the bus is live so match notifications reach lobby
+	// subscribers on other pods. Gateways don't match — the matcher creates
+	// games. With a DB, the matcher runs on the elected leader only, and the
+	// leadership context stops it the moment the election is lost.
+	switch {
+	case elector != nil:
+		elector.OnElected(func(leadCtx context.Context) {
+			apiServer.StartMatcher(leadCtx)
+		})
+		elector.Start(ctx)
+		defer elector.Close()
+	case role != "gateway":
+		apiServer.StartMatcher(ctx) // in-memory single process: no election needed
 	}
 
-	go func() {
-		log.Info("server listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("server error", "err", err)
-			os.Exit(1)
+	// Public listener: everything but gamesvc, whose only surface is internal.
+	var srv *http.Server
+	if role != "gamesvc" {
+		srv = &http.Server{
+			Addr:         addr,
+			Handler:      apiServer.Routes(),
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  60 * time.Second,
 		}
-	}()
+		go func() {
+			log.Info("server listening", "addr", addr)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("server error", "err", err)
+				os.Exit(1)
+			}
+		}()
+	}
+
+	// Pod-to-pod command listener: only pods that can own games mount it, and
+	// it stays deliberately absent from the public Service/ingress.
+	var internalSrv *http.Server
+	if leases != nil {
+		internalSrv = &http.Server{
+			Addr:         internalAddr,
+			Handler:      apiServer.InternalRoutes(),
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		}
+		go func() {
+			log.Info("internal listener up", "addr", internalAddr, "advertise", leases.Addr())
+			if err := internalSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("internal listener error", "err", err)
+				os.Exit(1)
+			}
+		}()
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -114,9 +214,29 @@ func main() {
 	log.Info("shutting down")
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown error", "err", err)
+	if srv != nil {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Error("shutdown error", "err", err)
+		}
 	}
+	if internalSrv != nil {
+		if err := internalSrv.Shutdown(shutdownCtx); err != nil {
+			log.Error("internal shutdown error", "err", err)
+		}
+	}
+}
+
+// advertiseAddr resolves what sibling pods should dial to reach this pod's
+// internal listener: ADVERTISE_ADDR when set (k8s: "$(POD_IP):8090"), else
+// loopback + the internal port — right for multi-process local runs.
+func advertiseAddr(advertise, listen string) string {
+	if advertise != "" {
+		return advertise
+	}
+	if strings.HasPrefix(listen, ":") {
+		return "127.0.0.1" + listen
+	}
+	return listen
 }
 
 func getenv(key, fallback string) string {

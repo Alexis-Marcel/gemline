@@ -43,7 +43,7 @@ workload from this repo.
 ```
 
 Cross-pod live events (WebSocket fan-out, cache invalidation,
-matchmaking) travel through a Postgres `LISTEN/NOTIFY` backplane, so the
+matchmaking) travel through Redis pub/sub routed per game, so the
 backend runs **2+ replicas** with no sticky sessions.
 
 ## Stack at a glance
@@ -294,7 +294,7 @@ to the web SPA, all on one hostname.
 kube-prometheus-stack runs Prometheus (15-day persistent retention),
 Grafana, and Alertmanager. The app exposes Prometheus metrics at
 `/metrics` (top-level, outside the CORS/auth/log middleware); the
-`gemline-server` `ServiceMonitor` wires it up for scraping. Grafana's
+`gemline-gateway` and `gemline-gamesvc` `ServiceMonitor`s wire them up for scraping. Grafana's
 admin credentials come from AWS Secrets Manager via ESO (the
 `gemline/grafana-admin` secret).
 
@@ -351,7 +351,8 @@ git commit -am "rollback to <sha>" && git push
 
 ```sh
 kubectl -n gemline get pods
-kubectl -n gemline logs deployment/gemline-server --tail=100 -f
+kubectl -n gemline logs deployment/gemline-gateway --tail=100 -f
+kubectl -n gemline logs deployment/gemline-gamesvc --tail=100 -f
 kubectl -n gemline get certificate
 kubectl -n argocd get applications
 kubectl -n argocd port-forward svc/argocd-server 8443:443   # ArgoCD UI
@@ -373,7 +374,7 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
   The Load Balancer targets CPs by label, so new control planes are
   picked up without Terraform churn.
 - **More backend throughput**: raise `replicas` on `gemline-server` —
-  the Postgres backplane keeps all replicas in sync.
+  the per-game Redis channels keep all replicas in sync.
 
 ## Known limits
 

@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alexis-marcel/gemline/internal/backplane"
 	"github.com/alexis-marcel/gemline/internal/game"
+	"github.com/alexis-marcel/gemline/internal/lease"
 	"github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
@@ -24,16 +24,21 @@ import (
 )
 
 type Server struct {
-	store     *Store
-	hub       *Hub
-	lobby     *Hub // keyed by userID; same Hub type, different routing key semantics
-	events    *EventPublisher
-	backplane *backplane.Backplane
-	log       *slog.Logger
-	verifier  jwt.Keyfunc
-	limiter   *rateLimiter
+	store  *Store
+	hub    *Hub
+	lobby  *Hub // keyed by userID; same Hub type, different routing key semantics
+	events *EventPublisher
+	bus    Bus
+	log    *slog.Logger
+	verifier jwt.Keyfunc
+	limiter  *rateLimiter
 	// nil/empty = dev-permissive (CORS `*`, WS skips origin).
 	allowedOrigins []string
+
+	// Gateway mode (both set): game commands are proxied — to the live owner
+	// per resolver, else to forwardTo, the gamesvc pool address.
+	forwardTo string
+	resolver  *lease.Resolver
 }
 
 // Config holds optional dependencies. Empty SupabaseURL disables auth (every
@@ -42,11 +47,17 @@ type Server struct {
 type Config struct {
 	SupabaseURL    string
 	AllowedOrigins []string
+
+	// ForwardTo enables gateway mode: this process runs no game logic and
+	// proxies commands to the gamesvc pool at this address (owner-specific
+	// routing via Resolver). Empty = run game logic in-process.
+	ForwardTo string
+	Resolver  *lease.Resolver
 }
 
-// New returns a Server. bp is the Postgres backplane for cross-pod event
-// fan-out; nil (tests, no DATABASE_URL) falls back to direct local delivery.
-func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) (*Server, error) {
+// New returns a Server. b is the cross-pod fan-out bus; nil (tests, no
+// DATABASE_URL) falls back to direct local delivery.
+func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 	hub := NewHub(log, "game")
 	lobby := NewHub(log, "lobby")
 	podID := newPodID()
@@ -55,17 +66,28 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) (*
 		store:          store,
 		hub:            hub,
 		lobby:          lobby,
-		events:         NewEventPublisher(store.Repo(), hub, bp, log, podID, store.Invalidate),
-		backplane:      bp,
+		events:         NewEventPublisher(store.Repo(), hub, b, log, podID, store.Invalidate, store.LeaseEpoch),
+		bus:            b,
 		log:            log,
 		limiter:        newRateLimiter(),
 		allowedOrigins: cfg.AllowedOrigins,
+		forwardTo:      cfg.ForwardTo,
+		resolver:       cfg.Resolver,
 	}
-	// Register listener handlers so NOTIFYs from any pod (including ours) fan
-	// out to local WS subscribers: game events + lobby match notifications.
-	if bp != nil {
-		bp.Subscribe(ChannelGameEvents, srv.events.HandleGameEventNotif)
-		bp.Subscribe(ChannelLobby, srv.handleLobbyNotif)
+	if cfg.ForwardTo != "" {
+		store.SetForwardOnly()
+	}
+	// Register bus handlers so events from any pod (including ours) fan out
+	// to local WS subscribers: game events + lobby match notifications. The
+	// interest hooks drive per-game routing: the game hub's first/last WS
+	// spectator and the store's cache fill/evict subscribe and unsubscribe
+	// this pod from that game's channel.
+	if b != nil {
+		b.OnGameEvent(srv.events.HandleGameEventNotif)
+		b.OnLobby(srv.handleLobbyNotif)
+		b.OnMatchmake(store.WakeMatcher)
+		hub.SetInterestHooks(b.WatchGame, b.UnwatchGame)
+		store.SetBus(b)
 	}
 	if len(cfg.AllowedOrigins) == 0 {
 		log.Warn("CORS + WS origin checks disabled — set AllowedOrigins for production")
@@ -146,37 +168,42 @@ func New(log *slog.Logger, store *Store, bp *backplane.Backplane, cfg Config) (*
 // production binary, so test-only routes are never mounted on a shipped server.
 var testRoutes func(*http.ServeMux, *Server)
 
-func (s *Server) Routes() http.Handler {
+// apiHandler builds the route table wrapped in the shared middleware chain.
+// Game commands (mutations on /api/games/{id}/...) go through owned(), which
+// routes them to the pod holding the game's lease; reads stay local.
+func (s *Server) apiHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 
-	mux.HandleFunc("POST /api/games", s.limited("create", rate.Every(2*time.Second), 5, s.createGame))
+	mux.HandleFunc("POST /api/games", s.limited("create", rate.Every(2*time.Second), 5, s.forwardAll(s.createGame)))
 	if testRoutes != nil {
 		testRoutes(mux, s)
 	}
 	mux.HandleFunc("GET /api/games/{id}", s.getGame)
-	mux.HandleFunc("POST /api/games/{id}/join", s.joinGame)
-	mux.HandleFunc("POST /api/games/{id}/moves", s.postMove)
-	mux.HandleFunc("POST /api/games/{id}/resign", s.resignGame)
-	mux.HandleFunc("POST /api/games/{id}/draw/offer", s.offerDraw)
-	mux.HandleFunc("POST /api/games/{id}/draw/accept", s.acceptDraw)
-	mux.HandleFunc("POST /api/games/{id}/draw/decline", s.declineDraw)
-	mux.HandleFunc("POST /api/games/{id}/rematch/offer", s.offerRematch)
-	mux.HandleFunc("POST /api/games/{id}/rematch/decline", s.declineRematch)
-	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/bot", s.addBot)
-	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/bot", s.removeBot)
-	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite", s.inviteSeat)
-	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/invite", s.cancelSeatInvite)
-	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite/decline", s.declineInvite)
-	mux.HandleFunc("POST /api/games/{id}/seat/resolve", s.resolveSeat)
-	mux.HandleFunc("POST /api/games/{id}/leave", s.leaveSeat)
-	mux.HandleFunc("POST /api/games/{id}/start", s.startGame)
+	mux.HandleFunc("POST /api/games/{id}/join", s.owned(s.joinGame))
+	mux.HandleFunc("POST /api/games/{id}/moves", s.owned(s.postMove))
+	mux.HandleFunc("POST /api/games/{id}/resign", s.owned(s.resignGame))
+	mux.HandleFunc("POST /api/games/{id}/draw/offer", s.owned(s.offerDraw))
+	mux.HandleFunc("POST /api/games/{id}/draw/accept", s.owned(s.acceptDraw))
+	mux.HandleFunc("POST /api/games/{id}/draw/decline", s.owned(s.declineDraw))
+	mux.HandleFunc("POST /api/games/{id}/rematch/offer", s.owned(s.offerRematch))
+	mux.HandleFunc("POST /api/games/{id}/rematch/decline", s.owned(s.declineRematch))
+	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/bot", s.owned(s.addBot))
+	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/bot", s.owned(s.removeBot))
+	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite", s.owned(s.inviteSeat))
+	mux.HandleFunc("DELETE /api/games/{id}/seats/{idx}/invite", s.owned(s.cancelSeatInvite))
+	mux.HandleFunc("POST /api/games/{id}/seats/{idx}/invite/decline", s.owned(s.declineInvite))
+	mux.HandleFunc("POST /api/games/{id}/seat/resolve", s.owned(s.resolveSeat))
+	mux.HandleFunc("POST /api/games/{id}/leave", s.owned(s.leaveSeat))
+	mux.HandleFunc("POST /api/games/{id}/start", s.owned(s.startGame))
 	mux.HandleFunc("GET /api/games/{id}/replay", s.getReplay)
 	mux.HandleFunc("GET /api/games/{id}/events", s.getGameEvents)
 	mux.HandleFunc("GET /api/games/{id}/ratings", s.getGameRatings)
 	mux.HandleFunc("GET /api/games/{id}/messages", s.getChat)
-	mux.HandleFunc("POST /api/games/{id}/messages", s.limited("chat", rate.Every(time.Second), 5, s.postChat))
+	// Rate limit at the edge pod (real caller context), then route: a
+	// forwarded command re-enters this chain on the owner but skips owned().
+	mux.HandleFunc("POST /api/games/{id}/messages", s.limited("chat", rate.Every(time.Second), 5, s.owned(s.postChat)))
 	mux.HandleFunc("GET /ws/games/{id}", s.wsGame)
 	mux.HandleFunc("GET /ws/lobby", s.wsLobby)
 
@@ -193,7 +220,23 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/users/{userId}", s.getPublicProfile)
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
-	inner := loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, maxBytesMiddleware(jwtMiddleware(s.verifier, s.log, mux)))))
+	return loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, maxBytesMiddleware(jwtMiddleware(s.verifier, s.log, mux)))))
+}
+
+// InternalRoutes is the pod-to-pod listener serving forwarded game commands:
+// the same API surface, tagged so owned() handles everything locally. It must
+// never be exposed through the ingress or a public Service — unreachability
+// from outside is precisely what makes the forwarded tag trustworthy.
+// /metrics rides along for gamesvc pods, whose only listener is this one.
+func (s *Server) InternalRoutes() http.Handler {
+	top := http.NewServeMux()
+	top.Handle("GET /metrics", metricsHandler())
+	top.Handle("/", markForwarded(s.apiHandler()))
+	return top
+}
+
+func (s *Server) Routes() http.Handler {
+	inner := s.apiHandler()
 
 	// otelhttp wraps the entire app handler so every request starts a server
 	// span. Skip the health probes — kubelet hits them every 5–20 s and the
@@ -235,16 +278,15 @@ func patternSpanNamer(next http.Handler) http.Handler {
 	})
 }
 
-// StartMatcher kicks off the background matchmaker ticker on this pod.
-// Every matcherTickInterval each supported player count is processed
-// via SELECT FOR UPDATE SKIP LOCKED, so multiple pods can run their
-// own matcher in parallel without coordination. Match results are
-// fanned out via the lobby channel so each user's lobby WS (which may
-// live on a different pod) receives their match_found event.
+// StartMatcher kicks off the background matchmaker on this pod: pass ctx from
+// the leader election so exactly one pod matches at a time and losing the
+// election stops it. Ticks fire on enqueue wake-ups and on the fallback
+// interval; SKIP LOCKED keeps a takeover's brief overlap safe. Match results
+// fan out via the lobby channel so each user's lobby WS (which may live on
+// any gateway) receives their match_found event.
 //
-// Cancel via ctx. Safe to call without a backplane (single-process /
-// no-DB mode): the matcher still runs but onMatched falls back to the
-// local LobbyHub.Deliver instead of NOTIFYing.
+// Safe to call without a bus (single-process / no-DB mode): the matcher still
+// runs but onMatched falls back to the local LobbyHub.Deliver.
 func (s *Server) StartMatcher(ctx context.Context) {
 	s.store.StartMatcher(ctx, s.log, s.fanMatched, s.fanQueueUpdate)
 }

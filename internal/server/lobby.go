@@ -34,7 +34,7 @@ type LobbyInvitePayload struct {
 	FromUserID string `json:"fromUserId,omitempty"`
 }
 
-// Lobby event type discriminators. Constants so backplane envelopes and the WS
+// Lobby event type discriminators. Constants so bus envelopes and the WS
 // write side use the exact same strings.
 const (
 	LobbyEventMatchFound      = "match_found"
@@ -51,7 +51,7 @@ type LobbyQueueUpdatePayload struct {
 	ETASeconds *int `json:"etaSeconds,omitempty"`
 }
 
-// lobbyEnvelope is the JSON shape sent through ChannelLobby. UserID is the
+// lobbyEnvelope is the JSON shape sent through the lobby channel. UserID is the
 // routing key; Payload is RawMessage so a payload shape change doesn't require
 // updating intermediaries.
 type lobbyEnvelope struct {
@@ -81,7 +81,7 @@ func (s *Server) fanQueueUpdate(updates []QueueUpdate) {
 	}
 }
 
-// publishLobby fans a lobby event to one user, via the backplane when present
+// publishLobby fans a lobby event to one user, via the bus when present
 // (multi-pod NOTIFY) or directly through the in-process LobbyHub otherwise.
 func (s *Server) publishLobby(userID, eventType string, payload any) {
 	if userID == "" {
@@ -92,7 +92,7 @@ func (s *Server) publishLobby(userID, eventType string, payload any) {
 		s.log.Error("lobby publish: marshal payload", "type", eventType, "err", err)
 		return
 	}
-	if s.backplane == nil {
+	if s.bus == nil {
 		// Single-process: skip the wire format and go straight to the hub.
 		s.lobby.Deliver(userID, Event{Type: eventType, Payload: json.RawMessage(body)})
 		return
@@ -108,23 +108,18 @@ func (s *Server) publishLobby(userID, eventType string, payload any) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
-	if err := s.backplane.Publish(ctx, ChannelLobby, env); err != nil {
+	if err := s.bus.PublishLobby(ctx, env); err != nil {
 		s.log.Error("lobby publish: notify", "user", userID, "type", eventType, "err", err)
 	}
 }
 
-// handleLobbyNotif is the ChannelLobby handler. Each pod receives every
+// handleLobbyNotif is the lobby-channel handler. Each pod receives every
 // notification; routing by userID happens locally — pods without a sub no-op.
 func (s *Server) handleLobbyNotif(payload []byte) {
 	var env lobbyEnvelope
 	if err := json.Unmarshal(payload, &env); err != nil {
 		s.log.Warn("lobby notif: bad envelope", "err", err)
 		return
-	}
-	if env.Type == "" {
-		// Backwards-compat: older envelopes had no type field. Default to
-		// match_found so a half-deployed cluster doesn't drop matches.
-		env.Type = LobbyEventMatchFound
 	}
 	if !s.lobby.HasSubs(env.UserID) {
 		return

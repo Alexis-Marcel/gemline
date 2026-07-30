@@ -159,8 +159,9 @@ type Store struct {
 	// cleanerStop halts the stale-game cleaner; nil until it's started.
 	cleanerStop chan struct{}
 
-	// leases claims per-game ownership; nil in in-memory mode. Step 1a:
-	// ownership is observed and logged, nothing routes on it yet.
+	// leases claims per-game ownership; nil in in-memory mode. Commands
+	// route to the owner (forward.go) and owner-side duties (timers, bots)
+	// are gated on it.
 	leases *lease.Manager
 
 	// bus receives this pod's per-game interest: a cached record counts as
@@ -187,7 +188,7 @@ func (s *Store) unwatchGame(gameID string) {
 func (s *Store) Repo() Repository { return s.repo }
 
 // Invalidate drops the cache entry so the next Get reloads from the DB. Wired
-// to the backplane listener: a NOTIFY from another pod invalidates here, so the
+// to the bus listener: an event from another pod invalidates here, so the
 // cache never drifts more than one hop behind. Goroutines holding an existing
 // rec pointer keep using it (and see stale data) until they call Get again.
 func (s *Store) Invalidate(gameID string) {
@@ -202,7 +203,7 @@ func (s *Store) Invalidate(gameID string) {
 	// cache miss). If we own this game, another pod just wrote to it (the
 	// unreachable-owner fallback) and we must re-arm from fresh state, or the
 	// clock would silently stop until the next request. Async: Invalidate runs
-	// on the backplane listener goroutine, which must not block on a DB load.
+	// on the bus listener goroutine, which must not block on a DB load.
 	if s.ownsGame(gameID) {
 		go s.AdoptGame(context.Background(), gameID)
 	}

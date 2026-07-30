@@ -6,9 +6,10 @@ metadata:
   labels:
     app: gemline-server
 spec:
-  # Horizontally scalable: cross-pod event propagation and cache
-  # invalidation go through the Postgres backplane (LISTEN/NOTIFY), and
-  # matchmaking uses SKIP LOCKED so each pod matches independently.
+  # Horizontally scalable: each live game is owned by one pod (Postgres
+  # leases + fencing, commands forwarded to the owner), events and cache
+  # invalidation fan out through per-game Redis channels, and matchmaking
+  # uses SKIP LOCKED so each pod matches independently.
   replicas: 2
   strategy:
     # maxUnavailable: 0 keeps >=2 healthy pods during a roll so HTTP sees
@@ -62,8 +63,7 @@ spec:
                   fieldPath: status.podIP
             - name: ADVERTISE_ADDR
               value: "$(POD_IP):8090"
-            # Per-game event fan-out; unset falls back to Postgres
-            # LISTEN/NOTIFY (global broadcast).
+            # Per-game event fan-out (required).
             - name: REDIS_URL
               value: "redis://gemline-redis:6379"
             # OTLP traces go to Alloy (cross-namespace, hence the FQDN). The

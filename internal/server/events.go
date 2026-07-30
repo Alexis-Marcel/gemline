@@ -9,10 +9,10 @@ import (
 )
 
 // EventPublisher is the single fan-out path for WS events. Publish persists the
-// event (allocating a per-game seq), then NOTIFYs {gameId, seq, podId}; local
-// fan-out happens in the backplane handler, so the publishing pod receives its
-// own NOTIFY like every other pod — one symmetric path. With the noop repo
-// (no DATABASE_URL) it falls back to a direct hub.Deliver.
+// event (allocating a per-game seq), then publishes {gameId, seq, podId} on the
+// bus; local fan-out happens in the bus handler, so the publishing pod receives
+// its own envelope like every other pod — one symmetric path. With the noop
+// repo (no DATABASE_URL) it falls back to a direct hub.Deliver.
 type EventPublisher struct {
 	repo       Repository
 	hub        *Hub
@@ -103,12 +103,7 @@ func (p *EventPublisher) Publish(gameID string, ev Event) {
 	}
 }
 
-const (
-	ChannelGameEvents = "gemline_events"
-	ChannelLobby      = "gemline_lobby"
-)
-
-// HandleGameEventNotif handles ChannelGameEvents: invalidate the local cache on
+// HandleGameEventNotif handles inbound game-event envelopes: invalidate the local cache on
 // cross-pod notifications (so the next Get reloads), then deliver to local WS
 // subscribers if any. Invalidation runs even with no subscribers — a later HTTP
 // read/write must see fresh state — while the DB round-trip is skipped when

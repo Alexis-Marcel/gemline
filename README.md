@@ -20,7 +20,7 @@ Each player has a colored stock of 50 gems. On your turn you place one gem on an
 
 ## Status
 
-The full vertical slice works end-to-end: a React frontend in `web/` lets browsers join the same game and play in real time, the Go backend persists every move to Postgres so games survive a restart, signed-in users get profiles + history + Elo, and the engine itself is covered by tests (99.3% on `internal/game`). The backend is horizontally scalable — multiple replicas share live events through a Postgres `LISTEN/NOTIFY` backplane.
+The full vertical slice works end-to-end: a React frontend in `web/` lets browsers join the same game and play in real time, the Go backend persists every move to Postgres so games survive a restart, signed-in users get profiles + history + Elo, and the engine itself is covered by tests (99.3% on `internal/game`). The backend is horizontally scalable — each live game is owned by exactly one replica (Postgres leases + fencing), and replicas share live events through Redis pub/sub routed per game.
 
 **Works:**
 
@@ -30,12 +30,12 @@ The full vertical slice works end-to-end: a React frontend in `web/` lets browse
 - **Social** — cross-page game invitations (with toast + notification chime), unanimous rematch, in-game chat.
 - **Bots** — heuristic AI opponents (`internal/ai`) that can fill seats in private games.
 - **Accounts** — Supabase email/password auth, public profiles, per-user history and aggregate stats.
-- **Persistence & scale** — every move stored in Postgres with full state replay on load; multi-replica backend via the Postgres backplane (cross-pod event fan-out + cache invalidation).
+- **Persistence & scale** — every move stored in Postgres with full state replay on load; multi-replica backend via per-game ownership leases (single writer, fenced by epoch, crash takeover) and Redis pub/sub routed per game (cross-pod event fan-out + cache invalidation).
 - **Hardening** — bounded request bodies (32 KiB), per-caller token-bucket rate limiting on the abuse-prone endpoints (game create, chat, matchmake enqueue, profile search) returning `429` on flood, SHA-256-hashed seat tokens, and origin-locked CORS + WebSocket checks.
 
 ## Getting started
 
-The stack is Go for the backend, Vite + React for the frontend, Postgres for persistence, and Supabase for user authentication. Postgres can be your Supabase project's database (recommended) or a local Docker Postgres for offline dev.
+The stack is Go for the backend, Vite + React for the frontend, Postgres for persistence, Redis for cross-replica event fan-out, and Supabase for user authentication. Postgres can be your Supabase project's database (recommended) or a local Docker Postgres for offline dev; Redis comes from `docker compose up -d` either way.
 
 ### One-time setup
 
@@ -49,9 +49,13 @@ The stack is Go for the backend, Vite + React for the frontend, Postgres for per
 ### Run
 
 ```sh
+# Redis (and a local Postgres if you're not using Supabase)
+docker compose up -d
+
 # Backend
 DATABASE_URL='<your Supabase DATABASE_URL>' \
 SUPABASE_URL='https://<your-project>.supabase.co' \
+REDIS_URL='redis://localhost:6379' \
   go run ./cmd/server
 
 # Frontend (separate shell)
@@ -60,7 +64,7 @@ cd web && npm install && npm run dev
 
 The frontend serves on `:5173` and proxies `/api` and `/ws` to the backend on `:8080`. Visit `http://localhost:5173` to play.
 
-Both `DATABASE_URL` and the auth variables are optional — if unset, games stay in memory and `/api/auth/*` returns 401, but anonymous play still works. A third optional variable, `ALLOWED_ORIGINS` (comma-separated), locks down CORS and the WebSocket origin check; leave it empty in dev (permissive `*`), set it to your frontend origin(s) in production. The backend reads its environment from a `.env` (and optional `.env.local` override) at the repo root in addition to the shell, so you can `cp .env.example .env` once and forget about it. For an offline-friendly dev loop without Supabase, `docker compose up -d` brings up a local Postgres on `localhost:5432` with credentials `gemline / gemline`.
+Both `DATABASE_URL` and the auth variables are optional — if unset, games stay in memory and `/api/auth/*` returns 401, but anonymous play still works. `REDIS_URL` is required whenever `DATABASE_URL` is set (it carries the cross-replica event fan-out); `docker compose up -d` provides one on `localhost:6379`. Another optional variable, `ALLOWED_ORIGINS` (comma-separated), locks down CORS and the WebSocket origin check; leave it empty in dev (permissive `*`), set it to your frontend origin(s) in production. The backend reads its environment from a `.env` (and optional `.env.local` override) at the repo root in addition to the shell, so you can `cp .env.example .env` once and forget about it. For an offline-friendly dev loop without Supabase, `docker compose up -d` also brings up a local Postgres on `localhost:5432` with credentials `gemline / gemline`.
 
 ### Quick smoke test against the API
 
@@ -162,7 +166,8 @@ internal/server/        HTTP + WebSocket layer, in-memory cache, Postgres repo,
                         matchmaking, chat, clocks, presence, bots, JWT middleware
 internal/ai/            heuristic bot move selection
 internal/elo/           Elo rating math
-internal/backplane/     Postgres LISTEN/NOTIFY pub/sub for cross-pod fan-out
+internal/bus/           Redis pub/sub with per-game channel routing
+internal/lease/         per-game ownership leases (single writer + fencing)
 internal/db/            connection pool + embedded goose migrations
 web/                    Vite + React + Tailwind frontend
   src/api/              wire types, REST client, WebSocket singletons, Supabase client

@@ -50,7 +50,7 @@ spec:
             description: |
               p99 HTTP latency has been above 500 ms for the past 10 minutes
               (current: {{ $value | humanizeDuration }}). Likely suspects: a
-              slow Postgres query, a saturated connection pool, or backplane
+              slow Postgres query, a saturated connection pool, or bus
               fan-out lag.
 
     - name: gemline-persistence

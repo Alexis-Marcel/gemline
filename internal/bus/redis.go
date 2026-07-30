@@ -1,13 +1,12 @@
 // Package bus is the Redis pub/sub fan-out with per-game routing: a pod
 // subscribes to game:{id} only while it has local interest in that game
 // (cached record or WS spectator), so its inbound traffic scales with what it
-// serves, not with the whole site — unlike the LISTEN/NOTIFY backplane where
-// every pod receives every event.
+// serves, not with the whole site.
 //
-// Like the backplane, this bus is lossy by design: subscriptions are
-// fire-and-forget, and consumers reconcile from the canonical store (seq gaps
-// → catch-up). go-redis re-subscribes all tracked channels automatically after
-// a reconnect, so the gap is the reconnect window, same contract as before.
+// The bus is lossy by design: subscriptions are fire-and-forget, and
+// consumers reconcile from the canonical store (seq gaps → catch-up).
+// go-redis re-subscribes all tracked channels automatically after a
+// reconnect, so the loss window is the reconnect gap.
 package bus
 
 import (
@@ -156,7 +155,7 @@ func (r *Redis) Start(ctx context.Context) {
 }
 
 // dispatch runs handlers on the single receive goroutine; handlers must not
-// block (same contract as the backplane).
+// block.
 func (r *Redis) dispatch(channel string, payload []byte) {
 	switch {
 	case channel == lobbyChannel:

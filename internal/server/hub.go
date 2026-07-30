@@ -118,7 +118,7 @@ func (h *Hub) Unsubscribe(gameID string, sub *subscriber) {
 
 // Deliver fans an event out to local subscribers of gameID. Don't call it to
 // broadcast — use EventPublisher.Publish, which persists the event and triggers
-// the NOTIFY that ends up calling Deliver on every pod.
+// the envelope that ends up calling Deliver on every interested pod.
 func (h *Hub) Deliver(gameID string, ev Event) {
 	b, err := json.Marshal(ev)
 	if err != nil {
@@ -144,7 +144,7 @@ func (h *Hub) Deliver(gameID string, ev Event) {
 	}
 }
 
-// HasSubs reports whether any subscriber is registered for gameID. The backplane
+// HasSubs reports whether any subscriber is registered for gameID. The bus
 // listener uses it to skip the game_events SELECT for games it doesn't serve.
 func (h *Hub) HasSubs(gameID string) bool {
 	h.mu.RLock()

@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alexis-marcel/gemline/internal/backplane"
 	"github.com/alexis-marcel/gemline/internal/bus"
 	"github.com/alexis-marcel/gemline/internal/db"
 	"github.com/alexis-marcel/gemline/internal/lease"
@@ -66,22 +65,20 @@ func main() {
 		defer pool.Close()
 		repo = server.NewPostgresRepo(pool)
 		log.Info("persistence enabled", "driver", "postgres")
-		// Fan-out: Redis routes events per game (pods receive only games they
-		// serve); without REDIS_URL the LISTEN/NOTIFY backplane broadcasts
-		// globally. Leases stay in Postgres either way — the fencing check
-		// must be atomic with the fenced write, in the same database.
-		if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
-			rb, err := bus.NewRedis(redisURL, log)
-			if err != nil {
-				log.Error("redis bus init failed", "err", err)
-				os.Exit(1)
-			}
-			eventBus = rb
-			log.Info("bus enabled", "driver", "redis")
-		} else {
-			eventBus = server.NewPostgresBus(backplane.New(dsn, pool, log))
-			log.Info("bus enabled", "driver", "postgres listen/notify")
+		// Fan-out: Redis routes events per game, so pods receive only the
+		// games they serve. Leases stay in Postgres — the fencing check must
+		// be atomic with the fenced write, in the same database.
+		redisURL := os.Getenv("REDIS_URL")
+		if redisURL == "" {
+			log.Error("REDIS_URL is required with DATABASE_URL (docker compose up -d starts one locally)")
+			os.Exit(1)
 		}
+		rb, err := bus.NewRedis(redisURL, log)
+		if err != nil {
+			log.Error("redis bus init failed", "err", err)
+			os.Exit(1)
+		}
+		eventBus = rb
 		leases = lease.NewManager(pool, lease.NewOwnerID(), log).
 			WithAddr(advertiseAddr(os.Getenv("ADVERTISE_ADDR"), internalAddr))
 	} else {
@@ -119,7 +116,7 @@ func main() {
 		eventBus.Start(ctx)
 		defer eventBus.Close()
 	}
-	// Start after the backplane is live so match notifications reach lobby
+	// Start after the bus is live so match notifications reach lobby
 	// subscribers on other pods.
 	apiServer.StartMatcher(ctx)
 

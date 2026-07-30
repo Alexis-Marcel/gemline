@@ -43,8 +43,8 @@ type Config struct {
 	AllowedOrigins []string
 }
 
-// New returns a Server. b is the cross-pod fan-out bus (Postgres backplane or
-// Redis); nil (tests, no DATABASE_URL) falls back to direct local delivery.
+// New returns a Server. b is the cross-pod fan-out bus; nil (tests, no
+// DATABASE_URL) falls back to direct local delivery.
 func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 	hub := NewHub(log, "game")
 	lobby := NewHub(log, "lobby")
@@ -64,7 +64,7 @@ func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 	// to local WS subscribers: game events + lobby match notifications. The
 	// interest hooks drive per-game routing: the game hub's first/last WS
 	// spectator and the store's cache fill/evict subscribe and unsubscribe
-	// this pod from that game's channel (no-ops on the global backplane).
+	// this pod from that game's channel.
 	if b != nil {
 		b.OnGameEvent(srv.events.HandleGameEventNotif)
 		b.OnLobby(srv.handleLobbyNotif)
@@ -263,7 +263,7 @@ func patternSpanNamer(next http.Handler) http.Handler {
 // fanned out via the lobby channel so each user's lobby WS (which may
 // live on a different pod) receives their match_found event.
 //
-// Cancel via ctx. Safe to call without a backplane (single-process /
+// Cancel via ctx. Safe to call without a bus (single-process /
 // no-DB mode): the matcher still runs but onMatched falls back to the
 // local LobbyHub.Deliver instead of NOTIFYing.
 func (s *Server) StartMatcher(ctx context.Context) {

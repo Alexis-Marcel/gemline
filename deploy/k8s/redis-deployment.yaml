@@ -8,8 +8,7 @@ metadata:
 spec:
   # Single replica, no persistence: this Redis only carries pub/sub fan-out
   # and holds no state worth keeping. If it dies, pods reconnect (go-redis
-  # re-subscribes) and clients resync via seq catch-up — same lossy contract
-  # as the LISTEN/NOTIFY backplane it replaces.
+  # re-subscribes) and clients resync via seq catch-up.
   replicas: 1
   selector:
     matchLabels:

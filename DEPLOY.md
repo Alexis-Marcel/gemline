@@ -43,7 +43,7 @@ workload from this repo.
 ```
 
 Cross-pod live events (WebSocket fan-out, cache invalidation,
-matchmaking) travel through a Postgres `LISTEN/NOTIFY` backplane, so the
+matchmaking) travel through Redis pub/sub routed per game, so the
 backend runs **2+ replicas** with no sticky sessions.
 
 ## Stack at a glance
@@ -373,7 +373,7 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
   The Load Balancer targets CPs by label, so new control planes are
   picked up without Terraform churn.
 - **More backend throughput**: raise `replicas` on `gemline-server` —
-  the Postgres backplane keeps all replicas in sync.
+  the per-game Redis channels keep all replicas in sync.
 
 ## Known limits
 

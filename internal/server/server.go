@@ -231,7 +231,14 @@ func (s *Server) apiHandler() http.Handler {
 func (s *Server) InternalRoutes() http.Handler {
 	top := http.NewServeMux()
 	top.Handle("GET /metrics", metricsHandler())
-	top.Handle("/", markForwarded(s.apiHandler()))
+	// Same otel wrapping as the public listener: extract the traceparent the
+	// forwarding pod injected, so gateway and owner spans share one trace.
+	app := otelhttp.NewHandler(patternSpanNamer(markForwarded(s.apiHandler())), "http.request",
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
+		}),
+	)
+	top.Handle("/", app)
 	return top
 }
 

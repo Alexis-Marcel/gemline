@@ -9,6 +9,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type forwardCtxKey struct{}
@@ -30,13 +32,16 @@ func isForwarded(r *http.Request) bool {
 }
 
 // forwardTransport is shared across all proxied commands: sibling pods are
-// few, so pooled keep-alive connections cover the traffic.
-var forwardTransport = &http.Transport{
+// few, so pooled keep-alive connections cover the traffic. The otelhttp
+// wrapper injects the W3C traceparent from the request context into the
+// outbound headers, so the receiving pod's server span joins the sender's
+// trace instead of starting a disconnected one.
+var forwardTransport http.RoundTripper = otelhttp.NewTransport(&http.Transport{
 	DialContext:           (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
 	MaxIdleConnsPerHost:   16,
 	IdleConnTimeout:       90 * time.Second,
 	ResponseHeaderTimeout: 10 * time.Second,
-}
+})
 
 // owned routes a game command to the game's owner: handled locally when this
 // pod holds (or can claim) the lease, proxied to the live owner's internal

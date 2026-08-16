@@ -16,6 +16,11 @@ jobs:
           cache: true
       - run: go vet ./...
       - run: go test -race -cover ./...
+      - name: engine coverage gate (>= 95%)
+        run: |
+          go test -coverprofile=cover.out ./internal/game/
+          pct=$(go tool cover -func=cover.out | awk '/^total:/ {sub("%","",$3); print $3}')
+          awk -v p="$pct" 'BEGIN { if (p+0 < 95) { print "engine coverage " p "% < 95%"; exit 1 } print "engine coverage: " p "%" }'
 
   web:
     runs-on: ubuntu-latest

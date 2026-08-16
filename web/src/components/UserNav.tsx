@@ -1,7 +1,24 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import type { User } from "@supabase/supabase-js";
 import { useAuth } from "../auth/useAuth";
 import { useInvitations } from "../notifications/useInvitations";
+
+// monogram derives the avatar letters from the display name (first letter of the
+// first and last word, e.g. "Jean Dupont" → "JD"; single word → its first two
+// letters), falling back to the email local-part, then "?".
+function monogram(user: User): string {
+  const name = (user.user_metadata?.display_name as string | undefined)?.trim();
+  if (name) {
+    const words = name.split(/\s+/);
+    if (words.length >= 2) {
+      return (words[0][0] + words[words.length - 1][0]).toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase();
+  }
+  const local = user.email?.split("@")[0];
+  return local ? local.slice(0, 2).toUpperCase() : "?";
+}
 
 export function UserNav() {
   const { user, loading } = useAuth();
@@ -21,10 +38,11 @@ export function UserNav() {
     );
   }
 
-  const initials = (user.email ?? "?")
-    .split("@")[0]
-    .slice(0, 2)
-    .toUpperCase();
+  const initials = monogram(user);
+  const displayName =
+    (user.user_metadata?.display_name as string | undefined)?.trim() ||
+    user.email ||
+    undefined;
 
   return (
     <div className="flex items-center gap-3">
@@ -32,7 +50,7 @@ export function UserNav() {
       <Link
         to="/profile"
         className="flex items-center gap-2 text-sm text-zinc-200 hover:text-amber-400"
-        title={user.email ?? undefined}
+        title={displayName}
       >
         <span className="grid h-7 w-7 place-items-center rounded-full bg-zinc-800 text-xs font-medium text-zinc-200">
           {initials}

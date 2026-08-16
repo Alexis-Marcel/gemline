@@ -1,14 +1,31 @@
 # Gemline
 
-Online multiplayer board game played on a hexagonal grid. Two parallel win conditions — align stones or capture opponent pairs.
+Real-time multiplayer board game on a hexagonal grid — 2 to 6 players, win by aligning stones or capturing opponent pairs.
 
-## Rules
+**▶ Play it live: [gemline.werilo.fr](https://gemline.werilo.fr)** — anonymous play works, no account needed.
 
-Each player has a colored stock of 50 gems. On your turn you place one gem on any free intersection of an 11-side hexagonal board (331 intersections in total). The placement may trigger captures and may end the game.
+![Gemline game view](docs/media/game.png)
 
-**Capture.** When the pattern `[you][opponent][opponent][you]` appears on any of the three line axes after your placement, with both opponent stones sharing the same color, those two stones are removed and credited to you as one captured pair. You can trigger several captures from a single placement, across different axes or the same axis. A placement that fills the middle of an opponent sandwich does *not* self-capture.
+Built end to end as a solo project: a pure Go rules engine, an event-sourced backend that scales horizontally with single-writer game ownership, a React frontend, and a GitOps-managed Kubernetes deployment provisioned from scratch. The distributed-systems work is deliberate: the platform applies the patterns you'd reach for at much larger scale (leases with fencing, routed pub/sub, leader election), each introduced to fix a concrete correctness bug or scaling wall — see the [architecture](#architecture) section.
 
-**Win.** A line of 6 of your color, anywhere on the board, is an instant win. Otherwise, the thresholds depend on the player count (see the table below, and `internal/game/state.go` for the source of truth). In 2-player mode: eight 4-alignments, three 5-alignments, or twelve captured pairs (24 gems gobbled two-by-two).
+## Engineering highlights
+
+- **Pure rules engine** (`internal/game`) — no I/O, no concurrency, 100 % statement coverage, enforced by a CI gate. All captures, alignments, clocks and win conditions live here and nowhere else.
+- **Event-sourced persistence** — a game's state is rebuilt by replaying its move log through the same engine used at play time. No state snapshots; the journal is the source of truth.
+- **Horizontal scaling via single-writer ownership** — each live game is owned by exactly one replica (Postgres leases, TTL + heartbeat), and every journal write is fenced by an ownership epoch so a zombie owner can *believe* it owns a game but can no longer *write*. Crashed owners are recovered by an orphan sweeper + replay.
+- **Interest-routed fan-out** — live events travel over Redis pub/sub on per-game channels; a pod only subscribes to games its clients watch. The bus is lossy by design: events are sequenced, clients detect gaps and catch up from the journal (`/events?since=`).
+- **Gateway / gamesvc split** — one binary, `ROLE=all|gateway|gamesvc`. Gateways terminate WebSockets and proxy commands to the owning gamesvc pod, so deploying game logic drops zero client connections.
+- **Leader-elected matchmaker** — the durable queue stays in Postgres (`FOR UPDATE SKIP LOCKED`); a single elected leader runs matching, woken instantly by a Redis doorbell on enqueue.
+- **Observability** — Prometheus metrics + alerts as code, Grafana dashboards, and OpenTelemetry traces that survive the cross-pod command forward (one trace: gateway → owner → SQL).
+- **One-command infrastructure** — `make deploy`: Terraform (Hetzner VMs, LB, DNS) → Ansible (HA k3s, ArgoCD) → ArgoCD GitOps from this repo. Secrets via External Secrets + OIDC federation, zero long-lived cloud keys in the cluster. See [DEPLOY.md](DEPLOY.md).
+- **Hardening** — seat tokens stored as SHA-256 only, per-caller token-bucket rate limiting, bounded request bodies (32 KiB), origin-locked CORS and WebSocket checks.
+
+## The game
+
+Each player has a stock of 50 gems. On your turn you place one gem on any free intersection of an 11-side hexagonal board (331 intersections). Two win tracks run in parallel:
+
+- **Capture** — when `[you][opponent][opponent][you]` appears on any of the three line axes after your placement (both victims the same color), the pair is removed and credited to you. One placement can trigger several captures; filling the middle of an opponent sandwich does *not* self-capture.
+- **Alignments** — a line of 6 is an instant win. Otherwise you win by accumulating maximal 4- or 5-alignments, or captured pairs, with thresholds per player count (`internal/game/state.go` is the source of truth):
 
 | Players | 6-line | 5-lines | 4-lines | Captured pairs |
 | ------- | ------ | ------- | ------- | -------------- |
@@ -18,24 +35,35 @@ Each player has a colored stock of 50 gems. On your turn you place one gem on an
 | 5       | 1      | 2       | 4       | 7              |
 | 6       | 1      | 2       | 4       | 6              |
 
-## Status
+Per-player chess clocks (10 min default), resign, draw offers, unanimous rematch, in-game chat, heuristic bots to fill seats, Elo rating with a global leaderboard, and full game replay round out the product.
 
-The full vertical slice works end-to-end: a React frontend in `web/` lets browsers join the same game and play in real time, the Go backend persists every move to Postgres so games survive a restart, signed-in users get profiles + history + Elo, and the engine itself is covered by tests (99.3% on `internal/game`). The backend is horizontally scalable — each live game is owned by exactly one replica (Postgres leases + fencing), and replicas share live events through Redis pub/sub routed per game.
+## Architecture
 
-**Works:**
+```mermaid
+flowchart LR
+  C["Browsers"] -- "WebSocket / REST" --> GW["gateway ×N<br/>WS termination · auth · presence"]
+  GW -- "forward command" --> GS["gamesvc ×N<br/>1 live game = 1 owner<br/>clocks · bots · matchmaker leader"]
+  GS -- "PUBLISH game:{id}" --> R[("Redis<br/>per-game pub/sub · doorbell")]
+  R -- "SUBSCRIBE game:{id}" --> GW
+  GS -- "append (seq, epoch)" --> PG[("Postgres<br/>event journal · leases · accounts")]
+  GW -. "JWT verify (JWKS)" .-> SB["Supabase Auth"]
+```
 
-- **Play** — game creation, token-gated joining (anonymous *or* authenticated), turn enforcement, captures, alignments, win detection for 2–6 players.
-- **Real time** — WebSocket broadcast with auto-reconnect and event catch-up (`/events?since=`), live presence badges, per-player clocks, resign and draw offers.
-- **Matchmaking** — async queue for 1v1 and 3–6-player games with live count + ETA, Elo rating, and a global leaderboard.
-- **Social** — cross-page game invitations (with toast + notification chime), unanimous rematch, in-game chat.
-- **Bots** — heuristic AI opponents (`internal/ai`) that can fill seats in private games.
-- **Accounts** — Supabase email/password auth, public profiles, per-user history and aggregate stats.
-- **Persistence & scale** — every move stored in Postgres with full state replay on load; multi-replica backend via per-game ownership leases (single writer, fenced by epoch, crash takeover) and Redis pub/sub routed per game (cross-pod event fan-out + cache invalidation).
-- **Hardening** — bounded request bodies (32 KiB), per-caller token-bucket rate limiting on the abuse-prone endpoints (game create, chat, matchmake enqueue, profile search) returning `429` on flood, SHA-256-hashed seat tokens, and origin-locked CORS + WebSocket checks.
+**Life of a move:**
+
+1. The player sends a move over WebSocket/REST to any gateway.
+2. The gateway resolves the game's lease and forwards the command to the owning gamesvc pod (fallback chain: owner → gamesvc pool → handle locally — affinity is an optimization, never a reason to fail a command).
+3. The owner validates in memory, increments `seq`, appends to the journal stamped with its lease epoch (a stale epoch is rejected atomically in SQL), and re-arms the clock.
+4. It publishes the event on `game:{id}`; only gateways with clients on that game receive it and push it down their WebSockets — including to the move's author, confirmed by the same path as everyone else.
+5. If a client detects a `seq` gap (missed event, reconnect), it catches up with `GET /events?since=N`.
+
+The invariant hierarchy: **the transport is lossy, the journal is the truth, clients reconcile by offset.** That contract predates every infrastructure change — it's what allowed swapping the whole transport (Postgres LISTEN/NOTIFY → Redis) and splitting the backend into roles without ever touching the client protocol.
+
+Everything degrades gracefully: without `DATABASE_URL` games live in memory and anonymous play still works; without Redis the binary runs single-process; without Supabase only authenticated endpoints return 401.
 
 ## Getting started
 
-The stack is Go for the backend, Vite + React for the frontend, Postgres for persistence, Redis for cross-replica event fan-out, and Supabase for user authentication. Postgres can be your Supabase project's database (recommended) or a local Docker Postgres for offline dev; Redis comes from `docker compose up -d` either way.
+The stack is Go (backend), Vite + React + Tailwind (frontend), Postgres (persistence), Redis (cross-replica fan-out), Supabase (auth). Postgres can be your Supabase project's database or the local Docker one for offline dev.
 
 ### One-time setup
 
@@ -43,8 +71,8 @@ The stack is Go for the backend, Vite + React for the frontend, Postgres for per
 2. Grab three values from your project settings:
    - **DATABASE_URL** — Settings → Database → Connection string (URI format).
    - **VITE_SUPABASE_URL** and **VITE_SUPABASE_PUBLISHABLE_KEY** — Settings → API.
-   - **SUPABASE_URL** — Settings → API → Project URL. The backend fetches the JWKS that verifies user JWTs.
-3. Frontend env vars: copy `web/.env.example` to `web/.env.local` and paste the `VITE_SUPABASE_*` values.
+   - **SUPABASE_URL** — Settings → API → Project URL (the backend fetches its JWKS from it).
+3. Copy `web/.env.example` to `web/.env.local` and paste the `VITE_SUPABASE_*` values.
 
 ### Run
 
@@ -64,9 +92,10 @@ cd web && npm install && npm run dev
 
 The frontend serves on `:5173` and proxies `/api` and `/ws` to the backend on `:8080`. Visit `http://localhost:5173` to play.
 
-Both `DATABASE_URL` and the auth variables are optional — if unset, games stay in memory and `/api/auth/*` returns 401, but anonymous play still works. `REDIS_URL` is required whenever `DATABASE_URL` is set (it carries the cross-replica event fan-out); `docker compose up -d` provides one on `localhost:6379`. Another optional variable, `ALLOWED_ORIGINS` (comma-separated), locks down CORS and the WebSocket origin check; leave it empty in dev (permissive `*`), set it to your frontend origin(s) in production. The backend reads its environment from a `.env` (and optional `.env.local` override) at the repo root in addition to the shell, so you can `cp .env.example .env` once and forget about it. For an offline-friendly dev loop without Supabase, `docker compose up -d` also brings up a local Postgres on `localhost:5432` with credentials `gemline / gemline`.
+`DATABASE_URL` and the auth variables are optional — unset, games stay in memory and anonymous play still works. `REDIS_URL` is required whenever `DATABASE_URL` is set. `ALLOWED_ORIGINS` (comma-separated) locks down CORS and the WebSocket origin check in production; leave it empty in dev. The backend also reads `.env` / `.env.local` at the repo root, so you can `cp .env.example .env` once and forget about it.
 
-### Quick smoke test against the API
+<details>
+<summary><strong>Quick smoke test against the API</strong></summary>
 
 ```sh
 # Create a private 2-player game. The creator is auto-seated and gets a
@@ -86,12 +115,17 @@ curl -s -X POST localhost:8080/api/games/$GAME/moves \
   -H 'Content-Type: application/json' -d '{"q":0,"r":0}'
 ```
 
+</details>
+
 ## API
 
 Two parallel auth tokens travel on requests:
 
-- **`Authorization: Bearer <JWT>`** — Supabase-issued user JWT. Identifies *who* the client is. Optional on game endpoints (anonymous play is allowed) and required on `/api/auth/*`, `/api/profile`, `/api/users/me/*`.
-- **`X-Player-Token: <seat-token>`** — per-seat secret returned once by `/join`. Identifies *which seat* in *which game* the client controls. Required on `/api/games/{id}/moves`.
+- **`Authorization: Bearer <JWT>`** — Supabase-issued user JWT. Identifies *who* the client is. Optional on game endpoints (anonymous play is allowed), required on `/api/auth/*`, `/api/profile`, `/api/users/me/*`.
+- **`X-Player-Token: <seat-token>`** — per-seat secret returned once by `/join`. Identifies *which seat* in *which game* the client controls. Only its SHA-256 is persisted: an attacker reading the DB cannot impersonate a player, and a player keeps their seat across restarts.
+
+<details>
+<summary><strong>Full endpoint reference</strong></summary>
 
 **Games & seats**
 
@@ -149,49 +183,65 @@ Two parallel auth tokens travel on requests:
 
 A game starts in `waiting` and transitions to `playing` once every seat is claimed. The WebSocket emits one `state` event on connect, then a `move` event after every placement. The server pings every 25s; the client reconnects with exponential backoff and ±30% jitter.
 
-The seat token returned by `join` is sent once and then only its SHA-256 is persisted — comparing on the hash means an attacker reading the DB cannot impersonate a player, and a player keeps their seat across server restarts.
+**Coordinates.** The board uses axial coordinates; the center is `(q=0, r=0)`. A position is on the board iff `|q| ≤ 10`, `|r| ≤ 10`, and `|q + r| ≤ 10`. The three line axes for captures and alignments are `(1, 0)`, `(0, 1)`, and `(1, -1)`. The `cells` field of the game DTO is a flat array of length `(2·side − 1)² = 441` in row-major order over the axial bounding box: `−1` off-board, `0` empty, `1..6` player colors.
 
-### Coordinates
-
-The board uses axial coordinates. The center is `(q=0, r=0)`. A position is on the board iff `|q| ≤ 10`, `|r| ≤ 10`, and `|q + r| ≤ 10`. The three line axes used for captures and alignments are `(1, 0)`, `(0, 1)`, and `(1, -1)`.
-
-The `cells` field of the game DTO is a flat array of length `(2·side − 1)² = 441`, in row-major order over the axial bounding box. Values are `−1` for off-board slots, `0` for empty intersections, and `1..6` for player colors.
+</details>
 
 ## Project layout
 
 ```
-cmd/server/             backend entrypoint
-internal/game/          pure engine — no I/O, no concurrency
+cmd/server/             backend entrypoint — one binary, ROLE=all|gateway|gamesvc
+internal/game/          pure rules engine — no I/O, no concurrency
 internal/server/        HTTP + WebSocket layer, in-memory cache, Postgres repo,
-                        matchmaking, chat, clocks, presence, bots, JWT middleware
+                        matchmaking, chat, clocks, presence, bots, JWT middleware,
+                        cross-pod command forwarding
+internal/lease/         per-game ownership leases (single writer + fencing) and
+                        leader election
+internal/bus/           Redis pub/sub with per-game channel routing
 internal/ai/            heuristic bot move selection
 internal/elo/           Elo rating math
-internal/bus/           Redis pub/sub with per-game channel routing
-internal/lease/         per-game ownership leases (single writer + fencing)
 internal/db/            connection pool + embedded goose migrations
+internal/tracing/       OpenTelemetry setup
 web/                    Vite + React + Tailwind frontend
   src/api/              wire types, REST client, WebSocket singletons, Supabase client
   src/auth/             AuthProvider + useAuth hook
   src/notifications/    cross-page invitation toasts
   src/components/       Board, Scoreboard, chat, clocks, rematch, replay, …
   src/pages/            Home, Game, Login, Profile, PublicProfile, Leaderboard, Matchmaking
-docker-compose.yml      offline-friendly Postgres for local dev
+docker-compose.yml      offline-friendly Postgres + Redis for local dev
 deploy/                 Terraform + Ansible + ArgoCD + k8s — see DEPLOY.md
 ```
 
-Persistence is event-sourced: a game's state is rebuilt by replaying its `moves` through `ApplyMove`, so captures and win states are reproduced by the same rule engine used at play time. The move log is the source of truth — there is no separate state snapshot. The schema (in `internal/db/migrations/`, applied automatically via goose on startup) also holds `seats`, `profiles`, `ratings` + `rating_history`, `messages` (chat), `matchmake_queue`, and `game_events` (the sequenced WebSocket event log used for reconnect catch-up).
+Persistence is event-sourced: a game's state is rebuilt by replaying its `moves` through `ApplyMove`, so captures and win states are reproduced by the same rule engine used at play time. The move log is the source of truth — there is no separate state snapshot. The schema (`internal/db/migrations/`, applied via goose on startup) also holds seats, profiles, ratings + history, chat messages, the matchmaking queue, the sequenced `game_events` journal, and the game/leader lease tables.
 
 ## Tests
 
 ```sh
-go test ./...                                   # engine + REST + WS (hermetic)
-go test -cover ./internal/game/...              # 99.3 %
+go test ./...                                   # engine + REST + WS + bus (hermetic)
+go test -cover ./internal/game/                 # 100.0% of statements, gated ≥95% in CI
 
-# Integration tests that hit a real Postgres (started via docker compose):
+# Integration tests against a real Postgres (started via docker compose):
 GEMLINE_TEST_DATABASE_URL='postgres://gemline:gemline@localhost:5432/gemline?sslmode=disable' \
-  go test ./internal/db/... ./internal/server/...
+  go test ./internal/db/... ./internal/server/... ./internal/lease/...
 ```
 
-The hermetic suite covers hex bounds, capture detection on all three axes, capture chaining (multi-axis and multi-pattern on a single axis), suicide non-capture, alignment counting before and after captures, win conditions for each kind (4, 5, 6 alignments, capture threshold), turn rotation for 2- and 3-player games, and every documented error path. The server tests cover the REST round trip and the WebSocket broadcast.
+The coverage number is honest about its scope: it is statement coverage of the rules engine — the package where a silent bug corrupts a game without crashing anything. It is high because the engine is a pure package, and it stays high because CI fails below 95 %.
 
-The integration suite verifies that a game replayed from Postgres produces the same in-memory state as the original — including the capture scenario, where two stones are removed by the rule engine during replay.
+- The **hermetic suite** covers hex bounds, capture detection on all three axes, capture chaining, suicide non-capture, alignment counting before/after captures, every win kind, clocks (accrual, increment, flag, skew tolerance), resign/draw/forfeit endings for 2 and 3+ players, turn rotation, and every documented error path — plus the REST round trip, WebSocket broadcast, and the Redis bus against miniredis.
+- The **integration suite** verifies that a game replayed from Postgres reproduces the exact in-memory state of the original — including captures re-executed by the engine during replay — and exercises leases, fencing, and takeover against a real database.
+- [SMOKE_TESTS.md](SMOKE_TESTS.md) scripts the end-to-end browser scenarios (multi-account invitations, rematch, cross-page notifications) that unit tests can't reach.
+
+## Deployment
+
+The production instance runs on a self-hosted HA k3s cluster on Hetzner Cloud, stood up with one command (`make deploy`) and managed by GitOps from this repo:
+
+| Layer | Tool |
+|---|---|
+| Infrastructure | Terraform — VMs, private network, LB, firewall, Cloudflare DNS; remote state on S3 + DynamoDB |
+| Configuration | Ansible — HA k3s (embedded etcd), cert-manager, ArgoCD app-of-apps |
+| GitOps | ArgoCD — auto-sync + self-heal from `main`; CI builds images to GHCR and commits the version bumps |
+| Secrets | AWS Secrets Manager + External Secrets Operator, OIDC-federated — zero long-lived cloud keys in the cluster |
+| TLS | cert-manager + Let's Encrypt via Traefik |
+| Observability | kube-prometheus-stack + Tempo — metrics, dashboards, alerts as code, distributed traces |
+
+Full walkthrough in [DEPLOY.md](DEPLOY.md).

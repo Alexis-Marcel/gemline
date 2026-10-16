@@ -25,6 +25,9 @@ const LoginPage = lazy(() =>
 const SignupPage = lazy(() =>
   import("./pages/LoginPage").then((m) => ({ default: m.SignupPage })),
 );
+const AuthCallbackPage = lazy(() =>
+  import("./pages/LoginPage").then((m) => ({ default: m.AuthCallbackPage })),
+);
 const MatchmakingPage = lazy(() =>
   import("./pages/MatchmakingPage").then((m) => ({ default: m.MatchmakingPage })),
 );
@@ -63,6 +66,7 @@ export default function App() {
                 <Route path="/" element={<HomePage />} />
                 <Route path="/login" element={<LoginPage />} />
                 <Route path="/signup" element={<SignupPage />} />
+                <Route path="/auth/callback" element={<AuthCallbackPage />} />
                 <Route path="/profile" element={<ProfilePage />} />
                 <Route path="/profile/:userId" element={<PublicProfilePage />} />
                 <Route path="/leaderboard" element={<LeaderboardPage />} />

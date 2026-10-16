@@ -41,10 +41,14 @@ type Server struct {
 	resolver  *lease.Resolver
 }
 
-// Config holds optional dependencies. Empty SupabaseURL disables auth (every
-// /api/auth/* responds 401). Empty AllowedOrigins is dev mode (CORS "*" and the
-// WS origin check skipped); production must set the real frontend origin(s).
+// Config holds optional dependencies. Auth uses OIDCIssuer (any OIDC provider,
+// tokens pinned to its iss and to OIDCAudience when set), else the legacy
+// SupabaseURL; with neither, auth is disabled (every /api/auth/* responds 401).
+// Empty AllowedOrigins is dev mode (CORS "*" and the WS origin check skipped);
+// production must set the real frontend origin(s).
 type Config struct {
+	OIDCIssuer     string
+	OIDCAudience   string
 	SupabaseURL    string
 	AllowedOrigins []string
 
@@ -95,16 +99,26 @@ func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 		log.Info("CORS + WS origin checks enabled", "origins", cfg.AllowedOrigins)
 	}
 
-	if cfg.SupabaseURL == "" {
-		log.Warn("auth disabled — set SUPABASE_URL to enable")
-	} else {
-		// Don't start auth-disabled when auth was configured — crashloop instead.
+	// Don't start auth-disabled when auth was configured — crashloop instead.
+	switch {
+	case cfg.OIDCIssuer != "":
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		kf, err := oidcKeyfunc(ctx, cfg.OIDCIssuer, cfg.OIDCAudience)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("initialise OIDC verifier: %w", err)
+		}
+		srv.verifier = kf
+		log.Info("auth enabled", "scheme", "oidc", "issuer", cfg.OIDCIssuer, "audience", cfg.OIDCAudience)
+	case cfg.SupabaseURL != "":
 		kf, err := jwksKeyfunc(cfg.SupabaseURL)
 		if err != nil {
 			return nil, fmt.Errorf("initialise JWKS verifier: %w", err)
 		}
 		srv.verifier = kf
 		log.Info("auth enabled", "scheme", "jwks", "url", cfg.SupabaseURL)
+	default:
+		log.Warn("auth disabled — set OIDC_ISSUER (or SUPABASE_URL) to enable")
 	}
 	// Clock flag / disconnect-grace expiry: push fresh state so subscribers
 	// see the forfeit.

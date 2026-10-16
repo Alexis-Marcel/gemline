@@ -46,7 +46,7 @@ flowchart LR
   GS -- "PUBLISH game:{id}" --> R[("Redis<br/>per-game pub/sub · doorbell")]
   R -- "SUBSCRIBE game:{id}" --> GW
   GS -- "append (seq, epoch)" --> PG[("Postgres<br/>event journal · leases · accounts")]
-  GW -. "JWT verify (JWKS)" .-> SB["Supabase Auth"]
+  GW -. "JWT verify (OIDC JWKS)" .-> SB["OIDC provider<br/>(Authentik)"]
 ```
 
 **Life of a move:**
@@ -59,30 +59,29 @@ flowchart LR
 
 The invariant hierarchy: **the transport is lossy, the journal is the truth, clients reconcile by offset.** That contract predates every infrastructure change — it's what allowed swapping the whole transport (Postgres LISTEN/NOTIFY → Redis) and splitting the backend into roles without ever touching the client protocol.
 
-Everything degrades gracefully: without `DATABASE_URL` games live in memory and anonymous play still works; without Redis the binary runs single-process; without Supabase only authenticated endpoints return 401.
+Everything degrades gracefully: without `DATABASE_URL` games live in memory and anonymous play still works; without Redis the binary runs single-process; without an OIDC provider only authenticated endpoints return 401.
 
 ## Getting started
 
-The stack is Go (backend), Vite + React + Tailwind (frontend), Postgres (persistence), Redis (cross-replica fan-out), Supabase (auth). Postgres can be your Supabase project's database or the local Docker one for offline dev.
+The stack is Go (backend), Vite + React + Tailwind (frontend), Postgres (persistence), Redis (cross-replica fan-out), any OIDC provider for accounts (Authentik in production — the "Compte Eriphe" shared by all my projects). Postgres can be a hosted database (Supabase here) or the local Docker one for offline dev.
 
 ### One-time setup
 
-1. Create a free project at [supabase.com](https://supabase.com).
-2. Grab three values from your project settings:
-   - **DATABASE_URL** — Settings → Database → Connection string (URI format).
-   - **VITE_SUPABASE_URL** and **VITE_SUPABASE_PUBLISHABLE_KEY** — Settings → API.
-   - **SUPABASE_URL** — Settings → API → Project URL (the backend fetches its JWKS from it).
-3. Copy `web/.env.example` to `web/.env.local` and paste the `VITE_SUPABASE_*` values.
+1. Register a **public** OIDC client (authorization code + PKCE) on your provider, with `http://localhost:5173/auth/callback` as redirect URI and the `openid email profile offline_access` scopes. Tokens' `sub` must be a UUID (Authentik: subject mode "User's UUID").
+2. Note its **issuer** URL and **client ID**; the backend discovers the JWKS from the issuer and pins `iss`/`aud`.
+3. Copy `web/.env.example` to `web/.env.local` and set `VITE_OIDC_ISSUER` / `VITE_OIDC_CLIENT_ID`.
+4. Optionally a **DATABASE_URL** (any Postgres) — without it games live in memory.
 
 ### Run
 
 ```sh
-# Redis (and a local Postgres if you're not using Supabase)
+# Redis (and a local Postgres if you don't have one)
 docker compose up -d
 
 # Backend
-DATABASE_URL='<your Supabase DATABASE_URL>' \
-SUPABASE_URL='https://<your-project>.supabase.co' \
+DATABASE_URL='<your Postgres URL>' \
+OIDC_ISSUER='https://auth.example.com/application/o/gemline/' \
+OIDC_AUDIENCE='gemline' \
 REDIS_URL='redis://localhost:6379' \
   go run ./cmd/server
 
@@ -121,7 +120,7 @@ curl -s -X POST localhost:8080/api/games/$GAME/moves \
 
 Two parallel auth tokens travel on requests:
 
-- **`Authorization: Bearer <JWT>`** — Supabase-issued user JWT. Identifies *who* the client is. Optional on game endpoints (anonymous play is allowed), required on `/api/auth/*`, `/api/profile`, `/api/users/me/*`.
+- **`Authorization: Bearer <JWT>`** — access token issued by the OIDC provider (JWT, verified against its JWKS, `iss`/`aud` pinned). Identifies *who* the client is. Optional on game endpoints (anonymous play is allowed), required on `/api/auth/*`, `/api/profile`, `/api/users/me/*`.
 - **`X-Player-Token: <seat-token>`** — per-seat secret returned once by `/join`. Identifies *which seat* in *which game* the client controls. Only its SHA-256 is persisted: an attacker reading the DB cannot impersonate a player, and a player keeps their seat across restarts.
 
 <details>
@@ -203,7 +202,7 @@ internal/elo/           Elo rating math
 internal/db/            connection pool + embedded goose migrations
 internal/tracing/       OpenTelemetry setup
 web/                    Vite + React + Tailwind frontend
-  src/api/              wire types, REST client, WebSocket singletons, Supabase client
+  src/api/              wire types, REST client, WebSocket singletons, OIDC client
   src/auth/             AuthProvider + useAuth hook
   src/notifications/    cross-page invitation toasts
   src/components/       Board, Scoreboard, chat, clocks, rematch, replay, …

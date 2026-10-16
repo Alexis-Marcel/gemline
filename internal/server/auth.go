@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/MicahParks/keyfunc/v3"
@@ -13,8 +15,9 @@ import (
 )
 
 // Two orthogonal tokens: a per-seat token in X-Player-Token authorizes
-// "controls seat X in game Y"; a Supabase JWT in Authorization: Bearer
-// authorizes "is user U". Both can travel on the same request.
+// "controls seat X in game Y"; an access-token JWT in Authorization: Bearer
+// authorizes "is user U". Both can travel on the same request. The JWT comes
+// from any OIDC provider (OIDC_ISSUER, e.g. Authentik) or, legacy, Supabase.
 
 type userCtxKey struct{}
 
@@ -29,26 +32,26 @@ func userFromContext(ctx context.Context) (*AuthUser, bool) {
 	return v, ok
 }
 
-type supabaseClaims struct {
-	Email        string                 `json:"email,omitempty"`
-	Role         string                 `json:"role,omitempty"`
-	UserMetadata map[string]interface{} `json:"user_metadata,omitempty"`
+// tokenClaims covers both shapes: standard OIDC (name, preferred_username) and
+// Supabase (user_metadata.display_name).
+type tokenClaims struct {
+	Email             string                 `json:"email,omitempty"`
+	Name              string                 `json:"name,omitempty"`
+	PreferredUsername string                 `json:"preferred_username,omitempty"`
+	Role              string                 `json:"role,omitempty"`
+	UserMetadata      map[string]interface{} `json:"user_metadata,omitempty"`
 	jwt.RegisteredClaims
 }
 
-func displayNameFromMetadata(md map[string]interface{}) string {
-	if md == nil {
-		return ""
+// displayName prefers Supabase's display_name, then the OIDC name, then the username.
+func (c *tokenClaims) displayName() string {
+	if raw, ok := c.UserMetadata["display_name"].(string); ok && strings.TrimSpace(raw) != "" {
+		return strings.TrimSpace(raw)
 	}
-	raw, ok := md["display_name"]
-	if !ok {
-		return ""
+	if n := strings.TrimSpace(c.Name); n != "" {
+		return n
 	}
-	str, ok := raw.(string)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(str)
+	return strings.TrimSpace(c.PreferredUsername)
 }
 
 func jwksKeyfunc(supabaseURL string) (jwt.Keyfunc, error) {
@@ -60,11 +63,61 @@ func jwksKeyfunc(supabaseURL string) (jwt.Keyfunc, error) {
 	return kf.Keyfunc, nil
 }
 
-func parseSupabaseJWT(token string, verifier jwt.Keyfunc) (*supabaseClaims, error) {
+// oidcKeyfunc discovers the issuer's JWKS and also pins iss (and aud when set):
+// a token signed by the same provider for another application is refused.
+func oidcKeyfunc(ctx context.Context, issuer, audience string) (jwt.Keyfunc, error) {
+	discovery := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discovery, nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("oidc discovery: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("oidc discovery: HTTP %d", res.StatusCode)
+	}
+	var doc struct {
+		Issuer  string `json:"issuer"`
+		JWKSURI string `json:"jwks_uri"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&doc); err != nil {
+		return nil, fmt.Errorf("oidc discovery: %w", err)
+	}
+	if doc.JWKSURI == "" {
+		return nil, errors.New("oidc discovery: no jwks_uri")
+	}
+	kf, err := keyfunc.NewDefault([]string{doc.JWKSURI})
+	if err != nil {
+		return nil, fmt.Errorf("init jwks keyfunc: %w", err)
+	}
+	return pinClaims(kf.Keyfunc, doc.Issuer, audience), nil
+}
+
+// pinClaims wraps a Keyfunc so tokens must carry the expected iss/aud; the
+// signature itself is still checked by jwt against the returned key.
+func pinClaims(kf jwt.Keyfunc, issuer, audience string) jwt.Keyfunc {
+	return func(t *jwt.Token) (interface{}, error) {
+		if iss, _ := t.Claims.GetIssuer(); iss != issuer {
+			return nil, fmt.Errorf("unexpected issuer %q", iss)
+		}
+		if audience != "" {
+			aud, _ := t.Claims.GetAudience()
+			if !slices.Contains(aud, audience) {
+				return nil, fmt.Errorf("token not issued for %q", audience)
+			}
+		}
+		return kf(t)
+	}
+}
+
+func parseJWT(token string, verifier jwt.Keyfunc) (*tokenClaims, error) {
 	if verifier == nil {
 		return nil, errors.New("JWT verifier not configured")
 	}
-	claims := &supabaseClaims{}
+	claims := &tokenClaims{}
 	parsed, err := jwt.ParseWithClaims(token, claims, verifier)
 	if err != nil {
 		return nil, err
@@ -100,7 +153,7 @@ func jwtMiddleware(verifier jwt.Keyfunc, log *slog.Logger, next http.Handler) ht
 			next.ServeHTTP(w, r)
 			return
 		}
-		claims, err := parseSupabaseJWT(token, verifier)
+		claims, err := parseJWT(token, verifier)
 		if err != nil {
 			if log != nil {
 				log.Debug("jwt rejected", "err", err, "path", r.URL.Path)
@@ -111,7 +164,7 @@ func jwtMiddleware(verifier jwt.Keyfunc, log *slog.Logger, next http.Handler) ht
 		ctx := context.WithValue(r.Context(), userCtxKey{}, &AuthUser{
 			ID:          claims.Subject,
 			Email:       claims.Email,
-			DisplayName: displayNameFromMetadata(claims.UserMetadata),
+			DisplayName: claims.displayName(),
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import type { User } from "@supabase/supabase-js";
+import type { AuthUser } from "../api/oidc";
 import { useAuth } from "../auth/useAuth";
 import { useInvitations } from "../notifications/useInvitations";
 
 // monogram derives the avatar letters from the display name (first letter of the
 // first and last word, e.g. "Jean Dupont" → "JD"; single word → its first two
 // letters), falling back to the email local-part, then "?".
-function monogram(user: User): string {
-  const name = (user.user_metadata?.display_name as string | undefined)?.trim();
+function monogram(user: AuthUser): string {
+  const name = user.displayName?.trim();
   if (name) {
     const words = name.split(/\s+/);
     if (words.length >= 2) {
@@ -39,10 +39,7 @@ export function UserNav() {
   }
 
   const initials = monogram(user);
-  const displayName =
-    (user.user_metadata?.display_name as string | undefined)?.trim() ||
-    user.email ||
-    undefined;
+  const displayName = user.displayName || user.email || undefined;
 
   return (
     <div className="flex items-center gap-3">

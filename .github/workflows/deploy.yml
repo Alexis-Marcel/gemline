@@ -79,8 +79,8 @@ jobs:
           file: ./web/Dockerfile
           push: true
           build-args: |
-            VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
-            VITE_SUPABASE_PUBLISHABLE_KEY=${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+            VITE_OIDC_ISSUER=https://auth.eriphe.com/application/o/gemline/
+            VITE_OIDC_CLIENT_ID=gemline
           tags: |
             ${{ env.IMAGE_WEB }}:${{ github.sha }}
             ${{ env.IMAGE_WEB }}:latest

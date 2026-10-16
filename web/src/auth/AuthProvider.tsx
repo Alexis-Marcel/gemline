@@ -22,7 +22,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const onLoaded = (u: User) => setOidcUser(u);
     const onUnloaded = () => setOidcUser(null);
-    // Renewal failed (refresh token expired or revoked): drop the stale session.
+    // Renewal failed (provider session ended): drop the stale session.
     const onRenewError = () => {
       void userManager.removeUser();
     };

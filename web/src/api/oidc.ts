@@ -80,7 +80,19 @@ export function restoreSession(): Promise<User | null> {
   return restoring;
 }
 
+// Déconnexion en cours : la session locale tombe avant que le navigateur quitte la page, et une
+// page qui exige un compte (Profil…) relancerait aussitôt une connexion, plus rapide que la fin de
+// la session chez le fournisseur — on se retrouverait reconnecté. Plus aucune connexion d'ici là.
+let signingOut = false;
+
 /** Envoie vers la page de connexion du fournisseur ; on revient sur `next`. */
 export function signIn(next = "/") {
+  if (signingOut) return Promise.resolve();
   return userManager.signinRedirect({ state: { next } });
+}
+
+/** Ferme la session ici et chez le fournisseur (donc dans toutes les applis Eriphe). */
+export function signOut() {
+  signingOut = true;
+  return userManager.signoutRedirect();
 }

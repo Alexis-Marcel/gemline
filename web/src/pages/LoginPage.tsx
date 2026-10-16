@@ -1,114 +1,58 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { supabase, supabaseConfigured } from "../api/supabase";
-import { Button } from "../components/Button";
+import { authConfigured, signIn, userManager } from "../api/oidc";
 
+// /login and /signup hand off to the account provider (Compte Eriphe), whose
+// page offers both sign-in and sign-up; we come back on /auth/callback.
 export function LoginPage() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const navigate = useNavigate();
   const location = useLocation();
   const next = new URLSearchParams(location.search).get("next") ?? "/";
+  const [error, setError] = useState<string | null>(null);
+  const started = useRef(false);
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setSubmitting(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    setSubmitting(false);
-    if (error) {
-      setError(error.message);
-      return;
-    }
-    navigate(next, { replace: true });
-  }
+  useEffect(() => {
+    if (!authConfigured || started.current) return;
+    started.current = true;
+    signIn(next).catch((e: unknown) => setError(e instanceof Error ? e.message : "Connexion impossible"));
+  }, [next]);
 
   return (
-    <AuthLayout title="Se connecter">
-      {!supabaseConfigured && <NotConfiguredNotice />}
-      <form onSubmit={handleSubmit} className="space-y-3">
-        <Field label="Email" type="email" value={email} onChange={setEmail} autoFocus />
-        <Field label="Mot de passe" type="password" value={password} onChange={setPassword} />
-        <Button type="submit" disabled={submitting || !supabaseConfigured} className="w-full">
-          {submitting ? "Connexion…" : "Se connecter"}
-        </Button>
-        {error && (
-          <p className="rounded-md border border-red-900/50 bg-red-950/30 p-2 text-sm text-red-300">
-            {error}
-          </p>
-        )}
-      </form>
-      <p className="mt-4 text-center text-sm text-zinc-400">
-        Pas de compte ?{" "}
-        <Link to="/signup" className="text-amber-400 hover:underline">
-          Inscription
-        </Link>
-      </p>
+    <AuthLayout title="Connexion">
+      {!authConfigured ? (
+        <NotConfiguredNotice />
+      ) : error ? (
+        <ErrorNotice message={error} />
+      ) : (
+        <p className="text-sm text-zinc-400">Redirection vers le Compte Eriphe…</p>
+      )}
     </AuthLayout>
   );
 }
 
-export function SignupPage() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const navigate = useNavigate();
+export const SignupPage = LoginPage;
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setInfo(null);
-    setSubmitting(true);
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { data: { display_name: displayName.trim() || email.split("@")[0] } },
-    });
-    setSubmitting(false);
-    if (error) {
-      setError(error.message);
-      return;
-    }
-    if (!data.session) {
-      // Email confirmation enabled → no session until they verify.
-      setInfo("Vérifie ta boîte mail pour confirmer ton inscription.");
-      return;
-    }
-    navigate("/", { replace: true });
-  }
+// Back from the provider: finish the code exchange (PKCE), then go where the
+// player was heading.
+export function AuthCallbackPage() {
+  const navigate = useNavigate();
+  const [error, setError] = useState<string | null>(null);
+  const done = useRef(false);
+
+  useEffect(() => {
+    if (done.current) return;
+    done.current = true;
+    userManager
+      .signinRedirectCallback()
+      .then((u) => {
+        const next = (u.state as { next?: string } | undefined)?.next;
+        navigate(next?.startsWith("/") && !next.startsWith("//") ? next : "/", { replace: true });
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "Connexion impossible"));
+  }, [navigate]);
 
   return (
-    <AuthLayout title="Créer un compte">
-      {!supabaseConfigured && <NotConfiguredNotice />}
-      <form onSubmit={handleSubmit} className="space-y-3">
-        <Field label="Nom affiché" type="text" value={displayName} onChange={setDisplayName} autoFocus />
-        <Field label="Email" type="email" value={email} onChange={setEmail} />
-        <Field label="Mot de passe" type="password" value={password} onChange={setPassword} />
-        <Button type="submit" disabled={submitting || !supabaseConfigured} className="w-full">
-          {submitting ? "Création…" : "Créer le compte"}
-        </Button>
-        {error && (
-          <p className="rounded-md border border-red-900/50 bg-red-950/30 p-2 text-sm text-red-300">
-            {error}
-          </p>
-        )}
-        {info && (
-          <p className="rounded-md border border-emerald-900/50 bg-emerald-950/30 p-2 text-sm text-emerald-300">
-            {info}
-          </p>
-        )}
-      </form>
-      <p className="mt-4 text-center text-sm text-zinc-400">
-        Déjà un compte ?{" "}
-        <Link to="/login" className="text-amber-400 hover:underline">
-          Connexion
-        </Link>
-      </p>
+    <AuthLayout title="Connexion">
+      {error ? <ErrorNotice message={error} /> : <p className="text-sm text-zinc-400">Connexion…</p>}
     </AuthLayout>
   );
 }
@@ -125,40 +69,22 @@ function AuthLayout({ title, children }: { title: string; children: React.ReactN
   );
 }
 
-function Field({
-  label,
-  type,
-  value,
-  onChange,
-  autoFocus,
-}: {
-  label: string;
-  type: string;
-  value: string;
-  onChange: (v: string) => void;
-  autoFocus?: boolean;
-}) {
+function ErrorNotice({ message }: { message: string }) {
   return (
-    <label className="block text-sm text-zinc-400">
-      {label}
-      <input
-        type={type}
-        autoFocus={autoFocus}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
-        required
-      />
-    </label>
+    <div className="space-y-3">
+      <p className="rounded-md border border-red-900/50 bg-red-950/30 p-2 text-sm text-red-300">{message}</p>
+      <Link to="/login" className="text-sm text-amber-400 hover:underline">
+        Réessayer
+      </Link>
+    </div>
   );
 }
 
 function NotConfiguredNotice() {
   return (
     <p className="mb-4 rounded-md border border-amber-900/50 bg-amber-950/30 p-3 text-xs text-amber-200">
-      Auth indisponible : variables <code>VITE_SUPABASE_URL</code> et{" "}
-      <code>VITE_SUPABASE_PUBLISHABLE_KEY</code> non configurées (voir{" "}
-      <code>web/.env.local</code>).
+      Auth indisponible : variables <code>VITE_OIDC_ISSUER</code> et <code>VITE_OIDC_CLIENT_ID</code> non
+      configurées (voir <code>web/.env.local</code>).
     </p>
   );
 }

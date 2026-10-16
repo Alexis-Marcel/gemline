@@ -113,6 +113,8 @@ func main() {
 	}
 
 	cfg := server.Config{
+		OIDCIssuer:     os.Getenv("OIDC_ISSUER"),
+		OIDCAudience:   os.Getenv("OIDC_AUDIENCE"),
 		SupabaseURL:    os.Getenv("SUPABASE_URL"),
 		AllowedOrigins: parseOrigins(os.Getenv("ALLOWED_ORIGINS")),
 	}

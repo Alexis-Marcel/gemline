@@ -25,7 +25,7 @@ func testHS256Keyfunc(secret string) jwt.Keyfunc {
 
 func makeJWT(t *testing.T, secret, sub, email string) string {
 	t.Helper()
-	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, supabaseClaims{
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, tokenClaims{
 		Email: email,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   sub,

@@ -1,9 +1,8 @@
 import { createContext } from "react";
-import type { Session, User } from "@supabase/supabase-js";
+import type { AuthUser } from "../api/oidc";
 
 export interface AuthContextValue {
-  user: User | null;
-  session: Session | null;
+  user: AuthUser | null;
   loading: boolean;
   /** Bearer JWT for our backend, or null if no session. */
   jwt: string | null;

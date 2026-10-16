@@ -1,4 +1,4 @@
-import { supabase } from "./supabase";
+import { accessToken } from "./oidc";
 import type {
   Game,
   GameRatings,
@@ -37,11 +37,9 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
     headers.set("X-Player-Token", playerToken);
   }
   if (!skipAuth) {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    if (session?.access_token) {
-      headers.set("Authorization", `Bearer ${session.access_token}`);
+    const token = await accessToken();
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
     }
   }
 

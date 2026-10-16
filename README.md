@@ -67,7 +67,7 @@ The stack is Go (backend), Vite + React + Tailwind (frontend), Postgres (persist
 
 ### One-time setup
 
-1. Register a **public** OIDC client (authorization code + PKCE) on your provider, with `http://localhost:5173/auth/callback` as redirect URI and the `openid email profile offline_access` scopes. Tokens' `sub` must be a UUID (Authentik: subject mode "User's UUID").
+1. Register a **public** OIDC client (authorization code + PKCE) on your provider, with `http://localhost:5173/auth/callback` and `http://localhost:5173/auth/silent` as redirect URIs and the `openid email profile` scopes. Tokens stay in memory: each load and renewal goes through a silent `prompt=none` iframe, so the provider must share a site with the app for its session cookie to reach the iframe (here `*.eriphe.com`). Tokens' `sub` must be a UUID (Authentik: subject mode "User's UUID").
 2. Note its **issuer** URL and **client ID**; the backend discovers the JWKS from the issuer and pins `iss`/`aud`.
 3. Copy `web/.env.example` to `web/.env.local` and set `VITE_OIDC_ISSUER` / `VITE_OIDC_CLIENT_ID`.
 4. Optionally a **DATABASE_URL** (any Postgres) — without it games live in memory.

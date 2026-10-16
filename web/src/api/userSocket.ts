@@ -44,7 +44,7 @@ export type LobbyEvent =
 type Listener = (ev: LobbyEvent) => void;
 
 /** Returns the freshest access token (or null). Called before each
- *  reconnect past the first so a stale token (Supabase refresh missed
+ *  reconnect past the first so a stale token (silent renewal missed
  *  while backgrounded) is replaced before burning more attempts. */
 export type AuthRefresher = () => Promise<string | null>;
 

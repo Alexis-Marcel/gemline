@@ -2,9 +2,16 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { userManager } from './api/oidc'
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+if (window.location.pathname === '/auth/silent') {
+  // Inside the hidden SSO iframe: hand the provider's answer back to the
+  // parent page and render nothing (no second app, no nested SSO attempt).
+  void userManager.signinSilentCallback().catch(() => {})
+} else {
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  )
+}

@@ -5,7 +5,7 @@ import {
   type ReactNode,
 } from "react";
 import type { User } from "oidc-client-ts";
-import { toAuthUser, userManager } from "../api/oidc";
+import { restoreSession, toAuthUser, userManager } from "../api/oidc";
 import { userSocket } from "../api/userSocket";
 import { AuthContext, type AuthContextValue } from "./AuthContext";
 
@@ -14,15 +14,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Initial session from localStorage, then follow sign-in / renewal / sign-out.
-    userManager
-      .getUser()
-      .then((u) => setOidcUser(u && !u.expired ? u : null))
+    // Initial session (stored, else silent SSO with the provider), then follow
+    // sign-in / renewal / sign-out.
+    restoreSession()
+      .then(setOidcUser)
       .finally(() => setLoading(false));
 
     const onLoaded = (u: User) => setOidcUser(u);
     const onUnloaded = () => setOidcUser(null);
-    // Renewal failed (refresh token expired or revoked): drop the stale session.
+    // Renewal failed (provider session ended): drop the stale session.
     const onRenewError = () => {
       void userManager.removeUser();
     };

@@ -5,7 +5,7 @@ import {
   type ReactNode,
 } from "react";
 import type { User } from "oidc-client-ts";
-import { restoreSession, toAuthUser, userManager } from "../api/oidc";
+import { restoreSession, signOut, toAuthUser, userManager } from "../api/oidc";
 import { userSocket } from "../api/userSocket";
 import { AuthContext, type AuthContextValue } from "./AuthContext";
 
@@ -71,7 +71,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       jwt: oidcUser && !oidcUser.expired ? oidcUser.access_token : null,
       // Ends the provider session too (single sign-out across Eriphe apps).
       signOut: async () => {
-        await userManager.signoutRedirect();
+        await signOut();
       },
     }),
     [oidcUser, loading],

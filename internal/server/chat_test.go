@@ -199,3 +199,22 @@ func TestGetChat_EmptyOnFreshGame(t *testing.T) {
 		t.Fatalf("want empty msg list, got %d", len(msgs))
 	}
 }
+
+// In-memory store, no messages yet: the client reads .length, so [] not null.
+func TestChatEmptyIsList(t *testing.T) {
+	srv := newAuthServer(t, nil)
+	h := srv.Routes()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/api/games", strings.NewReader(`{"players":2,"name":"Alice"}`)))
+	var created struct {
+		Game struct{ ID string } `json:"game"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || created.Game.ID == "" {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/games/"+created.Game.ID+"/messages", nil))
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("messages = %s", rec.Body.String())
+	}
+}

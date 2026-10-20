@@ -40,6 +40,9 @@ func (s *Server) getChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not load messages")
 		return
 	}
+	if msgs == nil {
+		msgs = []Message{} // the in-memory store has no rows: [] not null, the client reads .length
+	}
 	writeJSON(w, http.StatusOK, msgs)
 }
 

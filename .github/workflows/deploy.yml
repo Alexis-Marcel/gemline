@@ -78,9 +78,6 @@ jobs:
           context: ./web
           file: ./web/Dockerfile
           push: true
-          build-args: |
-            VITE_OIDC_ISSUER=https://auth.eriphe.com/application/o/gemline/
-            VITE_OIDC_CLIENT_ID=gemline
           tags: |
             ${{ env.IMAGE_WEB }}:${{ github.sha }}
             ${{ env.IMAGE_WEB }}:latest

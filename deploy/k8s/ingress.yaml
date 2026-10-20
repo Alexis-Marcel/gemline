@@ -25,6 +25,13 @@ spec:
                 name: gemline-gateway
                 port:
                   number: 80
+          - path: /compte
+            pathType: Prefix
+            backend:
+              service:
+                name: gemline-gateway
+                port:
+                  number: 80
           - path: /ws
             pathType: Prefix
             backend:

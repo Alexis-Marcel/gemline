@@ -1,29 +1,35 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { authConfigured, signIn, userManager } from "../api/oidc";
+import { serverConfig } from "../api/authConfig";
+import { configureOIDC, userManager } from "../api/oidc";
+import { useAuth } from "../auth/useAuth";
 
-// /login and /signup hand off to the account provider (Compte Eriphe), whose
-// page offers both sign-in and sign-up; we come back on /auth/callback.
+// /login and /signup hand off to wherever accounts live for this host: the
+// OIDC provider, the local account pages (/compte/), or the reverse proxy.
 export function LoginPage() {
   const location = useLocation();
   const next = new URLSearchParams(location.search).get("next") ?? "/";
-  const [error, setError] = useState<string | null>(null);
+  const { loading, mode, accounts, accountName, signIn } = useAuth();
   const started = useRef(false);
 
   useEffect(() => {
-    if (!authConfigured || started.current) return;
+    if (loading || !accounts || started.current) return;
     started.current = true;
-    signIn(next).catch((e: unknown) => setError(e instanceof Error ? e.message : "Connexion impossible"));
-  }, [next]);
+    signIn(next);
+  }, [loading, accounts, signIn, next]);
 
   return (
     <AuthLayout title="Connexion">
-      {!authConfigured ? (
-        <NotConfiguredNotice />
-      ) : error ? (
-        <ErrorNotice message={error} />
+      {loading ? null : !accounts ? (
+        <p className="text-sm text-zinc-400">
+          {mode === "proxy"
+            ? "La connexion se fait par le serveur qui héberge Gemline."
+            : "Les comptes ne sont pas activés sur ce serveur : on joue en invité."}
+        </p>
       ) : (
-        <p className="text-sm text-zinc-400">Redirection vers le Compte Eriphe…</p>
+        <p className="text-sm text-zinc-400">
+          {accountName ? `Redirection vers le compte ${accountName}…` : "Redirection vers la page de connexion…"}
+        </p>
       )}
     </AuthLayout>
   );
@@ -41,8 +47,13 @@ export function AuthCallbackPage() {
   useEffect(() => {
     if (done.current) return;
     done.current = true;
-    userManager
-      .signinRedirectCallback()
+    serverConfig()
+      .then(({ auth }) => {
+        if (auth.oidc) configureOIDC(auth.oidc.issuer, auth.oidc.clientId);
+        const m = userManager();
+        if (!m) throw new Error("Connexion OIDC non configurée sur ce serveur");
+        return m.signinRedirectCallback();
+      })
       .then((u) => {
         const next = (u.state as { next?: string } | undefined)?.next;
         navigate(next?.startsWith("/") && !next.startsWith("//") ? next : "/", { replace: true });
@@ -77,14 +88,5 @@ function ErrorNotice({ message }: { message: string }) {
         Réessayer
       </Link>
     </div>
-  );
-}
-
-function NotConfiguredNotice() {
-  return (
-    <p className="mb-4 rounded-md border border-amber-900/50 bg-amber-950/30 p-3 text-xs text-amber-200">
-      Auth indisponible : variables <code>VITE_OIDC_ISSUER</code> et <code>VITE_OIDC_CLIENT_ID</code> non
-      configurées (voir <code>web/.env.local</code>).
-    </p>
   );
 }

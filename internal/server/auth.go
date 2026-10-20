@@ -2,27 +2,26 @@ package server
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
-	"slices"
+	"regexp"
 	"strings"
 
-	"github.com/MicahParks/keyfunc/v3"
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/alexis-marcel/gamekit/auth"
 )
 
-// Two orthogonal tokens: a per-seat token in X-Player-Token authorizes
-// "controls seat X in game Y"; an access-token JWT in Authorization: Bearer
-// authorizes "is user U". Both can travel on the same request. The JWT comes
-// from any OIDC provider (OIDC_ISSUER, e.g. Authentik) or, legacy, Supabase.
+// Two orthogonal credentials: a per-seat token in X-Player-Token authorizes
+// "controls seat X in game Y"; the account (gamekit/auth, mode chosen by the
+// host: none, oidc, proxy, local) says "is user U". Both can travel on the
+// same request, and an account is never required to play unless the host
+// sets GUEST_PLAY=false.
 
 type userCtxKey struct{}
 
 type AuthUser struct {
-	ID          string
+	ID          string // always a UUID (profiles, seats and ratings key on it)
 	Email       string
 	DisplayName string
 }
@@ -32,142 +31,84 @@ func userFromContext(ctx context.Context) (*AuthUser, bool) {
 	return v, ok
 }
 
-// tokenClaims covers both shapes: standard OIDC (name, preferred_username) and
-// Supabase (user_metadata.display_name).
-type tokenClaims struct {
-	Email             string                 `json:"email,omitempty"`
-	Name              string                 `json:"name,omitempty"`
-	PreferredUsername string                 `json:"preferred_username,omitempty"`
-	Role              string                 `json:"role,omitempty"`
-	UserMetadata      map[string]interface{} `json:"user_metadata,omitempty"`
-	jwt.RegisteredClaims
-}
-
-// displayName prefers Supabase's display_name, then the OIDC name, then the username.
-func (c *tokenClaims) displayName() string {
-	if raw, ok := c.UserMetadata["display_name"].(string); ok && strings.TrimSpace(raw) != "" {
-		return strings.TrimSpace(raw)
-	}
-	if n := strings.TrimSpace(c.Name); n != "" {
-		return n
-	}
-	return strings.TrimSpace(c.PreferredUsername)
-}
-
-func jwksKeyfunc(supabaseURL string) (jwt.Keyfunc, error) {
-	jwksURL := strings.TrimRight(supabaseURL, "/") + "/auth/v1/.well-known/jwks.json"
-	kf, err := keyfunc.NewDefault([]string{jwksURL})
-	if err != nil {
-		return nil, fmt.Errorf("init jwks keyfunc: %w", err)
-	}
-	return kf.Keyfunc, nil
-}
-
-// oidcKeyfunc discovers the issuer's JWKS and also pins iss (and aud when set):
-// a token signed by the same provider for another application is refused.
-func oidcKeyfunc(ctx context.Context, issuer, audience string) (jwt.Keyfunc, error) {
-	discovery := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discovery, nil)
-	if err != nil {
-		return nil, err
-	}
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("oidc discovery: %w", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("oidc discovery: HTTP %d", res.StatusCode)
-	}
-	var doc struct {
-		Issuer  string `json:"issuer"`
-		JWKSURI string `json:"jwks_uri"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&doc); err != nil {
-		return nil, fmt.Errorf("oidc discovery: %w", err)
-	}
-	if doc.JWKSURI == "" {
-		return nil, errors.New("oidc discovery: no jwks_uri")
-	}
-	kf, err := keyfunc.NewDefault([]string{doc.JWKSURI})
-	if err != nil {
-		return nil, fmt.Errorf("init jwks keyfunc: %w", err)
-	}
-	return pinClaims(kf.Keyfunc, doc.Issuer, audience), nil
-}
-
-// pinClaims wraps a Keyfunc so tokens must carry the expected iss/aud; the
-// signature itself is still checked by jwt against the returned key.
-func pinClaims(kf jwt.Keyfunc, issuer, audience string) jwt.Keyfunc {
-	return func(t *jwt.Token) (interface{}, error) {
-		if iss, _ := t.Claims.GetIssuer(); iss != issuer {
-			return nil, fmt.Errorf("unexpected issuer %q", iss)
-		}
-		if audience != "" {
-			aud, _ := t.Claims.GetAudience()
-			if !slices.Contains(aud, audience) {
-				return nil, fmt.Errorf("token not issued for %q", audience)
-			}
-		}
-		return kf(t)
-	}
-}
-
-func parseJWT(token string, verifier jwt.Keyfunc) (*tokenClaims, error) {
-	if verifier == nil {
-		return nil, errors.New("JWT verifier not configured")
-	}
-	claims := &tokenClaims{}
-	parsed, err := jwt.ParseWithClaims(token, claims, verifier)
-	if err != nil {
-		return nil, err
-	}
-	if !parsed.Valid {
-		return nil, errors.New("invalid token")
-	}
-	if claims.Subject == "" {
-		return nil, errors.New("missing subject")
-	}
-	return claims, nil
-}
-
 // testAuthHook is wired only by test builds (auth_testhook_test.go) so server
-// tests can authenticate without a real JWT. It is nil in the production binary
-// — the *_test.go that sets it is never compiled in — so no header can bypass
-// auth in production, whatever the verifier's state.
+// tests can authenticate without a real provider. It is nil in the production
+// binary — the *_test.go that sets it is never compiled in — so no header can
+// bypass auth in production.
 var testAuthHook func(*http.Request) *AuthUser
 
-// jwtMiddleware attaches an AuthUser when a valid bearer is present but never
-// rejects: bad/missing tokens fall through as anonymous so public endpoints
-// keep working. Endpoints that need a user call requireUser.
-func jwtMiddleware(verifier jwt.Keyfunc, log *slog.Logger, next http.Handler) http.Handler {
+// identityHeader carries the caller's account from the pod that authenticated
+// it to the game's owner. It is read on the internal listener only — the same
+// unreachability from outside that makes markForwarded trustworthy — and is
+// overwritten by proxyTo, so a client cannot inject it either way.
+const identityHeader = "X-Gemline-Identity"
+
+// identify attaches the caller's account when there is one but never rejects:
+// guests fall through so public endpoints keep working; endpoints that need a
+// user call requireUser. Public listener: the host's auth method decides.
+// Internal listener: the identity the forwarding pod already resolved.
+func (s *Server) identify(internal bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := authorizationBearer(r)
-		if token == "" || verifier == nil {
-			if testAuthHook != nil {
-				if u := testAuthHook(r); u != nil {
-					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userCtxKey{}, u)))
-					return
-				}
+		var u *AuthUser
+		switch {
+		case internal:
+			u = identityFrom(r.Header.Get(identityHeader))
+		case testAuthHook != nil && testAuthHook(r) != nil:
+			u = testAuthHook(r)
+		default:
+			if a := s.auth.User(r); a != nil {
+				u = &AuthUser{ID: accountUUID(a.ID), Email: a.Email, DisplayName: a.Name}
 			}
-			next.ServeHTTP(w, r)
-			return
 		}
-		claims, err := parseJWT(token, verifier)
-		if err != nil {
-			if log != nil {
-				log.Debug("jwt rejected", "err", err, "path", r.URL.Path)
-			}
-			next.ServeHTTP(w, r)
-			return
+		if u != nil {
+			r = r.WithContext(context.WithValue(r.Context(), userCtxKey{}, u))
 		}
-		ctx := context.WithValue(r.Context(), userCtxKey{}, &AuthUser{
-			ID:          claims.Subject,
-			Email:       claims.Email,
-			DisplayName: claims.displayName(),
-		})
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r)
 	})
+}
+
+type identity struct {
+	ID    string `json:"id"`
+	Email string `json:"email,omitempty"`
+	Name  string `json:"name,omitempty"`
+}
+
+func identityValue(u *AuthUser) string {
+	b, _ := json.Marshal(identity{ID: u.ID, Email: u.Email, Name: u.DisplayName})
+	return string(b)
+}
+
+func identityFrom(v string) *AuthUser {
+	if v == "" {
+		return nil
+	}
+	var id identity
+	if err := json.Unmarshal([]byte(v), &id); err != nil || !uuidRe.MatchString(id.ID) {
+		return nil
+	}
+	return &AuthUser{ID: id.ID, Email: id.Email, DisplayName: id.Name}
+}
+
+var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// accountNamespace scopes the UUIDs derived from non-UUID account ids.
+var accountNamespace = [16]byte{0x5c, 0x0d, 0x1e, 0x4f, 0x8a, 0x3b, 0x4c, 0x6d, 0x9e, 0x2f, 0x70, 0x81, 0x92, 0xa3, 0xb4, 0xc5}
+
+// accountUUID maps an account id to the UUID every user_id column expects:
+// a UUID passes through (OIDC providers like Authentik, the local mode); any
+// other id (a reverse proxy's username, a numeric OIDC sub) becomes a stable
+// UUIDv5, so the same account always lands on the same profile.
+func accountUUID(id string) string {
+	if l := strings.ToLower(id); uuidRe.MatchString(l) {
+		return l
+	}
+	h := sha1.New()
+	h.Write(accountNamespace[:])
+	h.Write([]byte(id))
+	b := h.Sum(nil)[:16]
+	b[6] = b[6]&0x0f | 0x50
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func requireUser(w http.ResponseWriter, r *http.Request) *AuthUser {
@@ -179,14 +120,28 @@ func requireUser(w http.ResponseWriter, r *http.Request) *AuthUser {
 	return u
 }
 
-// authorizationBearer reads the JWT from Authorization, falling back to
-// ?access_token= for WebSocket upgrades (browsers can't set headers there).
-func authorizationBearer(r *http.Request) string {
-	h := r.Header.Get("Authorization")
-	if strings.HasPrefix(h, "Bearer ") {
-		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+// guestAllowed refuses an anonymous caller when the host requires an account
+// to play (GUEST_PLAY=false).
+func (s *Server) guestAllowed(w http.ResponseWriter, r *http.Request) bool {
+	if _, ok := userFromContext(r.Context()); ok || s.auth.Info().GuestPlay {
+		return true
 	}
-	return r.URL.Query().Get("access_token")
+	writeError(w, http.StatusUnauthorized, "an account is required to play here")
+	return false
+}
+
+// getConfig tells the frontend how to sign in (the host's auth method) and,
+// when the server is the one that knows (proxy, local), who is signed in.
+func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
+	resp := struct {
+		Auth auth.Info `json:"auth"`
+		User *identity `json:"user"`
+	}{Auth: s.auth.Info()}
+	if u, ok := userFromContext(r.Context()); ok {
+		resp.User = &identity{ID: u.ID, Name: u.DisplayName}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // playerToken reads the seat token from X-Player-Token, falling back to

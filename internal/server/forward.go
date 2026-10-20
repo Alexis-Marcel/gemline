@@ -163,6 +163,12 @@ func (s *Server) proxyTo(w http.ResponseWriter, r *http.Request, gameID, owner, 
 			// anonymous callers on it, and must not collapse everyone this
 			// pod forwards onto one bucket.
 			pr.SetXForwarded()
+			// The owner trusts this header on its internal listener only:
+			// carry the identity resolved here, never one a client sent.
+			pr.Out.Header.Del(identityHeader)
+			if u, ok := userFromContext(pr.In.Context()); ok {
+				pr.Out.Header.Set(identityHeader, identityValue(u))
+			}
 		},
 		Transport: forwardTransport,
 		ErrorHandler: func(_ http.ResponseWriter, _ *http.Request, err error) {

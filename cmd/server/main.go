@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alexis-marcel/gamekit/auth"
+	"github.com/alexis-marcel/gamekit/portal"
 	"github.com/alexis-marcel/gemline/internal/bus"
 	"github.com/alexis-marcel/gemline/internal/db"
 	"github.com/alexis-marcel/gemline/internal/lease"
@@ -146,6 +147,7 @@ func main() {
 	}
 	cfg := server.Config{
 		Auth:           authn,
+		Portal:         portal.FromEnv(os.Getenv),
 		AllowedOrigins: parseOrigins(os.Getenv("ALLOWED_ORIGINS")),
 	}
 	if role == "gateway" {

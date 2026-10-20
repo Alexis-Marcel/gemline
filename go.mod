@@ -4,7 +4,7 @@ go 1.25.7
 
 require (
 	github.com/XSAM/otelsql v0.42.0
-	github.com/alexis-marcel/gamekit v0.4.1
+	github.com/alexis-marcel/gamekit v0.5.0
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/coder/websocket v1.8.14
 	github.com/jackc/pgx/v5 v5.9.2

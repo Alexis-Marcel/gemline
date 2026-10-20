@@ -7,6 +7,7 @@ import {
   useParams,
 } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthProvider";
+import { PortalBar } from "./components/PortalBar";
 import { InvitationToast } from "./components/InvitationToast";
 import { InvitationsProvider } from "./notifications/InvitationsProvider";
 
@@ -61,6 +62,7 @@ export default function App() {
       <AuthProvider>
         <InvitationsProvider>
           <div className="min-h-full bg-zinc-950 text-zinc-100">
+            <PortalBar />
             <Suspense fallback={<RouteFallback />}>
               <Routes>
                 <Route path="/" element={<HomePage />} />

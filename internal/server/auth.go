@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/alexis-marcel/gamekit/auth"
+	"github.com/alexis-marcel/gamekit/portal"
 )
 
 // Two orthogonal credentials: a per-seat token in X-Player-Token authorizes
@@ -130,13 +131,15 @@ func (s *Server) guestAllowed(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// getConfig tells the frontend how to sign in (the host's auth method) and,
-// when the server is the one that knows (proxy, local), who is signed in.
+// getConfig tells the frontend how to sign in (the host's auth method), when
+// the server is the one that knows (proxy, local) who is signed in, and the
+// optional portal bar (gamekit/portal).
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	resp := struct {
-		Auth auth.Info `json:"auth"`
-		User *identity `json:"user"`
-	}{Auth: s.auth.Info()}
+		Auth   auth.Info    `json:"auth"`
+		User   *identity    `json:"user"`
+		Portal *portal.Info `json:"portal"` // the portal Gemline belongs to, if any
+	}{Auth: s.auth.Info(), Portal: s.portal}
 	if u, ok := userFromContext(r.Context()); ok {
 		resp.User = &identity{ID: u.ID, Name: u.DisplayName}
 	}

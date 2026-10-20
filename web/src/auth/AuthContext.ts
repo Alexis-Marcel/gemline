@@ -1,4 +1,5 @@
 import { createContext } from "react";
+import type { PortalInfo } from "../api/authConfig";
 import type { AuthUser } from "../api/oidc";
 
 export interface AuthContextValue {
@@ -17,6 +18,8 @@ export interface AuthContextValue {
   /** Account settings page (local mode), empty otherwise. */
   accountUrl: string;
   canSignOut: boolean;
+  /** The portal Gemline belongs to, null when it lives alone. */
+  portal: PortalInfo | null;
   signIn: (next?: string) => void;
   signOut: () => Promise<void>;
 }

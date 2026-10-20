@@ -49,7 +49,7 @@ export function AuthCallbackPage() {
     done.current = true;
     serverConfig()
       .then(({ auth }) => {
-        if (auth.oidc) configureOIDC(auth.oidc.issuer, auth.oidc.clientId);
+        if (auth.oidc) configureOIDC(auth.oidc.issuer, auth.oidc.clientId, auth.oidc.metadata);
         const m = userManager();
         if (!m) throw new Error("Connexion OIDC non configurée sur ce serveur");
         return m.signinRedirectCallback();

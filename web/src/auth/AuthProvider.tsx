@@ -1,7 +1,17 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { User } from "oidc-client-ts";
 import { serverConfig, type ServerConfig } from "../api/authConfig";
-import { configureOIDC, restoreSession, signIn, signOut, toAuthUser, userManager, type AuthUser } from "../api/oidc";
+import {
+  configureOIDC,
+  lastSessionWasUser,
+  rememberSession,
+  restoreSession,
+  signIn,
+  signOut,
+  toAuthUser,
+  userManager,
+  type AuthUser,
+} from "../api/oidc";
 import { userSocket } from "../api/userSocket";
 import { AuthContext, type AuthContextValue } from "./AuthContext";
 
@@ -21,14 +31,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setLoading(false);
         return;
       }
-      configureOIDC(cfg.auth.oidc.issuer, cfg.auth.oidc.clientId);
+      configureOIDC(cfg.auth.oidc.issuer, cfg.auth.oidc.clientId, cfg.auth.oidc.metadata);
       const m = userManager()!;
       // Initial session (stored, else silent SSO with the provider), then
-      // follow sign-in / renewal / sign-out.
-      setOidcUser(await restoreSession());
+      // follow sign-in / renewal / sign-out. A guest last time gets the page
+      // as a guest at once and switches if the check finds a session; a
+      // signed-in player last time waits for it.
+      const restored = restoreSession().then((u) => {
+        rememberSession(Boolean(u));
+        setOidcUser(u);
+      });
+      if (lastSessionWasUser()) await restored;
       setLoading(false);
-      const onLoaded = (u: User) => setOidcUser(u);
-      const onUnloaded = () => setOidcUser(null);
+      const onLoaded = (u: User) => {
+        rememberSession(true);
+        setOidcUser(u);
+      };
+      const onUnloaded = () => {
+        rememberSession(false);
+        setOidcUser(null);
+      };
       // Renewal failed (provider session ended): drop the stale session.
       const onRenewError = () => void m.removeUser();
       m.events.addUserLoaded(onLoaded);

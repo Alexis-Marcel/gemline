@@ -6,7 +6,8 @@ export interface AuthInfo {
   /** « Se connecter avec … » ; absent : « Se connecter ». */
   accountName?: string;
   guestPlay: boolean;
-  oidc?: { issuer: string; clientId: string };
+  /** metadata: the provider's discovery, already done by the server (one round trip less). */
+  oidc?: { issuer: string; clientId: string; metadata?: Record<string, string> };
   proxy?: { loginUrl?: string; logoutUrl?: string };
   local?: { loginUrl: string; logoutUrl: string; accountUrl: string; signup: string };
 }

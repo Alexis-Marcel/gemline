@@ -9,7 +9,7 @@ if (window.location.pathname === '/auth/silent') {
   // Inside the hidden SSO iframe: hand the provider's answer back to the
   // parent page and render nothing (no second app, no nested SSO attempt).
   void serverConfig().then(({ auth }) => {
-    if (auth.oidc) configureOIDC(auth.oidc.issuer, auth.oidc.clientId)
+    if (auth.oidc) configureOIDC(auth.oidc.issuer, auth.oidc.clientId, auth.oidc.metadata)
     void userManager()?.signinSilentCallback().catch(() => {})
   })
 } else {

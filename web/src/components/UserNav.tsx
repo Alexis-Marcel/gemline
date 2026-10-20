@@ -21,13 +21,15 @@ function monogram(user: AuthUser): string {
 }
 
 export function UserNav() {
-  const { user, loading } = useAuth();
+  const { user, loading, accounts } = useAuth();
 
   if (loading) {
     return <span className="text-xs text-zinc-500">…</span>;
   }
 
   if (!user) {
+    // No accounts on this host: nothing to sign in to, everyone plays as a guest.
+    if (!accounts) return null;
     return (
       <Link
         to="/login"

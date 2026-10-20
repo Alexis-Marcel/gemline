@@ -10,12 +10,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
 COPY . .
-# Frontend env vars must be available at build time so Vite inlines them
-# into the JS bundle. They have the VITE_ prefix and are PUBLIC by design.
-ARG VITE_OIDC_ISSUER
-ARG VITE_OIDC_CLIENT_ID
-ENV VITE_OIDC_ISSUER=${VITE_OIDC_ISSUER}
-ENV VITE_OIDC_CLIENT_ID=${VITE_OIDC_CLIENT_ID}
+# No build-time configuration: the frontend reads the host's account method
+# from /api/config, so one image serves every deployment.
 RUN npm run build
 
 FROM caddy:2-alpine

@@ -6,7 +6,7 @@ import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 
 export function ProfilePage() {
-  const { user, loading, signOut } = useAuth();
+  const { user, loading, signOut, canSignOut, accountUrl } = useAuth();
   const navigate = useNavigate();
 
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -88,12 +88,18 @@ export function ProfilePage() {
         <Link to="/" className="text-lg font-semibold text-zinc-100">
           Gemline
         </Link>
-        <button
-          onClick={handleSignOut}
-          className="text-sm text-zinc-400 hover:text-zinc-200"
-        >
-          Se déconnecter
-        </button>
+        <div className="flex items-center gap-4">
+          {accountUrl && (
+            <a href={accountUrl} className="text-sm text-zinc-400 hover:text-zinc-200">
+              Compte et mot de passe
+            </a>
+          )}
+          {canSignOut && (
+            <button onClick={handleSignOut} className="text-sm text-zinc-400 hover:text-zinc-200">
+              Se déconnecter
+            </button>
+          )}
+        </div>
       </header>
 
       <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">

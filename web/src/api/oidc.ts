@@ -1,4 +1,4 @@
-import { InMemoryWebStorage, UserManager, WebStorageStateStore, type User } from "oidc-client-ts";
+import { InMemoryWebStorage, UserManager, WebStorageStateStore, type OidcMetadata, type User } from "oidc-client-ts";
 
 // Mode oidc : n'importe quel fournisseur OIDC, configuré par le serveur
 // (/api/config, voir authConfig.ts) et pas au build : la même image sert
@@ -6,10 +6,12 @@ import { InMemoryWebStorage, UserManager, WebStorageStateStore, type User } from
 
 let manager: UserManager | null = null;
 
-export function configureOIDC(issuer: string, clientId: string) {
+export function configureOIDC(issuer: string, clientId: string, metadata?: Partial<OidcMetadata>) {
   if (manager || !issuer || !clientId) return;
   manager = new UserManager({
     authority: issuer,
+    // Discovery already done by the server: no request to the provider to read it again.
+    ...(metadata ? { metadata } : {}),
     client_id: clientId,
     redirect_uri: `${window.location.origin}/auth/callback`,
     // Hidden iframe for SSO: already signed in to the provider (on another app
@@ -30,6 +32,26 @@ export function configureOIDC(issuer: string, clientId: string) {
 /** Le client OIDC, null hors du mode oidc. */
 export function userManager(): UserManager | null {
   return manager;
+}
+
+// Last session seen in this browser ("user" or "guest", never a token): a player
+// who was a guest gets the page as a guest at once, the check runs behind.
+const LAST_SESSION = "auth:last-session";
+
+export function lastSessionWasUser(): boolean {
+  try {
+    return window.localStorage.getItem(LAST_SESSION) === "user";
+  } catch {
+    return false;
+  }
+}
+
+export function rememberSession(signedIn: boolean) {
+  try {
+    window.localStorage.setItem(LAST_SESSION, signedIn ? "user" : "guest");
+  } catch {
+    // storage unavailable: next load waits for the check
+  }
 }
 
 // Tokens persisted by an older (localStorage) version: drop them.

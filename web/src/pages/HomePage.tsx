@@ -14,7 +14,7 @@ type Mode = "menu" | "private-name";
 
 export function HomePage() {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, accounts, guestPlay } = useAuth();
   const [busy, setBusy] = useState<"" | "private">("");
   const [joinId, setJoinId] = useState("");
   const [mode, setMode] = useState<Mode>("menu");
@@ -56,6 +56,11 @@ export function HomePage() {
       createPrivate();
       return;
     }
+    if (!guestPlay) {
+      // The host requires an account to play.
+      navigate("/login?next=/");
+      return;
+    }
     // Anonymous: ask for a name once, here, so the GamePage never has to.
     setMode("private-name");
   }
@@ -89,22 +94,25 @@ export function HomePage() {
         <UserNav />
       </header>
 
-      <section className="space-y-3">
-        <h2 className="text-sm font-medium uppercase tracking-wider text-zinc-500">
-          Jouer en ligne
-        </h2>
-        <BigAction
-          label="1 contre 1"
-          sub="Trouve un adversaire pour un duel."
-          onClick={() => findMatch("1v1")}
-          tone="primary"
-        />
-        <BigAction
-          label="Multijoueur"
-          sub="3 à 6 joueurs. La partie démarre dès qu'assez de monde est là."
-          onClick={() => findMatch("multi")}
-        />
-      </section>
+      {/* Matchmaking ranks players by account: hidden when the host has none. */}
+      {accounts && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-medium uppercase tracking-wider text-zinc-500">
+            Jouer en ligne
+          </h2>
+          <BigAction
+            label="1 contre 1"
+            sub="Trouve un adversaire pour un duel."
+            onClick={() => findMatch("1v1")}
+            tone="primary"
+          />
+          <BigAction
+            label="Multijoueur"
+            sub="3 à 6 joueurs. La partie démarre dès qu'assez de monde est là."
+            onClick={() => findMatch("multi")}
+          />
+        </section>
+      )}
 
       <section className="space-y-3">
         <h2 className="text-sm font-medium uppercase tracking-wider text-zinc-500">

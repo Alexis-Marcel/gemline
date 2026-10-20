@@ -59,17 +59,17 @@ flowchart LR
 
 The invariant hierarchy: **the transport is lossy, the journal is the truth, clients reconcile by offset.** That contract predates every infrastructure change — it's what allowed swapping the whole transport (Postgres LISTEN/NOTIFY → Redis) and splitting the backend into roles without ever touching the client protocol.
 
-Everything degrades gracefully: without `DATABASE_URL` games live in memory and anonymous play still works; without Redis the binary runs single-process; without an OIDC provider only authenticated endpoints return 401.
+Everything degrades gracefully: without `DATABASE_URL` games live in memory and anonymous play still works; without Redis the binary runs single-process; without accounts only authenticated endpoints return 401.
 
 ## Getting started
 
-The stack is Go (backend), Vite + React + Tailwind (frontend), Postgres (persistence), Redis (cross-replica fan-out), any OIDC provider for accounts (Authentik in production — the "Compte Eriphe" shared by all my projects). Postgres can be a hosted database (Supabase here) or the local Docker one for offline dev.
+The stack is Go (backend), Vite + React + Tailwind (frontend), Postgres (persistence), Redis (cross-replica fan-out), optional accounts through [gamekit/auth](https://github.com/alexis-marcel/gamekit) — the host picks the method, *arr-style: none, any OIDC provider (Authentik in my deployment), a trusted reverse proxy, or built-in local accounts. Postgres can be a hosted database (Supabase here) or the local Docker one for offline dev.
 
 ### One-time setup
 
-1. Register a **public** OIDC client (authorization code + PKCE) on your provider, with `http://localhost:5173/auth/callback` and `http://localhost:5173/auth/silent` as redirect URIs and the `openid email profile` scopes. Tokens stay in memory: each load and renewal goes through a silent `prompt=none` iframe, so the provider must share a site with the app for its session cookie to reach the iframe (here `*.eriphe.com`). Tokens' `sub` must be a UUID (Authentik: subject mode "User's UUID").
-2. Note its **issuer** URL and **client ID**; the backend discovers the JWKS from the issuer and pins `iss`/`aud`.
-3. Copy `web/.env.example` to `web/.env.local` and set `VITE_OIDC_ISSUER` / `VITE_OIDC_CLIENT_ID`.
+1. Pick the account method (`AUTH_MODE`, see `.env.example`); nothing to do for guest-only play. The frontend reads it from `/api/config` at runtime — no build-time variables, one image for every host.
+2. For **oidc**: register a **public** client (authorization code + PKCE) with `http://localhost:5173/auth/callback` and `http://localhost:5173/auth/silent` as redirect URIs and the `openid email profile` scopes, then set `OIDC_ISSUER` (and `OIDC_CLIENT_ID` if not `gemline`). The backend discovers the JWKS and pins `iss`/`aud`. Tokens stay in memory: each load and renewal goes through a silent `prompt=none` iframe, so the provider must share a site with the app for its session cookie to reach the iframe. Account ids that aren't UUIDs (a proxy's username, a numeric `sub`) are mapped to stable UUIDv5s.
+3. For **local**: set `AUTH_MODE=local` (needs `DATABASE_URL`); the first account created is the admin, who invites the others.
 4. Optionally a **DATABASE_URL** (any Postgres) — without it games live in memory.
 
 ### Run
@@ -80,8 +80,7 @@ docker compose up -d
 
 # Backend
 DATABASE_URL='<your Postgres URL>' \
-OIDC_ISSUER='https://auth.example.com/application/o/gemline/' \
-OIDC_AUDIENCE='gemline' \
+AUTH_MODE=local \
 REDIS_URL='redis://localhost:6379' \
   go run ./cmd/server
 
@@ -89,7 +88,7 @@ REDIS_URL='redis://localhost:6379' \
 cd web && npm install && npm run dev
 ```
 
-The frontend serves on `:5173` and proxies `/api` and `/ws` to the backend on `:8080`. Visit `http://localhost:5173` to play.
+The frontend serves on `:5173` and proxies `/api`, `/ws` and `/compte` to the backend on `:8080`. Visit `http://localhost:5173` to play.
 
 `DATABASE_URL` and the auth variables are optional — unset, games stay in memory and anonymous play still works. `REDIS_URL` is required whenever `DATABASE_URL` is set. `ALLOWED_ORIGINS` (comma-separated) locks down CORS and the WebSocket origin check in production; leave it empty in dev. The backend also reads `.env` / `.env.local` at the repo root, so you can `cp .env.example .env` once and forget about it.
 

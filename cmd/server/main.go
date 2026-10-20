@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alexis-marcel/gamekit/auth"
 	"github.com/alexis-marcel/gemline/internal/bus"
 	"github.com/alexis-marcel/gemline/internal/db"
 	"github.com/alexis-marcel/gemline/internal/lease"
@@ -69,11 +71,12 @@ func main() {
 	}()
 
 	var (
-		repo     server.Repository
-		eventBus server.Bus
-		leases   *lease.Manager
-		resolver *lease.Resolver
-		elector  *lease.Elector
+		accountsDB *sql.DB // local accounts (AUTH_MODE=local) share the game database
+		repo       server.Repository
+		eventBus   server.Bus
+		leases     *lease.Manager
+		resolver   *lease.Resolver
+		elector    *lease.Elector
 	)
 	if dsn != "" {
 		pool, err := db.Open(ctx, dsn)
@@ -82,6 +85,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer pool.Close()
+		accountsDB = pool
 		repo = server.NewPostgresRepo(pool)
 		log.Info("persistence enabled", "driver", "postgres")
 		// Fan-out: Redis routes events per game, so pods receive only the
@@ -112,10 +116,36 @@ func main() {
 		log.Info("persistence disabled — running with in-memory store only")
 	}
 
+	// Accounts: optional, method chosen by the host (AUTH_MODE, see gamekit/auth).
+	// Refuse to start rather than run with accounts silently disabled.
+	acfg, err := auth.FromEnv(os.Getenv, "gemline")
+	if err != nil {
+		log.Error("auth config", "err", err)
+		os.Exit(1)
+	}
+	if acfg.Mode == auth.ModeLocal {
+		if accountsDB == nil {
+			log.Error("AUTH_MODE=local needs DATABASE_URL: accounts live in Postgres")
+			os.Exit(1)
+		}
+		if acfg.LocalStore, err = auth.NewSQLStore(ctx, accountsDB, auth.Postgres); err != nil {
+			log.Error("accounts tables", "err", err)
+			os.Exit(1)
+		}
+		acfg.Theme = auth.Theme{
+			Title: "Gemline", Background: "#0f1220", Surface: "#171b2e", Text: "#e8eaf6", Muted: "#9aa0c3",
+			Line: "#2a3050", Accent: "#8b7cf6", OnAccent: "#0f1220", Danger: "#ff6b81",
+		}
+	}
+	actx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	authn, err := auth.New(actx, acfg, log)
+	cancel()
+	if err != nil {
+		log.Error("auth init", "err", err)
+		os.Exit(1)
+	}
 	cfg := server.Config{
-		OIDCIssuer:     os.Getenv("OIDC_ISSUER"),
-		OIDCAudience:   os.Getenv("OIDC_AUDIENCE"),
-		SupabaseURL:    os.Getenv("SUPABASE_URL"),
+		Auth:           authn,
 		AllowedOrigins: parseOrigins(os.Getenv("ALLOWED_ORIGINS")),
 	}
 	if role == "gateway" {

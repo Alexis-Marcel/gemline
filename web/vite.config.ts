@@ -8,7 +8,11 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      "/api": { target: BACKEND, changeOrigin: true },
+      // Keep the browser's Host: local accounts (AUTH_MODE=local) check that a
+      // form or a cookie-authenticated call comes from the site itself.
+      "/api": { target: BACKEND },
+      // Local accounts' pages are served by the backend.
+      "/compte": { target: BACKEND },
       "/ws": { target: BACKEND, changeOrigin: true, ws: true },
       "/healthz": { target: BACKEND },
       "/readyz": { target: BACKEND },

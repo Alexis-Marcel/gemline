@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,9 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alexis-marcel/gamekit/auth"
 	"github.com/alexis-marcel/gemline/internal/game"
 	"github.com/alexis-marcel/gemline/internal/lease"
-	"github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -24,14 +23,14 @@ import (
 )
 
 type Server struct {
-	store  *Store
-	hub    *Hub
-	lobby  *Hub // keyed by userID; same Hub type, different routing key semantics
-	events *EventPublisher
-	bus    Bus
-	log    *slog.Logger
-	verifier jwt.Keyfunc
-	limiter  *rateLimiter
+	store   *Store
+	hub     *Hub
+	lobby   *Hub // keyed by userID; same Hub type, different routing key semantics
+	events  *EventPublisher
+	bus     Bus
+	log     *slog.Logger
+	auth    auth.Authenticator
+	limiter *rateLimiter
 	// nil/empty = dev-permissive (CORS `*`, WS skips origin).
 	allowedOrigins []string
 
@@ -41,15 +40,12 @@ type Server struct {
 	resolver  *lease.Resolver
 }
 
-// Config holds optional dependencies. Auth uses OIDCIssuer (any OIDC provider,
-// tokens pinned to its iss and to OIDCAudience when set), else the legacy
-// SupabaseURL; with neither, auth is disabled (every /api/auth/* responds 401).
+// Config holds optional dependencies. Auth is the host's account method
+// (gamekit/auth: none, oidc, proxy, local); nil means no accounts.
 // Empty AllowedOrigins is dev mode (CORS "*" and the WS origin check skipped);
 // production must set the real frontend origin(s).
 type Config struct {
-	OIDCIssuer     string
-	OIDCAudience   string
-	SupabaseURL    string
+	Auth           auth.Authenticator
 	AllowedOrigins []string
 
 	// ForwardTo enables gateway mode: this process runs no game logic and
@@ -77,7 +73,12 @@ func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 		allowedOrigins: cfg.AllowedOrigins,
 		forwardTo:      cfg.ForwardTo,
 		resolver:       cfg.Resolver,
+		auth:           cfg.Auth,
 	}
+	if srv.auth == nil {
+		srv.auth = auth.None{}
+	}
+	log.Info("accounts", "mode", srv.auth.Info().Mode, "guest_play", srv.auth.Info().GuestPlay)
 	if cfg.ForwardTo != "" {
 		store.SetForwardOnly()
 	}
@@ -99,27 +100,6 @@ func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 		log.Info("CORS + WS origin checks enabled", "origins", cfg.AllowedOrigins)
 	}
 
-	// Don't start auth-disabled when auth was configured — crashloop instead.
-	switch {
-	case cfg.OIDCIssuer != "":
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		kf, err := oidcKeyfunc(ctx, cfg.OIDCIssuer, cfg.OIDCAudience)
-		cancel()
-		if err != nil {
-			return nil, fmt.Errorf("initialise OIDC verifier: %w", err)
-		}
-		srv.verifier = kf
-		log.Info("auth enabled", "scheme", "oidc", "issuer", cfg.OIDCIssuer, "audience", cfg.OIDCAudience)
-	case cfg.SupabaseURL != "":
-		kf, err := jwksKeyfunc(cfg.SupabaseURL)
-		if err != nil {
-			return nil, fmt.Errorf("initialise JWKS verifier: %w", err)
-		}
-		srv.verifier = kf
-		log.Info("auth enabled", "scheme", "jwks", "url", cfg.SupabaseURL)
-	default:
-		log.Warn("auth disabled — set OIDC_ISSUER (or SUPABASE_URL) to enable")
-	}
 	// Clock flag / disconnect-grace expiry: push fresh state so subscribers
 	// see the forfeit.
 	store.SetStateListener(func(gameID string) {
@@ -183,10 +163,16 @@ func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 var testRoutes func(*http.ServeMux, *Server)
 
 // apiHandler builds the route table wrapped in the shared middleware chain.
+// internal: the pod-to-pod listener, whose caller identity comes from the
+// forwarding pod (identityHeader) instead of the host's auth method.
 // Game commands (mutations on /api/games/{id}/...) go through owned(), which
 // routes them to the pod holding the game's lease; reads stay local.
-func (s *Server) apiHandler() http.Handler {
+func (s *Server) apiHandler(internal bool) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/config", s.getConfig)
+	if m, ok := s.auth.(auth.Mounter); ok && !internal {
+		m.Mount(mux) // local accounts: sign-in, sign-up and admin pages under /compte/
+	}
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 
@@ -234,7 +220,7 @@ func (s *Server) apiHandler() http.Handler {
 	mux.HandleFunc("GET /api/users/{userId}", s.getPublicProfile)
 	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
 
-	return loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, maxBytesMiddleware(jwtMiddleware(s.verifier, s.log, mux)))))
+	return loggingMiddleware(s.log, metricsMiddleware(corsMiddleware(s.allowedOrigins, maxBytesMiddleware(s.identify(internal, mux)))))
 }
 
 // InternalRoutes is the pod-to-pod listener serving forwarded game commands:
@@ -247,7 +233,7 @@ func (s *Server) InternalRoutes() http.Handler {
 	top.Handle("GET /metrics", metricsHandler())
 	// Same otel wrapping as the public listener: extract the traceparent the
 	// forwarding pod injected, so gateway and owner spans share one trace.
-	app := otelhttp.NewHandler(patternSpanNamer(markForwarded(s.apiHandler())), "http.request",
+	app := otelhttp.NewHandler(patternSpanNamer(markForwarded(s.apiHandler(true))), "http.request",
 		otelhttp.WithFilter(func(r *http.Request) bool {
 			return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
 		}),
@@ -257,7 +243,7 @@ func (s *Server) InternalRoutes() http.Handler {
 }
 
 func (s *Server) Routes() http.Handler {
-	inner := s.apiHandler()
+	inner := s.apiHandler(false)
 
 	// otelhttp wraps the entire app handler so every request starts a server
 	// span. Skip the health probes — kubelet hits them every 5–20 s and the
@@ -344,6 +330,9 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 // createGame creates a private game and auto-joins the caller. Authenticated
 // users get their name from the profile; anonymous callers must supply one.
 func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
+	if !s.guestAllowed(w, r) {
+		return
+	}
 	var req createGameRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
@@ -397,8 +386,7 @@ func (s *Server) createGame(w http.ResponseWriter, r *http.Request) {
 }
 
 // displayNameFor resolves a display name by priority: profiles.display_name,
-// then the JWT's user_metadata.display_name, then the email local-part, then
-// "Joueur". Used by every auto-join path so users never retype a known name.
+// then the account's name, then the email local-part, then "Joueur". Used by every auto-join path so users never retype a known name.
 func (s *Server) displayNameFor(ctx context.Context, u *AuthUser) string {
 	if p, err := s.store.Profile(ctx, u.ID); err == nil && p != nil && p.DisplayName != "" {
 		return p.DisplayName
@@ -944,6 +932,9 @@ func (s *Server) getGame(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) joinGame(w http.ResponseWriter, r *http.Request) {
+	if !s.guestAllowed(w, r) {
+		return
+	}
 	gameID := r.PathValue("id")
 	// The body is optional for authenticated users (we know their identity
 	// and display name). Anonymous joins still need a name, but the absence

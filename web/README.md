@@ -20,16 +20,11 @@ The dev server proxies `/api`, `/ws`, `/healthz`, and `/readyz` to the
 backend on `http://localhost:8080` (see `vite.config.ts`), so run the Go
 server alongside it.
 
-### Environment
+### Configuration
 
-| Variable | Purpose |
-|---|---|
-| `VITE_OIDC_ISSUER` | OIDC issuer URL (e.g. `https://auth.eriphe.com/application/o/gemline/`). |
-| `VITE_OIDC_CLIENT_ID` | Public client ID. Safe to ship — PKCE, no secret; the backend verifies the JWT. |
-
-Both are baked in at **build time** (Vite inlines `VITE_*` vars), so the
-production image is built with them as Docker build args — see
-`web/Dockerfile` and the `build-web` job in `.github/workflows/deploy.yml`.
+None at build time: the frontend reads the host's account method (none,
+oidc, proxy, local — see the root `.env.example`) from the backend's
+`/api/config` when it loads, so the same image serves every deployment.
 
 ### Scripts
 

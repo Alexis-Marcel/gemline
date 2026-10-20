@@ -209,14 +209,14 @@ stone, both during live play and on the replay timeline.
 | Account count | 1 |
 | Time | ~1 hour (or use a debug short-lived token) |
 
-The default Supabase JWT TTL is 1 hour; the auto-refresh fires a few
-minutes before expiry. For a faster test, override the project's JWT
-expiry in the Supabase dashboard to ~5 minutes.
+Applies to `AUTH_MODE=oidc`. The access token TTL is the provider's
+(1 hour on Authentik by default); the silent renewal fires shortly before
+expiry. For a faster test, lower the provider's access token validity to
+~5 minutes.
 
-1. Sign in. Open DevTools → Application → Local Storage; find the
-   Supabase session entry, note the `access_token` and `expires_at`.
-2. Stay on the homepage. Wait until `expires_at` is in the past —
-   roughly the TTL minus 5 minutes (Supabase pre-refreshes).
+1. Sign in. Tokens live in memory only: watch DevTools → Network for the
+   silent `prompt=none` renewal and note the current `access_token`.
+2. Stay on the homepage until the renewal fires.
 3. Watch DevTools → Network → WS. Filter for `/ws/lobby`.
    **Pass:** when the refresh fires, the WS connection closes and a
    new one opens (visible in the network tab). The new connection's

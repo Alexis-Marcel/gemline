@@ -61,8 +61,10 @@ class UserSocket {
   // true after an explicit close() — suppresses reconnect. open() resets it.
   private closed = true;
 
-  open(accessToken: string) {
-    if (this.accessToken === accessToken && this.ws) return;
+  /** Opens the socket. accessToken: the OIDC bearer, or null when the server
+   *  knows the caller from a cookie or a reverse proxy (local, proxy modes). */
+  open(accessToken: string | null) {
+    if (!this.closed && this.accessToken === accessToken && this.ws) return;
     // Token rotation: reconnect so the new JWT travels in the query string.
     this.accessToken = accessToken;
     this.closed = false;
@@ -93,11 +95,10 @@ class UserSocket {
   }
 
   private connect() {
-    if (!this.accessToken) return;
+    if (this.closed) return;
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
-    const url = `${proto}://${window.location.host}/ws/lobby?access_token=${encodeURIComponent(
-      this.accessToken,
-    )}`;
+    const query = this.accessToken ? `?access_token=${encodeURIComponent(this.accessToken)}` : "";
+    const url = `${proto}://${window.location.host}/ws/lobby${query}`;
     const ws = new WebSocket(url);
     this.ws = ws;
     ws.onopen = () => {
@@ -125,7 +126,7 @@ class UserSocket {
       if (this.ws === ws) {
         this.ws = null;
       }
-      if (this.closed || !this.accessToken) return;
+      if (this.closed) return;
       this.scheduleReconnect();
     };
   }
@@ -158,11 +159,12 @@ class UserSocket {
       // After the first failure, refresh the token (guards against the tab
       // sleeping past a Supabase rotation). A null result means signed out
       // mid-retry — abandon the chain until open() is called again.
-      if (attempt > 0 && this.refreshAuth) {
+      if (attempt > 0 && this.refreshAuth && this.accessToken !== null) {
         try {
           const fresh = await this.refreshAuth();
           if (this.closed) return;
           if (fresh == null) {
+            this.closed = true;
             this.accessToken = null;
             return;
           }

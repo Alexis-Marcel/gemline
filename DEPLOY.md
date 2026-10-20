@@ -38,7 +38,7 @@ workload from this repo.
                         │ outbound HTTPS
                         ▼
                   ┌────────────┐
-                  │  Supabase  │  (Postgres + auth)
+                  │  Supabase  │  (Postgres)
                   └────────────┘
 ```
 
@@ -94,7 +94,7 @@ cents/month total. Prices are approximate — check Hetzner's current
    policies that grant them OIDC + IAM + Secrets Manager + S3 access
    live in `deploy/iam-bootstrap/` and are attached one-time via the
    `aws iam put-role-policy` commands in that directory's README.
-4. **Supabase** project (Postgres + auth). Note its Session-pooler
+4. **Supabase** project (Postgres). Note its Session-pooler
    `DATABASE_URL` and project URL.
 5. **Local tools**: `terraform`, `ansible`, `kubectl`, `make`, `jq`,
    `aws` CLI, plus an SSH key.
@@ -129,7 +129,7 @@ make deploy                            # = terraform apply  +  ansible-playbook
 #    resources; values are managed out-of-band, never in TF state):
 aws secretsmanager put-secret-value --secret-id gemline/env --secret-string '{
   "DATABASE_URL": "...",
-  "SUPABASE_URL": "https://<ref>.supabase.co",
+  "OIDC_ISSUER": "https://auth.example.com/application/o/gemline/",
   "ALLOWED_ORIGINS": "https://gemline.werilo.fr"
 }'
 aws secretsmanager put-secret-value --secret-id gemline/grafana-admin --secret-string '{

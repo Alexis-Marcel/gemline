@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alexis-marcel/gamekit/auth"
+	"github.com/alexis-marcel/gamekit/portal"
 	"github.com/alexis-marcel/gemline/internal/game"
 	"github.com/alexis-marcel/gemline/internal/lease"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -30,6 +31,7 @@ type Server struct {
 	bus     Bus
 	log     *slog.Logger
 	auth    auth.Authenticator
+	portal  *portal.Info
 	limiter *rateLimiter
 	// nil/empty = dev-permissive (CORS `*`, WS skips origin).
 	allowedOrigins []string
@@ -46,6 +48,7 @@ type Server struct {
 // production must set the real frontend origin(s).
 type Config struct {
 	Auth           auth.Authenticator
+	Portal         *portal.Info // nil: Gemline lives alone, no portal bar
 	AllowedOrigins []string
 
 	// ForwardTo enables gateway mode: this process runs no game logic and
@@ -74,6 +77,7 @@ func New(log *slog.Logger, store *Store, b Bus, cfg Config) (*Server, error) {
 		forwardTo:      cfg.ForwardTo,
 		resolver:       cfg.Resolver,
 		auth:           cfg.Auth,
+		portal:         cfg.Portal,
 	}
 	if srv.auth == nil {
 		srv.auth = auth.None{}

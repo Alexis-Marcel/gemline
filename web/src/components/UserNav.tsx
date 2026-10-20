@@ -33,7 +33,7 @@ export function UserNav() {
     return (
       <Link
         to="/login"
-        className="text-sm text-zinc-300 hover:text-amber-400"
+        className="whitespace-nowrap text-sm text-zinc-300 hover:text-amber-400"
       >
         Se connecter
       </Link>

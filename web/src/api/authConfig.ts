@@ -11,13 +11,22 @@ export interface AuthInfo {
   local?: { loginUrl: string; logoutUrl: string; accountUrl: string; signup: string };
 }
 
+/** The portal Gemline belongs to (gamekit/portal), absent when it lives alone. */
+export interface PortalInfo {
+  url: string;
+  name: string;
+  icon?: string;
+  profileUrl?: string;
+}
+
 export interface ServerConfig {
   auth: AuthInfo;
   /** Le compte vu par le serveur (modes proxy et local), null sinon. */
   user: { id: string; name: string } | null;
+  portal: PortalInfo | null;
 }
 
-const fallback: ServerConfig = { auth: { mode: "none", guestPlay: true }, user: null };
+const fallback: ServerConfig = { auth: { mode: "none", guestPlay: true }, user: null, portal: null };
 
 let loading: Promise<ServerConfig> | null = null;
 

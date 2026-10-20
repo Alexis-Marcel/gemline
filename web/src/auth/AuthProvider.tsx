@@ -84,6 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       guestPlay: auth?.guestPlay ?? true,
       accountUrl: local?.accountUrl ?? "",
       canSignOut: mode === "oidc" || mode === "local" || Boolean(proxy?.logoutUrl),
+      portal: config?.portal ?? null,
       signIn: (next = window.location.pathname + window.location.search) => {
         if (mode === "oidc") void signIn(next);
         else if (mode === "local" && local) window.location.href = `${local.loginUrl}?next=${encodeURIComponent(next)}`;

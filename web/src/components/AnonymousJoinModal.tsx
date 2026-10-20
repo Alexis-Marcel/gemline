@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useAuth } from "../auth/useAuth";
 
 interface AnonymousJoinModalProps {
   seatsFree: number;
@@ -16,7 +17,9 @@ export function AnonymousJoinModal({
   submitting,
   onSubmit,
 }: AnonymousJoinModalProps) {
+  const { accounts, guestPlay } = useAuth();
   const [name, setName] = useState(initialName);
+  const signInHref = `/login?next=${encodeURIComponent(window.location.pathname)}`;
   const trimmed = name.trim();
   const disabled = submitting || trimmed.length === 0;
   return (
@@ -39,29 +42,42 @@ export function AnonymousJoinModal({
               : "Plus de place — tu pourras observer la partie."}
           </p>
         </header>
-        <input
-          autoFocus
-          className="block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
-          placeholder="Ton nom"
-          value={name}
-          maxLength={32}
-          onChange={(e) => setName(e.target.value)}
-          disabled={seatsFree === 0}
-        />
-        <button
-          type="submit"
-          disabled={disabled || seatsFree === 0}
-          className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
-        >
-          {submitting ? "…" : "Rejoindre"}
-        </button>
-        <p className="text-[11px] text-zinc-500">
-          Ou{" "}
-          <a href="/login" className="text-amber-400 hover:underline">
-            connecte-toi
-          </a>{" "}
-          pour jouer sous ton nom de profil.
-        </p>
+        {!guestPlay ? (
+          <p className="text-sm text-zinc-300">
+            Il faut un compte pour jouer ici.{" "}
+            <a href={signInHref} className="text-amber-400 hover:underline">
+              Se connecter
+            </a>
+          </p>
+        ) : (
+          <>
+            <input
+              autoFocus
+              className="block w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 focus:border-amber-400 focus:outline-none"
+              placeholder="Ton nom"
+              value={name}
+              maxLength={32}
+              onChange={(e) => setName(e.target.value)}
+              disabled={seatsFree === 0}
+            />
+            <button
+              type="submit"
+              disabled={disabled || seatsFree === 0}
+              className="w-full rounded-md bg-amber-400 px-3 py-2 text-sm font-medium text-zinc-950 transition hover:bg-amber-300 disabled:opacity-50"
+            >
+              {submitting ? "…" : "Rejoindre"}
+            </button>
+            {accounts && (
+              <p className="text-[11px] text-zinc-500">
+                Ou{" "}
+                <a href={signInHref} className="text-amber-400 hover:underline">
+                  connecte-toi
+                </a>{" "}
+                pour jouer sous ton nom de profil.
+              </p>
+            )}
+          </>
+        )}
       </form>
     </div>
   );

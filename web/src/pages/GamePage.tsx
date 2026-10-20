@@ -651,7 +651,7 @@ export function GamePage() {
     // Single-viewport layout (h-dvh + overflow-hidden): the board's
     // pinch-pan wrapper competes with page scroll on phones. pb-24
     // reserves room for the fixed mobile GameBottomBar (dropped on desktop).
-    <div className="mx-auto flex h-dvh max-w-[88rem] flex-col overflow-hidden px-2 pb-24 pt-2 lg:px-4 lg:pb-4 lg:pt-4">
+    <div className="mx-auto flex h-[calc(100dvh-var(--portal-bar,0px))] max-w-[88rem] flex-col overflow-hidden px-2 pb-24 pt-2 lg:px-4 lg:pb-4 lg:pt-4">
       <header className="flex items-center justify-between">
         <Link
           to="/"

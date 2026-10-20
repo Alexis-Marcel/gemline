@@ -13,7 +13,7 @@ export function SearchingForOpponent({
 }: SearchingForOpponentProps) {
   const isMulti = maxPlayers > 2;
   return (
-    <div className="flex h-screen items-center justify-center bg-zinc-950 p-6">
+    <div className="flex h-[calc(100vh-var(--portal-bar,0px))] items-center justify-center bg-zinc-950 p-6">
       <div className="w-full max-w-sm space-y-6 rounded-xl border border-zinc-800 bg-zinc-900/60 p-6 text-center">
         <div
           aria-hidden

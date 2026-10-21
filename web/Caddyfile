@@ -1,4 +1,16 @@
 :8080 {
+    # Security headers on every response (static files and proxied API alike).
+    # Same-origin framing stays allowed: the silent OIDC renewal uses an iframe.
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Content-Security-Policy "frame-ancestors 'self'; base-uri 'self'; object-src 'none'"
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+    # HSTS only when the proxy in front received the request over HTTPS.
+    @https header X-Forwarded-Proto https
+    header @https Strict-Transport-Security "max-age=31536000"
+
     root * /srv
     encode zstd gzip
 
